@@ -64,9 +64,9 @@ resources.
    `konflux-info/konflux-public-info` and that app must be installed for the
    fixture organization. GitHub runs verify the installation at `preflight`,
    before any cluster mutation. In an interactive session, a missing
-   installation opens the app's installation page, prints the installation
-   steps, and waits for an organization administrator to approve it,
-   rechecking every 10 seconds. Failed checks are retried, and progress,
+   installation prints the installation steps, opens the app's installation
+   page automatically, and waits for an organization administrator to approve
+   it, rechecking every 10 seconds. Failed checks are retried, and progress,
    including the latest failure, is reported every 5 minutes. When the
    preflight timeout expires, the run asks whether to keep waiting. Declining,
    or a non-interactive run, fails that cluster with the installation URL. An

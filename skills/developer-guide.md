@@ -203,12 +203,14 @@ cluster that cannot onboard the fixture fails before the run creates a tenant
 namespace or touches the fixture. In an interactive session, a missing
 installation prints the installation steps, opens
 `https://github.com/apps/<slug>/installations/new`, and rechecks the
-installation every 10 seconds. Failed checks are retried, and progress,
-including the latest failure, is reported every 5 minutes. When the preflight
-timeout expires, an interactive run asks whether to keep waiting and, if
-approved, polls on the run context until the installation appears or the run
-is canceled. Declining, or a non-interactive run, fails with the installation
-URL. Installations limited to selected repositories must include the fixture,
+installation every 10 seconds. The GitHub API token is acquired earlier in the
+run; the browser page only performs the organization-owner installation
+approval. Failed checks are retried, and progress, including the latest
+failure, is reported every 5 minutes. When the preflight timeout expires, an
+interactive run asks whether to keep waiting and, if approved, polls on the run
+context until the installation appears or the run is canceled.
+Declining, or a non-interactive run, fails with the installation URL.
+Installations limited to selected repositories must include the fixture,
 and the error names the installation settings URL; when the token cannot list
 selections, preflight logs a warning and continues.
 

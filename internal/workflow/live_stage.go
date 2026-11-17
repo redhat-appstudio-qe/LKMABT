@@ -136,19 +136,22 @@ func (s *LiveStage) verifyGitHubApp(ctx context.Context) error {
 // waitForGitHubAppInstallation opens the App installation page and polls until an administrator installs it.
 func (s *LiveStage) waitForGitHubAppInstallation(ctx context.Context, checker cluster.GitHubAppChecker, required *providers.AppInstallationRequiredError) error {
 	s.notice("GitHub App %s is not installed for organization %s.", required.AppSlug, required.Owner)
-	s.notice("To install it:")
-	s.notice("  1. Sign in to GitHub as an organization owner of %s.", required.Owner)
-	s.notice("  2. Open %s", required.InstallURL)
-	s.notice("  3. Select the %s organization.", required.Owner)
-	s.notice("  4. Grant access to %s, or to all repositories.", required.Repository)
-	s.notice("  5. Return to this terminal; the harness checks every %s and continues automatically.", githubAppPollInterval)
+	s.notice("LKMABT has already acquired its GitHub API token; the browser page only approves the organization installation.")
+	s.notice("LKMABT is opening the installation page in your browser:")
+	s.notice("  %s", required.InstallURL)
+	s.notice("If it does not open, use that URL manually.")
+	s.notice("To complete the installation:")
+	s.notice("  1. Approve it in a browser session signed in as an organization owner of %s.", required.Owner)
+	s.notice("  2. Select the %s organization.", required.Owner)
+	s.notice("  3. Grant access to %s, or to all repositories.", required.Repository)
+	s.notice("  4. Return to this terminal; LKMABT checks every %s and continues automatically.", githubAppPollInterval)
 	open := s.OpenURL
 	if open == nil {
 		open = openBrowser
 	}
 	if err := open(required.InstallURL); err != nil {
 		s.notice("Could not open a browser: %v", err)
-		s.notice("Open the URL in step 2 manually.")
+		s.notice("Open the URL above manually.")
 	}
 	err := s.pollGitHubAppInstallation(ctx, checker, required)
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) || !s.Interactive || s.Prompt == nil {
