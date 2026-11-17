@@ -19,16 +19,6 @@ const (
 	ibmcloudCommandTimeout = 2 * time.Minute
 )
 
-// ibmcloudRejections are the oc whoami messages a ROKS cluster returns when the
-// IBM Cloud user has no working cluster identity.
-var ibmcloudRejections = []string{
-	"Unauthorized",
-	"must be logged in to the server",
-	"Authentication failed",
-	"Could not find user",
-	"the server has asked for the client to provide credentials",
-}
-
 // authenticateROKS verifies or writes one kubeconfig per ROKS entry, returning
 // one error per cluster that remains unusable.
 func (l Ladder) authenticateROKS(ctx context.Context, targets []clusterfile.Entry) map[string]error {
@@ -48,7 +38,7 @@ func (l Ladder) authenticateROKS(ctx context.Context, targets []clusterfile.Entr
 			if err == nil {
 				continue
 			}
-			if !isROKSRejection(strings.TrimSpace(output)) {
+			if !isCredentialRejection(strings.TrimSpace(output)) {
 				failures[target.Name] = roksVerificationFailure(target, output, err)
 				continue
 			}
@@ -128,21 +118,11 @@ func (l Ladder) loginROKSCluster(ctx context.Context, binary string, entry clust
 // roksVerificationFailure explains why a written ROKS kubeconfig is unusable.
 func roksVerificationFailure(entry clusterfile.Entry, output string, cause error) error {
 	detail := strings.TrimSpace(output)
-	if isROKSRejection(detail) {
+	if isCredentialRejection(detail) {
 		return fmt.Errorf("authentication failed: cluster %s: the API server rejected the credentials from the kubeconfig written by ibmcloud ks cluster config. If you have never opened this cluster's OpenShift web console, complete that first-time login once from the IBM Cloud console, then re-run. If you have logged in before, run ibmcloud login --sso and retry", entry.Name)
 	}
 	if detail == "" {
 		detail = cause.Error()
 	}
 	return fmt.Errorf("authentication failed: cluster %s: oc whoami failed: %s", entry.Name, detail)
-}
-
-// isROKSRejection reports whether oc whoami output rejects the cluster identity.
-func isROKSRejection(output string) bool {
-	for _, rejection := range ibmcloudRejections {
-		if strings.Contains(output, rejection) {
-			return true
-		}
-	}
-	return false
 }

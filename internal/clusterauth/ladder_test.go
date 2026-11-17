@@ -124,6 +124,24 @@ var _ = Describe("Authenticate", func() {
 		})
 	})
 
+	When("the API server cannot be reached", func() {
+		It("should report the verification failure without attempting a login", func() {
+			home := GinkgoT().TempDir()
+			c1 := defaultEntry("c1", home)
+			writeFile(c1.Kubeconfig)
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onOutput = func(CommandSpec) (string, error) {
+				return "Unable to connect to the server: dial tcp: lookup api.c1.example: no such host", errors.New("exit status 1")
+			}
+
+			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
+			Expect(failures).Should(HaveLen(1))
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("could not verify kubeconfig")))
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("no such host")))
+			Expect(fake.runs).Should(BeEmpty())
+		})
+	})
+
 	When("one default-path kubeconfig is missing", func() {
 		It("should run a single-cluster kflux login", func() {
 			home := GinkgoT().TempDir()
@@ -325,6 +343,10 @@ var _ = Describe("Authenticate", func() {
 			Expect(failures["c1"]).Should(HaveOccurred())
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("authentication failed")))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring(filepath.Join(home, ".kube", "config-c1"))))
+			// A kubeconfig that was never written is missing, not rejected; the
+			// API server never saw it.
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("no readable kubeconfig")))
+			Expect(failures["c1"]).ShouldNot(MatchError(ContainSubstring("was rejected")))
 		})
 	})
 

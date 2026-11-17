@@ -17,6 +17,17 @@ import (
 // an exec credential plugin before any API request is made.
 const verifyTimeout = time.Minute
 
+// credentialRejections are the oc whoami messages the API server returns when
+// the stored identity is expired, revoked, or unknown. They are the only
+// verification failures a login can fix; a network or toolchain error cannot.
+var credentialRejections = []string{
+	"Unauthorized",
+	"must be logged in to the server",
+	"Authentication failed",
+	"Could not find user",
+	"the server has asked for the client to provide credentials",
+}
+
 // Ladder authenticates clusters whose kubeconfig is missing or rejected, via the
 // IBM Cloud CLI for ROKS entries and kflux then oc for the rest.
 type Ladder struct {
@@ -89,34 +100,50 @@ func (l Ladder) Authenticate(ctx context.Context, entries []clusterfile.Entry) m
 	return failures
 }
 
-// authenticateLegacy proves every non-ROKS kubeconfig works, logging in through
-// kflux for default paths and oc for every path when the stored credentials are
-// rejected or missing.
+// authenticateLegacy proves every non-ROKS kubeconfig works. Only rejected or
+// missing credentials trigger a login through kflux (default paths) and
+// oc login; an unreachable API server or missing oc fails the cluster instead,
+// because no login can repair it and an interactive oc login would stall the run.
 func (l Ladder) authenticateLegacy(ctx context.Context, entries []clusterfile.Entry) map[string]error {
 	failures := make(map[string]error, len(entries))
-	unverified := make([]clusterfile.Entry, 0, len(entries))
+	unauthenticated := make([]clusterfile.Entry, 0, len(entries))
 	for _, entry := range entries {
-		if _, err := l.verifyLegacyCluster(ctx, entry); err != nil {
-			unverified = append(unverified, entry)
+		output, rejected, err := l.verifyLegacyCluster(ctx, entry)
+		switch {
+		case err == nil:
+		case rejected:
+			unauthenticated = append(unauthenticated, entry)
+		default:
+			failures[entry.Name] = verificationFailure(entry, output, err)
 		}
 	}
-	if len(unverified) == 0 {
+	if len(unauthenticated) == 0 {
 		return failures
 	}
-	if targets := defaultPathEntries(unverified, l.home()); len(targets) > 0 {
+	if targets := defaultPathEntries(unauthenticated, l.home()); len(targets) > 0 {
 		l.runKfluxLogin(ctx, targets)
 	}
-	for _, entry := range unverified {
+	for _, entry := range unauthenticated {
 		// kflux only writes default paths, so another custom path cannot have
 		// changed since the first check; it goes straight to the interactive oc login.
 		if entry.UsesDefaultKubeconfig(l.home()) {
-			if _, err := l.verifyLegacyCluster(ctx, entry); err == nil {
+			output, rejected, err := l.verifyLegacyCluster(ctx, entry)
+			if err == nil {
+				continue
+			}
+			if !rejected {
+				failures[entry.Name] = verificationFailure(entry, output, err)
 				continue
 			}
 		}
 		l.runOCLogin(ctx, entry)
-		if output, err := l.verifyLegacyCluster(ctx, entry); err != nil {
+		output, rejected, err := l.verifyLegacyCluster(ctx, entry)
+		switch {
+		case err == nil:
+		case rejected:
 			failures[entry.Name] = legacyVerificationFailure(entry, output, err)
+		default:
+			failures[entry.Name] = verificationFailure(entry, output, err)
 		}
 	}
 	return failures
@@ -134,14 +161,20 @@ func defaultPathEntries(entries []clusterfile.Entry, home string) []clusterfile.
 	return targets
 }
 
-// verifyLegacyCluster proves a non-ROKS kubeconfig works and returns oc whoami's output.
-func (l Ladder) verifyLegacyCluster(ctx context.Context, entry clusterfile.Entry) (string, error) {
+// verifyLegacyCluster proves a non-ROKS kubeconfig works and returns oc whoami's
+// output. rejected reports whether a login can replace the failing credentials;
+// it is false for errors a login cannot fix, such as an unreachable API server.
+func (l Ladder) verifyLegacyCluster(ctx context.Context, entry clusterfile.Entry) (output string, rejected bool, err error) {
 	// oc falls back to the ambient kubeconfig when the configured path is absent,
 	// so a missing file must go straight to login instead of reaching oc whoami.
 	if !readableFile(entry.Kubeconfig) {
-		return "", fmt.Errorf("no readable kubeconfig at %s", entry.Kubeconfig)
+		return "", true, fmt.Errorf("no readable kubeconfig at %s", entry.Kubeconfig)
 	}
-	return l.verifyKubeconfig(ctx, entry)
+	output, err = l.verifyKubeconfig(ctx, entry)
+	if err == nil {
+		return output, false, nil
+	}
+	return output, isCredentialRejection(strings.TrimSpace(output)), err
 }
 
 // verifyKubeconfig proves a kubeconfig works and returns oc whoami's output.
@@ -163,13 +196,35 @@ func (l Ladder) verifyKubeconfig(ctx context.Context, entry clusterfile.Entry) (
 	return output, nil
 }
 
-// legacyVerificationFailure explains why a non-ROKS kubeconfig remains unusable.
+// legacyVerificationFailure explains why rejected non-ROKS credentials remain unusable.
 func legacyVerificationFailure(entry clusterfile.Entry, output string, cause error) error {
-	detail := strings.TrimSpace(output)
-	if detail == "" {
-		detail = cause.Error()
+	if !readableFile(entry.Kubeconfig) {
+		return fmt.Errorf("authentication failed: cluster %s: no readable kubeconfig at %s after kflux and oc login", entry.Name, entry.Kubeconfig)
 	}
-	return fmt.Errorf("authentication failed: cluster %s: kubeconfig %s was rejected and could not be refreshed: %s", entry.Name, entry.Kubeconfig, detail)
+	return fmt.Errorf("authentication failed: cluster %s: kubeconfig %s was rejected and could not be refreshed: %s", entry.Name, entry.Kubeconfig, failureDetail(output, cause))
+}
+
+// verificationFailure reports a kubeconfig that could not be checked at all.
+func verificationFailure(entry clusterfile.Entry, output string, cause error) error {
+	return fmt.Errorf("authentication failed: cluster %s: could not verify kubeconfig %s: %s", entry.Name, entry.Kubeconfig, failureDetail(output, cause))
+}
+
+// failureDetail prefers oc whoami's output over the command error.
+func failureDetail(output string, cause error) string {
+	if detail := strings.TrimSpace(output); detail != "" {
+		return detail
+	}
+	return cause.Error()
+}
+
+// isCredentialRejection reports whether oc whoami output rejects the stored credentials.
+func isCredentialRejection(output string) bool {
+	for _, rejection := range credentialRejections {
+		if strings.Contains(output, rejection) {
+			return true
+		}
+	}
+	return false
 }
 
 // runKfluxLogin installs kflux when needed and runs one catalog login for the default-path clusters.
