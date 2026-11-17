@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -79,6 +80,24 @@ func (f *fakeClient) GetBranchHead(string, string) (*gl.Commit, error) {
 }
 
 var _ = Describe("GitLab provider", func() {
+	It("authenticates with a bearer token for glab OAuth tokens", func() {
+		var authorization, privateToken string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authorization = r.Header.Get("Authorization")
+			privateToken = r.Header.Get("PRIVATE-TOKEN")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":1,"path_with_namespace":"konflux-qe/dr_test_mathwizz_gl"}`))
+		}))
+		defer server.Close()
+
+		adapter, err := NewFromCredentials("oauth-token", server.URL+"/api/v4")
+		Expect(err).ShouldNot(HaveOccurred())
+		_, err = adapter.ValidateFixture(context.Background(), providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl"})
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(authorization).Should(Equal("Bearer oauth-token"))
+		Expect(privateToken).Should(BeEmpty())
+	})
+
 	It("reuses canonical project", func() {
 		client := &fakeClient{project: &gl.Project{Path: "dr_test_mathwizz_gl", PathWithNamespace: "konflux-qe/dr_test_mathwizz_gl", WebURL: CanonicalFixtureURL}}
 		got, err := New(client).ValidateFixture(context.Background(), providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl"})

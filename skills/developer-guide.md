@@ -217,7 +217,10 @@ selections, preflight logs a warning and continues.
 ### Provider Credential Lifecycle
 When `GITHUB_TOKEN` is empty, GitHub runs call `gh auth login --web` with a
 private `GH_CONFIG_DIR` and `--insecure-storage`, then read the token with
-`gh auth token`. A configured token is checked against the organization's App
+`gh auth token`. GitLab API requests use `Authorization: Bearer`, which accepts
+both the OAuth token from glab's Web login and a `GITLAB_BOT_TOKEN` access
+token; GitLab rejects OAuth tokens sent as `PRIVATE-TOKEN`. A configured
+`GITHUB_TOKEN` is checked against the organization's App
 installations; an interactive run replaces a token that cannot list them with
 the token from the existing `gh` login when it can list them, and otherwise
 with the `gh` browser login. When `GITLAB_BOT_TOKEN` is empty, GitLab runs

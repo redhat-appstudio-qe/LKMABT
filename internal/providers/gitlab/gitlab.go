@@ -101,7 +101,9 @@ func NewFromCredentials(token, apiURL string) (*Adapter, error) {
 	if strings.TrimSpace(apiURL) == "" {
 		apiURL = "https://gitlab.com/api/v4"
 	}
-	gitlabClient, err := gl.NewClient(token, gl.WithBaseURL(apiURL))
+	// Bearer auth accepts both glab's OAuth tokens (interactive login) and
+	// GITLAB_BOT_TOKEN access tokens; PRIVATE-TOKEN rejects OAuth tokens.
+	gitlabClient, err := gl.NewOAuthClient(token, gl.WithBaseURL(apiURL))
 	if err != nil {
 		return nil, err
 	}
