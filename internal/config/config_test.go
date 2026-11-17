@@ -90,13 +90,6 @@ var _ = Describe("Parse", func() {
 			err = req.Validate()
 			Expect(err).Should(MatchError(ContainSubstring("trigger timeout")))
 		})
-
-		It("requires GitLab tokens and defers GitHub tokens", func() {
-			Expect(validateProviderCredentials(ProviderGitHub, Credentials{})).Should(Succeed())
-			Expect(validateProviderCredentials(ProviderGitLab, Credentials{})).Should(MatchError(ContainSubstring("GITLAB_BOT_TOKEN")))
-			Expect(validateProviderCredentials(ProviderBoth, Credentials{GitLabToken: "token"})).Should(Succeed())
-			Expect(validateProviderCredentials(ProviderBoth, Credentials{})).Should(MatchError(ContainSubstring("GITLAB_BOT_TOKEN")))
-		})
 	})
 
 	When("the cleanup command is used", func() {
@@ -117,11 +110,15 @@ var _ = Describe("Parse", func() {
 	})
 
 	When("credentials are loaded", func() {
-		It("requires credentials for both providers", func() {
-			GinkgoT().Setenv("GITHUB_TOKEN", "github-token")
+		It("defers both provider credentials to run time", func() {
+			GinkgoT().Setenv("GITHUB_TOKEN", "")
 			GinkgoT().Setenv("GITLAB_BOT_TOKEN", "")
-			_, err := Parse([]string{"run", "both"})
-			Expect(err).Should(MatchError(ContainSubstring("GITLAB_BOT_TOKEN")))
+			for _, provider := range []string{ProviderGitHub, ProviderGitLab, ProviderBoth} {
+				got, err := Parse([]string{"run", provider})
+				Expect(err).ShouldNot(HaveOccurred(), provider)
+				Expect(got.Credentials.GitHubToken).Should(BeEmpty(), provider)
+				Expect(got.Credentials.GitLabToken).Should(BeEmpty(), provider)
+			}
 		})
 
 		It("loads credentials from env file", func() {
@@ -133,13 +130,6 @@ var _ = Describe("Parse", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(got.Credentials.GitLabToken).Should(Equal("file-token"))
 			Expect(got.Credentials.GitLabAPIURL).Should(Equal("https://gitlab.example/api/v4"))
-		})
-
-		It("should defer GitHub credentials to run time", func() {
-			GinkgoT().Setenv("GITHUB_TOKEN", "")
-			got, err := Parse([]string{"run", "github"})
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(got.Credentials.GitHubToken).Should(BeEmpty())
 		})
 	})
 

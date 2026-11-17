@@ -71,17 +71,18 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 - ROKS: `ibmcloud target` probes for an active session, `ibmcloud login --sso` runs when absent, `ibmcloud ks cluster config --cluster <ibmcloud> --endpoint <ibmcloud-endpoint>` writes the entry's kubeconfig through `KUBECONFIG`, and a second `oc whoami` verifies the result
 - Non-interactive checks are bounded (`oc whoami` 60s, `ibmcloud target`/`ks cluster config` 2m) so one stalled credential plugin fails that cluster instead of blocking the run; only `ibmcloud login --sso` stays interactive
 
-**`internal/githubauth/`** — GitHub credential acquisition
-- Runs `gh auth login --web` with an isolated `GH_CONFIG_DIR` and `--insecure-storage`
-- Keeps only a 0600 token file in a temporary directory; `RunClusters` deletes the directory after the last cluster
-- Non-interactive runs must provide `GITHUB_TOKEN` instead
+**`internal/auth/`** — Provider credential acquisition
+- Creates one run-scoped `lkmabt-auth-*` directory with 0700 credentials written as 0600 files
+- GitHub: runs `gh auth login --web` with an isolated `GH_CONFIG_DIR` and `--insecure-storage`
+- GitLab: prompts without echo for a token with `api` scope
+- `RunClusters` deletes the directory after the last cluster; non-interactive runs must provide the provider tokens
 
 **`internal/report/`** — Aggregate reports
 - Renders Markdown and HTML reports for a multi-cluster run
 
 **`internal/config/`** — Configuration parsing
 - Parses environment files and command-line arguments
-- Validates GitLab credentials and cluster context; GitHub credentials are acquired at run time
+- Validates cluster context; provider credentials are acquired at run time
 
 **`internal/workflow/`** — Core orchestration logic
 - `LiveStage` coordinates the full test workflow
@@ -202,19 +203,21 @@ cluster that cannot onboard the fixture fails before the run creates a tenant
 namespace or touches the fixture. Installations limited to selected
 repositories must include the fixture or the check fails as unverifiable.
 
-### GitHub Credential Lifecycle
+### Provider Credential Lifecycle
 When `GITHUB_TOKEN` is empty, GitHub runs call `gh auth login --web` with a
-private `GH_CONFIG_DIR` and `--insecure-storage`, read the token with
-`gh auth token`, and keep only a 0600 token file inside a temporary directory.
-The token is reused for every cluster; the temporary directory is removed when
-the run ends, including after failures and cancellations, and a removal failure
-fails the run. The login requires an interactive terminal; non-interactive runs
-must provide `GITHUB_TOKEN`, which needs the `read:org` scope and an owner who
+private `GH_CONFIG_DIR` and `--insecure-storage`, then read the token with
+`gh auth token`. When `GITLAB_BOT_TOKEN` is empty, GitLab prompts without echo
+for a token with `api` scope. Each acquired token is kept in a 0600 file inside one run-scoped
+`lkmabt-auth-*` temporary directory and reused for every cluster.
+The directory is removed when the run ends, including after failures and
+cancellations, and a removal failure fails the run. Authentication requires an
+interactive terminal; non-interactive runs must provide the tokens. A
+configured `GITHUB_TOKEN` needs the `read:org` scope and an owner who
 administers the fixture organization.
 
 ### Sequential Cluster Execution
-Clusters run one at a time in clusters-file order so one GitHub login is reused
-and only one cluster is mutated at a time. `run both` still runs GitHub and
+Clusters run one at a time in clusters-file order so run-scoped credentials are
+reused and only one cluster is mutated at a time. `run both` still runs GitHub and
 GitLab concurrently inside a cluster.
 
 ## Design Decisions

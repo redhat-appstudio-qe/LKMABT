@@ -11,17 +11,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redhat-appstudio/lkmabt/internal/auth"
 	"github.com/redhat-appstudio/lkmabt/internal/cluster"
 	"github.com/redhat-appstudio/lkmabt/internal/clusterauth"
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
-	"github.com/redhat-appstudio/lkmabt/internal/githubauth"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
 )
 
-// authenticateGitHub acquires interactive GitHub credentials; tests replace it.
-var authenticateGitHub = githubauth.Authenticate
+// Credential acquisition and destruction are replaceable in tests.
+var (
+	authenticateGitHub = auth.GitHubToken
+	authenticateGitLab = auth.GitLabToken
+	destroyCredentials = (*auth.Store).Destroy
+)
 
 type clusterRun struct {
 	Entry   clusterfile.Entry
@@ -29,7 +33,7 @@ type clusterRun struct {
 	Results []ProviderResult
 }
 
-// RunClusters authenticates every listed cluster, acquires GitHub credentials
+// RunClusters authenticates every listed cluster, acquires provider credentials
 // when needed, rejects entries that resolve to one API server, runs the clusters
 // one at a time in clusters-file order, and writes the aggregate reports.
 func RunClusters(ctx context.Context, request config.Request, runner Runner, console *Console) (runErr error) {
@@ -42,20 +46,38 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 		return err
 	}
 	defer aggregate.Log.Close()
-	if len(entries) > 0 && providerNeedsGitHub(request.Provider) && strings.TrimSpace(request.Credentials.GitHubToken) == "" {
-		if console.Interactive() {
-			console.Printf("github: authentication required; starting the gh browser login")
-		}
-		token, cleanup, err := authenticateGitHub(ctx, clusterauth.ExecRunner{Log: aggregate.Log}, console.Interactive())
+	githubTokenNeeded := providerNeedsGitHub(request.Provider) && strings.TrimSpace(request.Credentials.GitHubToken) == ""
+	gitlabTokenNeeded := providerNeedsGitLab(request.Provider) && strings.TrimSpace(request.Credentials.GitLabToken) == ""
+	if len(entries) > 0 && (githubTokenNeeded || gitlabTokenNeeded) {
+		store, err := auth.NewStore()
 		if err != nil {
 			return err
 		}
 		defer func() {
-			if cleanupErr := cleanup(); cleanupErr != nil {
-				runErr = errors.Join(runErr, cleanupErr)
+			if destroyErr := destroyCredentials(store); destroyErr != nil {
+				runErr = errors.Join(runErr, destroyErr)
 			}
 		}()
-		request.Credentials.GitHubToken = token
+		if gitlabTokenNeeded {
+			if console.Interactive() {
+				console.Printf("gitlab: authentication required")
+			}
+			token, err := authenticateGitLab(store, console.Interactive(), request.Credentials.GitLabAPIURL, console.Out)
+			if err != nil {
+				return err
+			}
+			request.Credentials.GitLabToken = token
+		}
+		if githubTokenNeeded {
+			if console.Interactive() {
+				console.Printf("github: authentication required; starting the gh browser login")
+			}
+			token, err := authenticateGitHub(ctx, clusterauth.ExecRunner{Log: aggregate.Log}, store, console.Interactive())
+			if err != nil {
+				return err
+			}
+			request.Credentials.GitHubToken = token
+		}
 	}
 	ladder := clusterauth.Ladder{Runner: clusterauth.ExecRunner{Log: aggregate.Log}, Log: aggregate.Log}
 	authFailures := ladder.Authenticate(ctx, entries)
@@ -69,6 +91,11 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 // providerNeedsGitHub reports whether the selected provider includes GitHub.
 func providerNeedsGitHub(provider string) bool {
 	return provider == config.ProviderGitHub || provider == config.ProviderBoth
+}
+
+// providerNeedsGitLab reports whether the selected provider includes GitLab.
+func providerNeedsGitLab(provider string) bool {
+	return provider == config.ProviderGitLab || provider == config.ProviderBoth
 }
 
 // serverIdentity returns a comparison key for an API server URL, so equivalent

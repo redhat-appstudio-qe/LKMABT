@@ -68,11 +68,14 @@ resources.
   repositories must include the fixture repository; when the token cannot list
   installation repositories, preflight cannot verify the selection and fails
   instead of proceeding blind.
-- GitHub credentials come from `GITHUB_TOKEN` when it is set, or from an
-  interactive `gh auth login` browser flow when it is empty. The interactive
-  flow needs the GitHub CLI on `PATH` and requests the `repo`, `read:org`, and
-  `read:user` scopes. When `GITHUB_TOKEN` is set, it needs the `read:org` scope
-  and an owner who administers the fixture organization.
+- Provider credentials come from `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` when
+  set. Leave either empty to authenticate at run time: GitHub uses
+  `gh auth login` (browser; requests `repo`, `read:org`, and `read:user`) and
+  GitLab prompts without echo for a token with `api` scope. Both run-scoped
+  tokens live in a private temporary directory, are reused for every cluster,
+  and are deleted when the last cluster finishes, including on failure. A
+  configured `GITHUB_TOKEN` needs `read:org` and an owner who administers the
+  fixture organization.
 - PaC onboarding must be complete for all three components, with current
   `.tekton` configuration available on each fixture's default branch. The
   harness waits for PaC readiness before writing trigger comments and does not
@@ -117,11 +120,12 @@ After failure, it saves and verifies required artifacts before prompting.
 ## Environment configuration
 
 Copy `.lkmabt.env.example` to `.lkmabt.env`. Keep the copy local.
-Set `GITLAB_BOT_TOKEN` for GitLab runs. GitHub runs use `GITHUB_TOKEN` when it
-is set; leave it empty to authenticate through the `gh` browser flow. The
-interactive token is written to a private file in a temporary directory, reused
-for every cluster, and deleted when the last cluster finishes, including on
-failure. Set `GITLAB_API_URL` when needed. Cluster selection lives in
+`GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` are optional. Leave either empty to
+authenticate at run time: GitHub opens the `gh` browser flow; GitLab prompts
+without echo for a token with `api` scope. Both run-scoped tokens are written to
+a private temporary directory (`0600` files), reused for every cluster, and
+deleted when the last cluster finishes, including on failure. Set
+`GITLAB_API_URL` when needed. Cluster selection lives in
 `.lkmabt-clusters.yaml` (schema in `.lkmabt-clusters.yaml.example`).
 
 The parser reads `KEY=VALUE` lines. It does not execute the environment file.

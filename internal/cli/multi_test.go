@@ -15,6 +15,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/redhat-appstudio/lkmabt/internal/auth"
 	"github.com/redhat-appstudio/lkmabt/internal/clusterauth"
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
@@ -98,29 +99,47 @@ func (r *gatedRunner) Run(ctx context.Context, req config.Request, log RunLog) (
 }
 
 type githubAuthStub struct {
-	token      string
-	err        error
-	cleanupErr error
-	calls      int
-	cleanups   int
+	token string
+	err   error
+	calls int
 }
 
-// authenticate records the call and returns the configured token and cleanup.
-func (s *githubAuthStub) authenticate(_ context.Context, _ clusterauth.CommandRunner, _ bool) (string, func() error, error) {
+// authenticate records the call and returns the configured token or error.
+func (s *githubAuthStub) authenticate(_ context.Context, _ clusterauth.CommandRunner, _ *auth.Store, _ bool) (string, error) {
 	s.calls++
-	return s.token, func() error {
-		s.cleanups++
-		return s.cleanupErr
-	}, s.err
+	return s.token, s.err
 }
 
-var defaultGitHubAuth *githubAuthStub
+type gitlabAuthStub struct {
+	token  string
+	err    error
+	calls  int
+	apiURL string
+}
+
+// authenticate records the call and returns the configured token or error.
+func (s *gitlabAuthStub) authenticate(_ *auth.Store, _ bool, apiURL string, _ io.Writer) (string, error) {
+	s.calls++
+	s.apiURL = apiURL
+	return s.token, s.err
+}
+
+var (
+	defaultGitHubAuth *githubAuthStub
+	defaultGitLabAuth *gitlabAuthStub
+)
 
 var _ = BeforeEach(func() {
 	defaultGitHubAuth = &githubAuthStub{token: "test-github-token"}
-	original := authenticateGitHub
+	defaultGitLabAuth = &gitlabAuthStub{token: "test-gitlab-token"}
+	originalGitHub, originalGitLab, originalDestroy := authenticateGitHub, authenticateGitLab, destroyCredentials
 	authenticateGitHub = defaultGitHubAuth.authenticate
-	DeferCleanup(func() { authenticateGitHub = original })
+	authenticateGitLab = defaultGitLabAuth.authenticate
+	DeferCleanup(func() {
+		authenticateGitHub = originalGitHub
+		authenticateGitLab = originalGitLab
+		destroyCredentials = originalDestroy
+	})
 })
 
 // writeClustersFile writes a clusters file with entries and returns its path.
@@ -625,19 +644,21 @@ var _ = Describe("RunClusters under the aggregate layout", func() {
 	})
 })
 
-var _ = Describe("RunClusters GitHub authentication", func() {
+var _ = Describe("RunClusters credential authentication", func() {
 	When("no GitHub token is configured", func() {
 		It("should authenticate once, reuse the token, and delete the credentials", func() {
 			request, runner := runClustersFixture(2)
+			tempRoot := credentialTempRoot()
 
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
 
 			Expect(defaultGitHubAuth.calls).Should(Equal(1))
-			Expect(defaultGitHubAuth.cleanups).Should(Equal(1))
+			Expect(defaultGitLabAuth.calls).Should(Equal(0))
 			Expect(runner.requests).Should(HaveLen(2))
 			for _, runRequest := range runner.requests {
 				Expect(runRequest.Credentials.GitHubToken).Should(Equal("test-github-token"))
 			}
+			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
 		})
 	})
 
@@ -654,48 +675,92 @@ var _ = Describe("RunClusters GitHub authentication", func() {
 		})
 	})
 
-	When("the provider is GitLab", func() {
-		It("should not authenticate to GitHub", func() {
+	When("the provider is GitLab without a token", func() {
+		It("should prompt once, reuse the token, and delete the credentials", func() {
 			request, runner := runClustersFixture(1)
 			request.Provider = config.ProviderGitLab
+			request.Credentials.GitLabAPIURL = "https://gitlab.example/api/v4"
+			tempRoot := credentialTempRoot()
 
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
 
+			Expect(defaultGitLabAuth.calls).Should(Equal(1))
+			Expect(defaultGitLabAuth.apiURL).Should(Equal("https://gitlab.example/api/v4"))
 			Expect(defaultGitHubAuth.calls).Should(Equal(0))
+			Expect(runner.requests).Should(HaveLen(1))
+			Expect(runner.requests[0].Credentials.GitLabToken).Should(Equal("test-gitlab-token"))
+			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
 		})
 	})
 
-	When("both providers are selected", func() {
-		It("should authenticate once and reuse the token for both", func() {
+	When("a GitLab token is configured", func() {
+		It("should not prompt for a token", func() {
+			request, runner := runClustersFixture(1)
+			request.Provider = config.ProviderGitLab
+			request.Credentials.GitLabToken = "configured-gitlab-token"
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
+
+			Expect(defaultGitLabAuth.calls).Should(Equal(0))
+			Expect(runner.requests[0].Credentials.GitLabToken).Should(Equal("configured-gitlab-token"))
+		})
+	})
+
+	When("both providers are selected without tokens", func() {
+		It("should authenticate both once and reuse the tokens", func() {
 			request, runner := runClustersFixture(1)
 			request.Provider = config.ProviderBoth
+			tempRoot := credentialTempRoot()
 
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
 
 			Expect(defaultGitHubAuth.calls).Should(Equal(1))
-			Expect(defaultGitHubAuth.cleanups).Should(Equal(1))
+			Expect(defaultGitLabAuth.calls).Should(Equal(1))
 			Expect(runner.requests).Should(HaveLen(2))
 			for _, runRequest := range runner.requests {
 				Expect(runRequest.Credentials.GitHubToken).Should(Equal("test-github-token"))
+				Expect(runRequest.Credentials.GitLabToken).Should(Equal("test-gitlab-token"))
 			}
+			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
 		})
 	})
 
-	When("authentication fails", func() {
+	When("GitHub authentication fails", func() {
 		It("should stop before running any cluster", func() {
 			request, runner := runClustersFixture(1)
+			tempRoot := credentialTempRoot()
 			defaultGitHubAuth.err = errors.New("browser login denied")
 
 			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
 			Expect(err).Should(MatchError(ContainSubstring("browser login denied")))
 			Expect(runner.requests).Should(BeEmpty())
+			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
+		})
+	})
+
+	When("GitLab authentication fails", func() {
+		It("should stop before running any cluster", func() {
+			request, runner := runClustersFixture(1)
+			request.Provider = config.ProviderGitLab
+			tempRoot := credentialTempRoot()
+			defaultGitLabAuth.err = errors.New("token entry cancelled")
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
+			Expect(err).Should(MatchError(ContainSubstring("token entry cancelled")))
+			Expect(runner.requests).Should(BeEmpty())
+			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
 		})
 	})
 
 	When("deleting the credentials fails", func() {
 		It("should fail the run even when every cluster passes", func() {
 			request, runner := runClustersFixture(1)
-			defaultGitHubAuth.cleanupErr = errors.New("temporary credentials are still present")
+			original := destroyCredentials
+			destroyCredentials = func(store *auth.Store) error {
+				Expect(store.Destroy()).Should(Succeed())
+				return errors.New("temporary credentials are still present")
+			}
+			DeferCleanup(func() { destroyCredentials = original })
 
 			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
 			Expect(err).Should(MatchError(ContainSubstring("temporary credentials are still present")))
@@ -704,7 +769,14 @@ var _ = Describe("RunClusters GitHub authentication", func() {
 	})
 })
 
-// runClustersFixture builds a GitHub run over clusterCount stubbed clusters.
+// credentialTempRoot redirects temporary credential files into an observable directory.
+func credentialTempRoot() string {
+	tempRoot := GinkgoT().TempDir()
+	GinkgoT().Setenv("TMPDIR", tempRoot)
+	return tempRoot
+}
+
+// runClustersFixture builds a run over clusterCount stubbed clusters.
 func runClustersFixture(clusterCount int) (config.Request, *artifactWritingRunner) {
 	dir := GinkgoT().TempDir()
 	GinkgoT().Setenv("HOME", GinkgoT().TempDir())

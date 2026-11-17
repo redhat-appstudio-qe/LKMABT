@@ -1,11 +1,10 @@
-package githubauth
+package auth
 
 import (
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -47,85 +46,74 @@ func (f *fakeRunner) Stdout(_ context.Context, spec clusterauth.CommandSpec) (st
 	return f.stdout, f.stdoutErr
 }
 
-// authDirectory extracts the temporary credential directory from a recorded spec.
-func authDirectory(spec clusterauth.CommandSpec) string {
-	for _, entry := range spec.Env {
-		if value, ok := strings.CutPrefix(entry, "GH_CONFIG_DIR="); ok {
-			return filepath.Dir(value)
-		}
-	}
-	return ""
-}
-
-var _ = Describe("Authenticate", func() {
+var _ = Describe("GitHubToken", func() {
 	var (
 		runner   *fakeRunner
+		store    *Store
 		tempRoot string
 	)
 	BeforeEach(func() {
 		runner = &fakeRunner{stdout: "gho_token\n"}
 		tempRoot = GinkgoT().TempDir()
 		GinkgoT().Setenv("TMPDIR", tempRoot)
+		var err error
+		store, err = NewStore()
+		Expect(err).ShouldNot(HaveOccurred())
+		DeferCleanup(func() { _ = store.Destroy() })
 	})
 
 	When("the browser login succeeds", func() {
 		It("should return the token and keep only a private token file", func() {
-			token, cleanup, err := Authenticate(context.Background(), runner, true)
+			token, err := GitHubToken(context.Background(), runner, store, true)
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(token).Should(Equal("gho_token"))
 			Expect(runner.runSpecs).Should(HaveLen(1))
 			Expect(runner.runSpecs[0].Args).Should(ContainElements("auth", "login", "--hostname", "github.com", "--web", "--insecure-storage", "--scopes", "repo,read:org,read:user"))
 			Expect(runner.runSpecs[0].ClearEnv).Should(ContainElements("GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"))
 
-			directory := authDirectory(runner.runSpecs[0])
-			Expect(directory).ShouldNot(BeEmpty())
-			tokenPath := filepath.Join(directory, tokenFilename)
+			tokenPath := filepath.Join(store.Directory(), githubTokenFilename)
 			info, statErr := os.Stat(tokenPath)
 			Expect(statErr).ShouldNot(HaveOccurred())
-			Expect(info.Mode().Perm()).Should(Equal(os.FileMode(0o600)))
+			Expect(info.Mode().Perm() & 0o077).Should(BeZero())
 			content, readErr := os.ReadFile(tokenPath)
 			Expect(readErr).ShouldNot(HaveOccurred())
 			Expect(string(content)).Should(Equal("gho_token"))
-			Expect(filepath.Join(directory, configSubdir)).ShouldNot(BeADirectory())
+			Expect(filepath.Join(store.Directory(), ghConfigSubdir)).ShouldNot(BeADirectory())
 
 			Expect(runner.stdoutSpecs).Should(HaveLen(1))
 			Expect(runner.stdoutSpecs[0].Args).Should(Equal([]string{"auth", "token", "--hostname", "github.com"}))
-			Expect(authDirectory(runner.stdoutSpecs[0])).Should(Equal(directory))
+			Expect(runner.stdoutSpecs[0].Env).Should(Equal(runner.runSpecs[0].Env))
 
-			Expect(cleanup()).Should(Succeed())
-			Expect(directory).ShouldNot(BeADirectory())
+			Expect(store.Destroy()).Should(Succeed())
 			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
-			Expect(cleanup()).Should(Succeed())
 		})
 	})
 
 	When("the login fails", func() {
-		It("should remove the temporary credentials", func() {
+		It("should return the error and remove the gh configuration", func() {
 			runner.runErr = errors.New("login denied")
 
-			_, _, err := Authenticate(context.Background(), runner, true)
+			_, err := GitHubToken(context.Background(), runner, store, true)
 			Expect(err).Should(MatchError(ContainSubstring("authenticate to GitHub")))
-			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
+			Expect(filepath.Join(store.Directory(), ghConfigSubdir)).ShouldNot(BeADirectory())
 		})
 	})
 
 	When("the token cannot be read", func() {
-		It("should remove the temporary credentials", func() {
+		It("should return the error", func() {
 			runner.stdoutErr = errors.New("token denied")
 
-			_, _, err := Authenticate(context.Background(), runner, true)
+			_, err := GitHubToken(context.Background(), runner, store, true)
 			Expect(err).Should(MatchError(ContainSubstring("read the GitHub token")))
-			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
 		})
 	})
 
 	When("the token is empty", func() {
-		It("should remove the temporary credentials", func() {
+		It("should fail", func() {
 			runner.stdout = " \n"
 
-			_, _, err := Authenticate(context.Background(), runner, true)
+			_, err := GitHubToken(context.Background(), runner, store, true)
 			Expect(err).Should(MatchError(ContainSubstring("empty token")))
-			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
 		})
 	})
 
@@ -133,24 +121,30 @@ var _ = Describe("Authenticate", func() {
 		It("should fail before creating credentials", func() {
 			runner.lookPathErr = errors.New("not found")
 
-			_, _, err := Authenticate(context.Background(), runner, true)
+			_, err := GitHubToken(context.Background(), runner, store, true)
 			Expect(err).Should(MatchError(ContainSubstring("GitHub CLI is required")))
 			Expect(runner.runSpecs).Should(BeEmpty())
-			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
 		})
 	})
 
 	When("the session is not interactive", func() {
 		It("should explain the token alternative", func() {
-			_, _, err := Authenticate(context.Background(), runner, false)
+			_, err := GitHubToken(context.Background(), runner, store, false)
 			Expect(err).Should(MatchError(ContainSubstring("set GITHUB_TOKEN")))
 			Expect(runner.runSpecs).Should(BeEmpty())
 		})
 	})
 
+	When("no credential store is supplied", func() {
+		It("should fail", func() {
+			_, err := GitHubToken(context.Background(), runner, nil, true)
+			Expect(err).Should(MatchError("credential store is required"))
+		})
+	})
+
 	When("no command runner is supplied", func() {
 		It("should fail", func() {
-			_, _, err := Authenticate(context.Background(), nil, true)
+			_, err := GitHubToken(context.Background(), nil, store, true)
 			Expect(err).Should(MatchError("command runner is required"))
 		})
 	})

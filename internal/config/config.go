@@ -243,23 +243,8 @@ func (r Request) Validate() error {
 				return fmt.Errorf("%s timeout must be positive", timeout.name)
 			}
 		}
-		if err := validateProviderCredentials(r.Provider, r.Credentials); err != nil {
-			return err
-		}
 	default:
 		return fmt.Errorf("unsupported command %q", r.Command)
-	}
-	return nil
-}
-
-// validateProviderCredentials reports missing credentials that cannot be acquired interactively.
-// GitHub credentials may come from the gh browser login at run time; GitLab has no such flow.
-func validateProviderCredentials(provider string, credentials Credentials) error {
-	if provider != ProviderGitLab && provider != ProviderBoth {
-		return nil
-	}
-	if strings.TrimSpace(credentials.GitLabToken) == "" {
-		return fmt.Errorf("%s credentials missing: GITLAB_BOT_TOKEN; set it in the environment or pass --env-file", provider)
 	}
 	return nil
 }
