@@ -23,6 +23,18 @@ The harness never creates, forks, or deletes repositories. It reuses fixed fixtu
 
 **Qodo**: Not onboarded. Do not invoke Qodo skills (`qodo-review`, `qodo-get-rules`, etc.) for this repository.
 
+## Branch Discipline
+
+Create a dedicated branch before the first file edit:
+
+```bash
+git switch -c <type>/<slug>   # e.g. fix/kflux-catalog-name
+```
+
+Never edit or commit on `main`, and never reuse another workstream's branch without
+asking. Uncommitted work on a shared branch hides whose changes are whose and
+blocks a clean PR diff.
+
 ## Commands
 
 ### Building
