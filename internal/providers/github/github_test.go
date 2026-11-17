@@ -174,6 +174,7 @@ var _ = Describe("VerifyGitHubAppInstallation", func() {
 
 			err := New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")
 			Expect(err).Should(MatchError(ContainSubstring("cannot be verified")))
+			Expect(errors.Is(err, providers.ErrUnverifiable)).Should(BeTrue())
 		})
 	})
 

@@ -35,6 +35,9 @@ type Credentials struct {
 	GitHubToken  string
 	GitLabToken  string
 	GitLabAPIURL string
+	// GitLabTokenEphemeral marks a token acquired for this run only. Its SCM
+	// Secret is removed after the run.
+	GitLabTokenEphemeral bool
 }
 
 type Timeouts struct {

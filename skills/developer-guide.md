@@ -74,7 +74,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/auth/`** — Provider credential acquisition
 - Creates one run-scoped `lkmabt-auth-*` directory with 0700 credentials written as 0600 files
 - GitHub: runs `gh auth login --web` with an isolated `GH_CONFIG_DIR` and `--insecure-storage`
-- GitLab: runs `glab auth login` (choose Web) with an isolated `GLAB_CONFIG_DIR`
+- GitLab: runs `glab auth login` (choose Web) with an isolated `GLAB_CONFIG_DIR`, keeps that directory for OAuth refresh, and deletes the ephemeral SCM Secret during finalization
 - `RunClusters` deletes the directory after the last cluster; non-interactive runs must provide the provider tokens
 
 **`internal/report/`** — Aggregate reports
@@ -201,15 +201,19 @@ harness reads that app from `konflux-info/konflux-public-info` and verifies
 during `preflight` that the app is installed for the fixture organization, so a
 cluster that cannot onboard the fixture fails before the run creates a tenant
 namespace or touches the fixture. Installations limited to selected
-repositories must include the fixture or the check fails as unverifiable.
+repositories must include the fixture; when the token cannot list selections,
+preflight logs a warning and continues.
 
 ### Provider Credential Lifecycle
 When `GITHUB_TOKEN` is empty, GitHub runs call `gh auth login --web` with a
 private `GH_CONFIG_DIR` and `--insecure-storage`, then read the token with
 `gh auth token`. When `GITLAB_BOT_TOKEN` is empty, GitLab runs `glab auth login`
 (choose Web) with a private `GLAB_CONFIG_DIR`, then reads the token with
-`glab config get token --host`. Each acquired token is kept in a 0600 file
-inside one run-scoped `lkmabt-auth-*` temporary directory and reused for every cluster.
+`glab config get token --host`; the glab directory stays in the store so
+`glab api user` can refresh the OAuth token before each cluster. Each acquired
+token is kept in a 0600 file inside one run-scoped `lkmabt-auth-*` temporary
+directory and reused for every cluster. The ephemeral GitLab token is also
+written to the tenant SCM Secret for PaC, and finalization deletes that Secret.
 The directory is removed when the run ends, including after failures and
 cancellations, and a removal failure fails the run. Authentication requires an
 interactive terminal; non-interactive runs must provide the tokens. A

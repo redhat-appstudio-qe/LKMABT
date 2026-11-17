@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/base64"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -92,7 +93,7 @@ var _ = Describe("FixtureService", func() {
 			Expect(err).NotTo(HaveOccurred())
 		}
 
-		secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), gitLabCredentialSecretName, metav1.GetOptions{})
+		secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})
 		if err != nil {
 			Expect(err).NotTo(HaveOccurred())
 		}
@@ -108,6 +109,46 @@ var _ = Describe("FixtureService", func() {
 		}
 		Expect(found).To(BeTrue())
 		Expect(password).To(Equal("token"))
+	})
+
+	It("updates the run-scoped GitLab SCM Secret for an ephemeral token", func() {
+		client := fixtureTestClient(
+			&unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "v1", "kind": "Secret",
+				"metadata": map[string]any{"name": "existing-gitlab-secret", "namespace": "tenant", "labels": map[string]any{scmCredentialsLabel: "scm", scmHostnameLabel: "gitlab.com"}},
+				"type":     "kubernetes.io/basic-auth", "data": map[string]any{"password": "existing-token"},
+			}},
+			&unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "v1", "kind": "Secret",
+				"metadata": map[string]any{"name": GitLabCredentialSecretName, "namespace": "tenant", "labels": map[string]any{scmCredentialsLabel: "scm", scmHostnameLabel: "gitlab.com"}},
+				"type":     "kubernetes.io/basic-auth", "data": map[string]any{"password": "old-token"},
+			}},
+		)
+		spec := testFixtureSpec("gitlab", "new-token")
+		spec.GitLabTokenEphemeral = true
+
+		if _, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), spec); err != nil {
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})
+		if err != nil {
+			Expect(err).NotTo(HaveOccurred())
+		}
+		password, found, err := unstructured.NestedString(secret.Object, "data", "password")
+		if err != nil {
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(found).To(BeTrue())
+		Expect(password).To(Equal(base64.StdEncoding.EncodeToString([]byte("new-token"))))
+		Expect(secret.GetLabels()).To(SatisfyAll(HaveKeyWithValue(scmCredentialsLabel, "scm"), HaveKeyWithValue(scmHostnameLabel, "gitlab.com")))
+
+		other, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), "existing-gitlab-secret", metav1.GetOptions{})
+		if err != nil {
+			Expect(err).NotTo(HaveOccurred())
+		}
+		otherPassword, _, _ := unstructured.NestedString(other.Object, "data", "password")
+		Expect(otherPassword).To(Equal("existing-token"))
 	})
 
 	It("reuses existing GitLab SCM Secret", func() {
@@ -130,7 +171,7 @@ var _ = Describe("FixtureService", func() {
 			Expect(err).NotTo(HaveOccurred())
 		}
 
-		if _, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), gitLabCredentialSecretName, metav1.GetOptions{}); err == nil {
+		if _, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{}); err == nil {
 			Expect(err).To(HaveOccurred())
 		}
 		secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), "existing-gitlab-secret", metav1.GetOptions{})
@@ -164,7 +205,7 @@ var _ = Describe("FixtureService", func() {
 		if _, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), "pipelines-as-code-secret", metav1.GetOptions{}); err != nil {
 			Expect(err).NotTo(HaveOccurred())
 		}
-		_, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), gitLabCredentialSecretName, metav1.GetOptions{})
+		_, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 	})
 

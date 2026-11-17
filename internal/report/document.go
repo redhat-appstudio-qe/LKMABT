@@ -10,6 +10,9 @@ import (
 // StageAuthentication labels rows that never reached a cluster because the auth ladder failed.
 const StageAuthentication = "authentication"
 
+// StageCleanup labels run-level credential cleanup failures.
+const StageCleanup = "cleanup"
+
 // Link is one artifact hyperlink in a report row.
 type Link struct {
 	Label  string

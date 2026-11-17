@@ -23,6 +23,8 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/providers/gitlab"
 	"github.com/redhat-appstudio/lkmabt/internal/workflow"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 )
 
 // LiveRunner executes provider workflows and cleanup against live cluster services.
@@ -247,6 +249,11 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 		}
 		return fmt.Errorf("tenant namespace %s is not owned by run %s", namespace, manifest.RunID)
 	}
+	if manifest.Fixture.EphemeralGitLabAuth {
+		if err := deleteGitLabCredentialSecret(ctx, l.Namespace.Dynamic, namespace); err != nil {
+			return err
+		}
+	}
 	if runErr != nil {
 		sources := l.Sources
 		if sources == nil && l.Namespace.Dynamic != nil {
@@ -288,6 +295,21 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 		return err
 	}
 	return l.Namespace.WaitDeleted(ctx, namespace)
+}
+
+// deleteGitLabCredentialSecret removes the run-scoped GitLab SCM Secret.
+func deleteGitLabCredentialSecret(ctx context.Context, client dynamic.Interface, namespace string) error {
+	if client == nil {
+		return fmt.Errorf("dynamic client is required to delete the ephemeral GitLab SCM Secret")
+	}
+	err := client.Resource(cluster.SecretGVR).Namespace(namespace).Delete(ctx, cluster.GitLabCredentialSecretName, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("delete ephemeral GitLab SCM Secret: %w", err)
+	}
+	return nil
 }
 
 // logWriter returns the lifecycle log, or a discard writer when none is configured.

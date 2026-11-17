@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -29,9 +30,19 @@ func (f *fakeRunner) LookPath(string) (string, error) {
 	return "/usr/bin/gh", nil
 }
 
-// Run records the login spec and returns the configured error.
+// Run records the login spec, simulates glab creating its config directory, and
+// returns the configured error.
 func (f *fakeRunner) Run(_ context.Context, spec clusterauth.CommandSpec) error {
 	f.runSpecs = append(f.runSpecs, spec)
+	if spec.Name == "glab" && len(spec.Args) > 0 && spec.Args[0] == "auth" {
+		for _, entry := range spec.Env {
+			if value, ok := strings.CutPrefix(entry, "GLAB_CONFIG_DIR="); ok {
+				if err := os.MkdirAll(value, 0o700); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	return f.runErr
 }
 

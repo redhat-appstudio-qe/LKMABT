@@ -124,20 +124,36 @@ func (s *gitlabAuthStub) authenticate(_ context.Context, _ clusterauth.CommandRu
 	return s.token, s.err
 }
 
+type gitlabRefreshStub struct {
+	token string
+	err   error
+	calls int
+}
+
+// refresh records the call and returns the configured token or error.
+func (s *gitlabRefreshStub) refresh(_ context.Context, _ clusterauth.CommandRunner, _ *auth.Store, _ string) (string, error) {
+	s.calls++
+	return s.token, s.err
+}
+
 var (
-	defaultGitHubAuth *githubAuthStub
-	defaultGitLabAuth *gitlabAuthStub
+	defaultGitHubAuth  *githubAuthStub
+	defaultGitLabAuth  *gitlabAuthStub
+	defaultGitLabToken *gitlabRefreshStub
 )
 
 var _ = BeforeEach(func() {
 	defaultGitHubAuth = &githubAuthStub{token: "test-github-token"}
 	defaultGitLabAuth = &gitlabAuthStub{token: "test-gitlab-token"}
-	originalGitHub, originalGitLab, originalDestroy := authenticateGitHub, authenticateGitLab, destroyCredentials
+	defaultGitLabToken = &gitlabRefreshStub{token: "test-gitlab-token"}
+	originalGitHub, originalGitLab, originalRefresh, originalDestroy := authenticateGitHub, authenticateGitLab, refreshGitLabToken, destroyCredentials
 	authenticateGitHub = defaultGitHubAuth.authenticate
 	authenticateGitLab = defaultGitLabAuth.authenticate
+	refreshGitLabToken = defaultGitLabToken.refresh
 	DeferCleanup(func() {
 		authenticateGitHub = originalGitHub
 		authenticateGitLab = originalGitLab
+		refreshGitLabToken = originalRefresh
 		destroyCredentials = originalDestroy
 	})
 })
@@ -228,7 +244,7 @@ var _ = Describe("scheduleClusters", func() {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				runs = scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
+				runs = scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console, nil)
 			}()
 
 			Eventually(runner.started, time.Second).Should(Receive())
@@ -261,7 +277,7 @@ var _ = Describe("scheduleClusters", func() {
 			console := &Console{Out: &bytes.Buffer{}}
 			aggregate := &aggregateRun{Directory: GinkgoT().TempDir()}
 
-			runs := scheduleClusters(context.Background(), request, entries, authFailures, aggregate, runner, console)
+			runs := scheduleClusters(context.Background(), request, entries, authFailures, aggregate, runner, console, nil)
 
 			Expect(runs[1].AuthErr).ShouldNot(BeNil())
 			Expect(runs[1].Results).Should(BeEmpty())
@@ -284,7 +300,7 @@ var _ = Describe("scheduleClusters", func() {
 			console := &Console{Out: &bytes.Buffer{}}
 			aggregate := &aggregateRun{Directory: GinkgoT().TempDir()}
 
-			runs := scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
+			runs := scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console, nil)
 			Expect(runs).Should(HaveLen(1))
 
 			output := console.Out.(*bytes.Buffer).String()
@@ -417,7 +433,7 @@ var _ = Describe("finishAggregateRun", func() {
 			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted}}}}
 			console := &Console{Out: &bytes.Buffer{}}
 
-			Expect(finishAggregateRun(aggregate, request, runs, console)).Should(Succeed())
+			Expect(finishAggregateRun(aggregate, request, runs, console, nil)).Should(Succeed())
 
 			for _, name := range []string{"report.md", "report.html"} {
 				info, statErr := os.Stat(filepath.Join(aggregate.Directory, name))
@@ -440,7 +456,7 @@ var _ = Describe("finishAggregateRun", func() {
 			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Err: errors.New("build failed")}}}}
 			console := &Console{Out: io.Discard}
 
-			err = finishAggregateRun(aggregate, request, runs, console)
+			err = finishAggregateRun(aggregate, request, runs, console, nil)
 			Expect(err).Should(MatchError(ContainSubstring("cluster c1 github run: build failed")))
 			_, statErr := os.Stat(filepath.Join(aggregate.Directory, "report.md"))
 			Expect(statErr).ShouldNot(HaveOccurred())
@@ -654,6 +670,7 @@ var _ = Describe("RunClusters credential authentication", func() {
 
 			Expect(defaultGitHubAuth.calls).Should(Equal(1))
 			Expect(defaultGitLabAuth.calls).Should(Equal(0))
+			Expect(defaultGitLabToken.calls).Should(Equal(0))
 			Expect(runner.requests).Should(HaveLen(2))
 			for _, runRequest := range runner.requests {
 				Expect(runRequest.Credentials.GitHubToken).Should(Equal("test-github-token"))
@@ -687,8 +704,10 @@ var _ = Describe("RunClusters credential authentication", func() {
 			Expect(defaultGitLabAuth.calls).Should(Equal(1))
 			Expect(defaultGitLabAuth.apiURL).Should(Equal("https://gitlab.example/api/v4"))
 			Expect(defaultGitHubAuth.calls).Should(Equal(0))
+			Expect(defaultGitLabToken.calls).Should(Equal(1))
 			Expect(runner.requests).Should(HaveLen(1))
 			Expect(runner.requests[0].Credentials.GitLabToken).Should(Equal("test-gitlab-token"))
+			Expect(runner.requests[0].Credentials.GitLabTokenEphemeral).Should(BeTrue())
 			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
 		})
 	})
@@ -702,7 +721,9 @@ var _ = Describe("RunClusters credential authentication", func() {
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
 
 			Expect(defaultGitLabAuth.calls).Should(Equal(0))
+			Expect(defaultGitLabToken.calls).Should(Equal(0))
 			Expect(runner.requests[0].Credentials.GitLabToken).Should(Equal("configured-gitlab-token"))
+			Expect(runner.requests[0].Credentials.GitLabTokenEphemeral).Should(BeFalse())
 		})
 	})
 
@@ -716,6 +737,7 @@ var _ = Describe("RunClusters credential authentication", func() {
 
 			Expect(defaultGitHubAuth.calls).Should(Equal(1))
 			Expect(defaultGitLabAuth.calls).Should(Equal(1))
+			Expect(defaultGitLabToken.calls).Should(Equal(1))
 			Expect(runner.requests).Should(HaveLen(2))
 			for _, runRequest := range runner.requests {
 				Expect(runRequest.Credentials.GitHubToken).Should(Equal("test-github-token"))
@@ -735,6 +757,7 @@ var _ = Describe("RunClusters credential authentication", func() {
 			Expect(err).Should(MatchError(ContainSubstring("browser login denied")))
 			Expect(runner.requests).Should(BeEmpty())
 			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
+			Expect(os.ReadDir(request.StateDir)).Should(BeEmpty())
 		})
 	})
 
@@ -748,12 +771,33 @@ var _ = Describe("RunClusters credential authentication", func() {
 			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
 			Expect(err).Should(MatchError(ContainSubstring("token entry cancelled")))
 			Expect(runner.requests).Should(BeEmpty())
+			Expect(defaultGitLabToken.calls).Should(Equal(0))
 			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
+			Expect(os.ReadDir(request.StateDir)).Should(BeEmpty())
+		})
+	})
+
+	When("the GitLab token refresh fails", func() {
+		It("should fail the cluster at authentication and still report", func() {
+			request, runner := runClustersFixture(2)
+			request.Provider = config.ProviderGitLab
+			tempRoot := credentialTempRoot()
+			defaultGitLabToken.err = errors.New("refresh denied")
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
+			Expect(err).Should(MatchError(ContainSubstring("refresh denied")))
+			Expect(defaultGitLabToken.calls).Should(Equal(2))
+			Expect(runner.requests).Should(BeEmpty())
+			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
+			aggregateDirectory := singleAggregateDirectory(request.StateDir)
+			markdown := readFile(filepath.Join(aggregateDirectory, "report.md"))
+			Expect(markdown).Should(ContainSubstring("| c1 | gitlab | failed | authentication | refresh denied"))
+			Expect(markdown).Should(ContainSubstring("| c2 | gitlab | failed | authentication | refresh denied"))
 		})
 	})
 
 	When("deleting the credentials fails", func() {
-		It("should fail the run even when every cluster passes", func() {
+		It("should fail the run and the report even when every cluster passes", func() {
 			request, runner := runClustersFixture(1)
 			original := destroyCredentials
 			destroyCredentials = func(store *auth.Store) error {
@@ -765,6 +809,10 @@ var _ = Describe("RunClusters credential authentication", func() {
 			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
 			Expect(err).Should(MatchError(ContainSubstring("temporary credentials are still present")))
 			Expect(runner.requests).Should(HaveLen(1))
+			aggregateDirectory := singleAggregateDirectory(request.StateDir)
+			markdown := readFile(filepath.Join(aggregateDirectory, "report.md"))
+			Expect(markdown).Should(ContainSubstring("| credentials | auth | failed | cleanup | temporary credentials are still present |"))
+			Expect(markdown).Should(ContainSubstring("- Result: **failed**"))
 		})
 	})
 })

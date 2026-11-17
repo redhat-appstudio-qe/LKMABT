@@ -314,6 +314,22 @@ var _ = Describe("LiveStage", func() {
 			})
 		})
 
+		When("the provider cannot verify selected repositories", func() {
+			It("should warn and continue", func() {
+				provider := &githubAppProviderStub{err: fmt.Errorf("%w: selected repositories", providers.ErrUnverifiable)}
+				log := &bytes.Buffer{}
+				stage := &LiveStage{
+					Provider: provider,
+					Clients:  &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/konflux-kflux-ocp-p01"))},
+					Log:      log,
+				}
+
+				Expect(stage.verifyGitHubApp(context.Background())).Should(Succeed())
+				Expect(log.String()).Should(ContainSubstring("warning:"))
+				Expect(log.String()).Should(ContainSubstring("selected repositories"))
+			})
+		})
+
 		When("the provider rejects the installation", func() {
 			It("should return the provider error", func() {
 				provider := &githubAppProviderStub{err: errors.New("GitHub App konflux-kflux-ocp-p01 is not installed")}

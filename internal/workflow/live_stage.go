@@ -99,6 +99,10 @@ func (s *LiveStage) verifyGitHubApp(ctx context.Context) error {
 	}
 	slug, err := cluster.VerifyGitHubAppOnboarding(ctx, s.Clients.Kubernetes, checker)
 	if err != nil {
+		if errors.Is(err, providers.ErrUnverifiable) {
+			fmt.Fprintf(s.Log, "warning: %v\n", err)
+			return nil
+		}
 		return err
 	}
 	fmt.Fprintf(s.Log, "GitHub App %s installation verified\n", slug)
@@ -130,13 +134,15 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 	if application == "" {
 		application = s.Request.ApplicationName
 	}
+	manifest.Fixture.EphemeralGitLabAuth = s.Request.Credentials.GitLabTokenEphemeral
 	result, err := (cluster.FixtureService{Dynamic: s.Clients.Dynamic}).EnsureFixture(ctx, cluster.FixtureSpec{
-		Namespace:   namespace,
-		RunID:       manifest.RunID,
-		Application: application,
-		Provider:    s.Request.Provider,
-		GitLabToken: s.Request.Credentials.GitLabToken,
-		Components:  components,
+		Namespace:            namespace,
+		RunID:                manifest.RunID,
+		Application:          application,
+		Provider:             s.Request.Provider,
+		GitLabToken:          s.Request.Credentials.GitLabToken,
+		GitLabTokenEphemeral: s.Request.Credentials.GitLabTokenEphemeral,
+		Components:           components,
 	})
 	if err != nil {
 		return err
@@ -149,6 +155,8 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 		RepositoryName:  fixture.Name,
 		Repository:      fixture.URL,
 		Branch:          s.Request.SourceBranch,
+
+		EphemeralGitLabAuth: s.Request.Credentials.GitLabTokenEphemeral,
 	}
 	return nil
 }

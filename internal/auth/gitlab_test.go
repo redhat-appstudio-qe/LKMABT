@@ -27,13 +27,13 @@ var _ = Describe("GitLabToken", func() {
 	})
 
 	When("the browser login succeeds", func() {
-		It("should return the token and keep only a private token file", func() {
+		It("should return the token and keep the isolatable login state", func() {
 			token, err := GitLabToken(context.Background(), runner, store, true, "")
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(token).Should(Equal("glpat_token"))
 			Expect(runner.runSpecs).Should(HaveLen(1))
 			Expect(runner.runSpecs[0].Name).Should(Equal("glab"))
-			Expect(runner.runSpecs[0].Args).Should(Equal([]string{"auth", "login", "--hostname", "gitlab.com"}))
+			Expect(runner.runSpecs[0].Args).Should(Equal([]string{"auth", "login", "--hostname", "gitlab.com", "--use-keyring=false"}))
 			Expect(runner.runSpecs[0].Env).Should(ContainElements("GLAB_CONFIG_DIR="+filepath.Join(store.Directory(), glabConfigSubdir), "GLAB_CHECK_UPDATE=false"))
 			Expect(runner.runSpecs[0].ClearEnv).Should(ContainElements("GLAB_CONFIG_DIR", "GLAB_CHECK_UPDATE", "GLAB_ENABLE_CI_AUTOLOGIN", "GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN", "GITLAB_HOST"))
 
@@ -49,25 +49,24 @@ var _ = Describe("GitLabToken", func() {
 			content, readErr := os.ReadFile(tokenPath)
 			Expect(readErr).ShouldNot(HaveOccurred())
 			Expect(string(content)).Should(Equal("glpat_token"))
-			Expect(filepath.Join(store.Directory(), glabConfigSubdir)).ShouldNot(BeADirectory())
+			Expect(filepath.Join(store.Directory(), glabConfigSubdir)).Should(BeADirectory())
 
 			Expect(store.Destroy()).Should(Succeed())
 			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
 		})
 	})
 
-	When("a custom HTTPS API URL is configured", func() {
-		It("should pass the hostname to glab", func() {
+	When("the API URL is self-managed", func() {
+		It("should reject it and point at the token fallback", func() {
 			_, err := GitLabToken(context.Background(), runner, store, true, "https://gitlab.example.com/api/v4")
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(runner.runSpecs[0].Args).Should(Equal([]string{"auth", "login", "--hostname", "gitlab.example.com"}))
-			Expect(runner.stdoutSpecs[0].Args).Should(Equal([]string{"config", "get", "token", "--host", "gitlab.example.com"}))
+			Expect(err).Should(MatchError(ContainSubstring("set GITLAB_BOT_TOKEN")))
+			Expect(runner.runSpecs).Should(BeEmpty())
 		})
 	})
 
 	When("the API URL requires a custom protocol or port", func() {
 		It("should reject it and point at the token fallback", func() {
-			_, err := GitLabToken(context.Background(), runner, store, true, "http://gitlab.example.com:8080/api/v4")
+			_, err := GitLabToken(context.Background(), runner, store, true, "http://gitlab.com:8080/api/v4")
 			Expect(err).Should(MatchError(ContainSubstring("set GITLAB_BOT_TOKEN")))
 			Expect(runner.runSpecs).Should(BeEmpty())
 		})
@@ -133,6 +132,67 @@ var _ = Describe("GitLabToken", func() {
 	})
 })
 
+var _ = Describe("RefreshGitLabToken", func() {
+	var (
+		runner   *fakeRunner
+		store    *Store
+		tempRoot string
+	)
+	BeforeEach(func() {
+		runner = &fakeRunner{stdout: "glpat_initial\n"}
+		tempRoot = GinkgoT().TempDir()
+		GinkgoT().Setenv("TMPDIR", tempRoot)
+		var err error
+		store, err = NewStore()
+		Expect(err).ShouldNot(HaveOccurred())
+		DeferCleanup(func() { _ = store.Destroy() })
+		_, err = GitLabToken(context.Background(), runner, store, true, "")
+		Expect(err).ShouldNot(HaveOccurred())
+		runner.stdout = "glpat_refreshed\n"
+	})
+
+	When("the stored login can refresh", func() {
+		It("should trigger an API call and return the new token", func() {
+			token, err := RefreshGitLabToken(context.Background(), runner, store, "")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(token).Should(Equal("glpat_refreshed"))
+			Expect(runner.stdoutSpecs).Should(HaveLen(3))
+			Expect(runner.stdoutSpecs[1].Args).Should(Equal([]string{"api", "user"}))
+			Expect(runner.stdoutSpecs[2].Args).Should(Equal([]string{"config", "get", "token", "--host", "gitlab.com"}))
+
+			content, readErr := os.ReadFile(filepath.Join(store.Directory(), gitlabTokenFilename))
+			Expect(readErr).ShouldNot(HaveOccurred())
+			Expect(string(content)).Should(Equal("glpat_refreshed"))
+		})
+	})
+
+	When("the login state is missing", func() {
+		It("should fail", func() {
+			missing, err := NewStore()
+			Expect(err).ShouldNot(HaveOccurred())
+			DeferCleanup(func() { _ = missing.Destroy() })
+
+			_, err = RefreshGitLabToken(context.Background(), runner, missing, "")
+			Expect(err).Should(MatchError(ContainSubstring("login state is missing")))
+		})
+	})
+
+	When("the refresh call fails", func() {
+		It("should return the error", func() {
+			runner.stdoutErr = errors.New("refresh denied")
+			_, err := RefreshGitLabToken(context.Background(), runner, store, "")
+			Expect(err).Should(MatchError(ContainSubstring("refresh the GitLab token")))
+		})
+	})
+
+	When("no command runner is supplied", func() {
+		It("should fail", func() {
+			_, err := RefreshGitLabToken(context.Background(), nil, store, "")
+			Expect(err).Should(MatchError("command runner is required"))
+		})
+	})
+})
+
 var _ = Describe("glabHostname", func() {
 	DescribeTable("API URL parsing",
 		func(apiURL, wantHost, wantErr string) {
@@ -147,9 +207,9 @@ var _ = Describe("glabHostname", func() {
 		Entry("empty URL uses gitlab.com", "", "gitlab.com", ""),
 		Entry("default API URL", "https://gitlab.com/api/v4", "gitlab.com", ""),
 		Entry("trailing slash", "https://gitlab.com/api/v4/", "gitlab.com", ""),
-		Entry("custom HTTPS host", "https://gitlab.example.com/api/v4", "gitlab.example.com", ""),
-		Entry("http requires a token", "http://gitlab.example.com/api/v4", "", "set GITLAB_BOT_TOKEN"),
-		Entry("custom port requires a token", "https://gitlab.example.com:8443/api/v4", "", "set GITLAB_BOT_TOKEN"),
+		Entry("self-managed host requires a token", "https://gitlab.example.com/api/v4", "", "only configured for gitlab.com"),
+		Entry("http requires a token", "http://gitlab.com/api/v4", "", "requires a standard HTTPS"),
+		Entry("custom port requires a token", "https://gitlab.com:8443/api/v4", "", "requires a standard HTTPS"),
 		Entry("missing scheme", "gitlab.com/api/v4", "", "invalid GitLab API URL"),
 		Entry("unsupported scheme", "ftp://gitlab.com/api/v4", "", "invalid GitLab API URL"),
 		Entry("missing host", "https:///api/v4", "", "invalid GitLab API URL"),

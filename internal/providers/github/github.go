@@ -177,7 +177,7 @@ func verifyGitHubAppRepositories(ctx context.Context, client client, installatio
 	case "selected":
 		repositories, err := client.ListUserInstallationRepositories(ctx, installation.GetID())
 		if err != nil {
-			return fmt.Errorf("GitHub App %s is installed for selected repositories in %s, so its access to %s/%s cannot be verified: %w; add the repository to the installation and use a token that can list installation repositories, or select all repositories", appSlug, canonicalOwner, canonicalOwner, canonicalName, err)
+			return fmt.Errorf("%w: GitHub App %s is installed for selected repositories in %s, so its access to %s/%s cannot be verified: %v; add the repository to the installation and use a token that can list installation repositories, or select all repositories", providers.ErrUnverifiable, appSlug, canonicalOwner, canonicalOwner, canonicalName, err)
 		}
 		for _, repository := range repositories {
 			if repository.GetOwner().GetLogin() == canonicalOwner && repository.GetName() == canonicalName {
