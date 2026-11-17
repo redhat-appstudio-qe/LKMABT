@@ -40,7 +40,7 @@ resolve against the working directory.
 
 ## Key Conventions
 
-- **Branches:** create a dedicated branch before the first edit; never edit or commit on `main` (see `skills/pr-workflow.md`)
+- **Branches:** create a dedicated branch from up-to-date `origin/main` before the first edit; never edit or commit on `main`, and never stack work on the branch the checkout already has — check `git log --oneline origin/main..HEAD` first (see `skills/developer-guide.md` and `skills/pr-workflow.md`)
 - **Pre-push:** `go build`, `gofmt -l ./cmd ./internal`, `go vet ./...`, `go test ./...` — no CI exists, so these are the only gates (see `skills/pr-workflow.md`)
 - **Commits:** `KFLUXINFRA-<number>: <description>`; trailers per team convention (see `skills/pr-workflow.md`)
 - **Qodo:** not onboarded — do not invoke Qodo skills (`qodo-review`, `qodo-get-rules`, etc.)

@@ -12,6 +12,27 @@ Architecture reference for LKMABT (Local Multi-Architecture Build Testing Tool
 for Konflux Clusters). Read this before changing behavior that spans more than
 one package.
 
+## Branch Discipline
+
+Every session establishes its own base; never inherit one.
+
+- Before the first edit, run `git status --short --branch` and
+  `git log --oneline origin/main..HEAD`. A non-empty range means the checkout
+  already carries another session's or workstream's commits: stop and create a
+  fresh branch from `origin/main` instead of stacking new work on them.
+- Start work with `git fetch origin` and
+  `git switch -c <type>/<slug> origin/main`. A local topic branch — including
+  one that looks related to the task — is not a valid base.
+- Work already merged is finished. A squash merge shows the PR number in the
+  subject on `origin/main` (`… (#14)`); such a branch must not be continued, and
+  an unmerged local branch must not be assumed active. Ask before branching
+  from another workstream's work.
+- Never edit or commit on `main`.
+- If the requested change depends on code that exists only on an unmerged
+  branch, state the dependency and ask which base to use before editing.
+
+Full branch, verification, and PR rules: `skills/pr-workflow.md`.
+
 ## What the Tool Does
 
 LKMABT validates that the multi-platform-controller handles `linux/amd64` and
@@ -42,7 +63,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 - Resolves kubeconfig paths (`~` expansion, relative-to-file); the default is `~/.kube/config-<kflux>`, kflux's own per-cluster path
 
 **`internal/clusterauth/`** — Authentication ladder
-- `ocp` entries win with an existing readable kubeconfig; `type: roks` entries are verified with `oc whoami` on every run and refreshed through the IBM Cloud CLI when the API server rejects the kubeconfig
+- Every non-ROKS kubeconfig is verified with `oc whoami` on every run: an expired token leaves the file readable, so readability proves nothing. A rejected one is refreshed through `kflux cluster login` (default kubeconfig path) or `oc login` (any path) and otherwise fails at `authentication`. `type: roks` entries are verified and refreshed through the IBM Cloud CLI
 - ROKS: `ibmcloud target` probes for an active session, `ibmcloud login --sso` runs when absent, `ibmcloud ks cluster config --cluster <ibmcloud> --endpoint <ibmcloud-endpoint>` writes the entry's kubeconfig through `KUBECONFIG`, and a second `oc whoami` verifies the result
 - Non-interactive checks are bounded (`oc whoami` 60s, `ibmcloud target`/`ks cluster config` 2m) so one stalled credential plugin fails that cluster instead of blocking the run; only `ibmcloud login --sso` stays interactive
 
