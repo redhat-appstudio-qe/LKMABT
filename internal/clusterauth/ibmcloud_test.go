@@ -123,6 +123,57 @@ var _ = Describe("Authenticate ROKS", func() {
 		})
 	})
 
+	When("a non-interactive check times out", func() {
+		It("should fail the stalled cluster and still authenticate the rest", func() {
+			home := GinkgoT().TempDir()
+			stalled := roksEntry("stalled", home)
+			healthy := roksEntry("healthy", home)
+			writeFile(stalled.Kubeconfig)
+			writeFile(healthy.Kubeconfig)
+			fake := &fakeRunner{lookPaths: map[string]string{}}
+			fake.onOutput = func(spec CommandSpec) (string, error) {
+				if strings.Contains(spec.Env[0], "stalled") {
+					return "", context.DeadlineExceeded
+				}
+				return "IAM#user@redhat.com\n", nil
+			}
+
+			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{stalled, healthy})
+			Expect(failures).Should(HaveLen(1))
+			Expect(failures).Should(HaveKey("stalled"))
+			Expect(failures["stalled"]).Should(MatchError(ContainSubstring("oc whoami timed out after")))
+			Expect(fake.outputs).Should(HaveLen(2))
+		})
+
+		It("should report a stalled ibmcloud session probe", func() {
+			home := GinkgoT().TempDir()
+			entry := roksEntry("c1", home)
+			fake := &fakeRunner{lookPaths: map[string]string{"ibmcloud": "/usr/local/bin/ibmcloud"}}
+			fake.onOutput = func(CommandSpec) (string, error) {
+				return "", context.DeadlineExceeded
+			}
+
+			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			Expect(failures).Should(HaveKey("c1"))
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("ibmcloud target timed out after")))
+			Expect(fake.runs).Should(BeEmpty())
+		})
+
+		It("should report a stalled kubeconfig download", func() {
+			home := GinkgoT().TempDir()
+			entry := roksEntry("c1", home)
+			fake := &fakeRunner{lookPaths: map[string]string{"ibmcloud": "/usr/local/bin/ibmcloud"}}
+			fake.onRun = func(CommandSpec) error { return context.DeadlineExceeded }
+			fake.onOutput = func(CommandSpec) (string, error) { return "", nil }
+
+			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			Expect(failures).Should(HaveKey("c1"))
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("ibmcloud ks cluster config timed out after")))
+			// Only the session probe reached Output; no whoami ran.
+			Expect(fake.outputs).Should(HaveLen(1))
+		})
+	})
+
 	When("the ibmcloud CLI is missing", func() {
 		It("should fail without falling through to kflux or oc login", func() {
 			home := GinkgoT().TempDir()

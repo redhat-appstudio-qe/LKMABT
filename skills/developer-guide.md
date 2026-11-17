@@ -44,6 +44,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/clusterauth/`** — Authentication ladder
 - `ocp` entries win with an existing readable kubeconfig; `type: roks` entries are verified with `oc whoami` on every run and refreshed through the IBM Cloud CLI when the API server rejects the kubeconfig
 - ROKS: `ibmcloud target` probes for an active session, `ibmcloud login --sso` runs when absent, `ibmcloud ks cluster config --cluster <ibmcloud> --endpoint <ibmcloud-endpoint>` writes the entry's kubeconfig through `KUBECONFIG`, and a second `oc whoami` verifies the result
+- Non-interactive checks are bounded (`oc whoami` 60s, `ibmcloud target`/`ks cluster config` 2m) so one stalled credential plugin fails that cluster instead of blocking the run; only `ibmcloud login --sso` stays interactive
 
 **`internal/report/`** — Aggregate reports
 - Renders Markdown and HTML reports for a multi-cluster run

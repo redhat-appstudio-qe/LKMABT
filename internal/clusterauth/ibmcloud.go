@@ -2,15 +2,25 @@ package clusterauth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 )
 
-const ibmcloudBinaryName = "ibmcloud"
+const (
+	ibmcloudBinaryName = "ibmcloud"
+	// roksVerifyTimeout bounds the non-interactive oc whoami check, which can stall
+	// in an exec credential plugin before any API request is made.
+	roksVerifyTimeout = time.Minute
+	// ibmcloudCommandTimeout bounds non-interactive IBM Cloud CLI calls; the
+	// interactive login --sso is never bounded.
+	ibmcloudCommandTimeout = 2 * time.Minute
+)
 
 // ibmcloudRejections are the oc whoami messages a ROKS cluster returns when the
 // IBM Cloud user has no working cluster identity.
@@ -77,9 +87,16 @@ func ibmcloudMissingFailure(entry clusterfile.Entry, rejected bool) error {
 // ensureIBMCloudSession reuses an active ibmcloud session and runs the interactive
 // SSO login only when the CLI reports no session.
 func (l Ladder) ensureIBMCloudSession(ctx context.Context, binary string) error {
-	if _, err := l.Runner.Output(ctx, CommandSpec{Name: binary, Args: []string{"target", "-q"}}); err == nil {
+	targetCtx, cancel := context.WithTimeout(ctx, ibmcloudCommandTimeout)
+	_, err := l.Runner.Output(targetCtx, CommandSpec{Name: binary, Args: []string{"target", "-q"}})
+	timedOut := errors.Is(targetCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)
+	cancel()
+	if err == nil {
 		l.logf("ibmcloud session is active")
 		return nil
+	}
+	if timedOut {
+		return fmt.Errorf("ibmcloud target timed out after %s", ibmcloudCommandTimeout)
 	}
 	l.logf("running %s login --sso", binary)
 	return l.Runner.Run(ctx, CommandSpec{Name: binary, Args: []string{"login", "--sso"}})
@@ -94,7 +111,14 @@ func (l Ladder) loginROKSCluster(ctx context.Context, binary string, entry clust
 	args := []string{"ks", "cluster", "config", "--cluster", entry.IBMCloud, "--endpoint", entry.IBMCloudEndpoint, "-q"}
 	env := []string{"KUBECONFIG=" + entry.Kubeconfig}
 	l.logf("running %s %s for cluster %s with KUBECONFIG=%s", binary, strings.Join(args, " "), entry.Name, entry.Kubeconfig)
-	if err := l.Runner.Run(ctx, CommandSpec{Name: binary, Args: args, Env: env}); err != nil {
+	configCtx, cancel := context.WithTimeout(ctx, ibmcloudCommandTimeout)
+	err := l.Runner.Run(configCtx, CommandSpec{Name: binary, Args: args, Env: env})
+	timedOut := errors.Is(configCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)
+	cancel()
+	if err != nil {
+		if timedOut {
+			return fmt.Errorf("authentication failed: cluster %s: ibmcloud ks cluster config timed out after %s", entry.Name, ibmcloudCommandTimeout)
+		}
 		return fmt.Errorf("authentication failed: cluster %s: ibmcloud ks cluster config: %w", entry.Name, err)
 	}
 	output, err := l.verifyROKSCluster(ctx, entry)
@@ -106,10 +130,16 @@ func (l Ladder) loginROKSCluster(ctx context.Context, binary string, entry clust
 
 // verifyROKSCluster proves a ROKS kubeconfig works and returns oc whoami's output.
 func (l Ladder) verifyROKSCluster(ctx context.Context, entry clusterfile.Entry) (string, error) {
-	output, err := l.Runner.Output(ctx, CommandSpec{Name: "oc", Args: []string{"whoami", "--request-timeout=30s"}, Env: []string{"KUBECONFIG=" + entry.Kubeconfig}})
+	verifyCtx, cancel := context.WithTimeout(ctx, roksVerifyTimeout)
+	output, err := l.Runner.Output(verifyCtx, CommandSpec{Name: "oc", Args: []string{"whoami", "--request-timeout=30s"}, Env: []string{"KUBECONFIG=" + entry.Kubeconfig}})
+	timedOut := errors.Is(verifyCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)
+	cancel()
 	if err != nil {
 		if detail := strings.TrimSpace(output); detail != "" {
 			l.logf("cluster %s: oc whoami said: %s", entry.Name, detail)
+		}
+		if timedOut {
+			return output, fmt.Errorf("oc whoami timed out after %s", roksVerifyTimeout)
 		}
 		return output, err
 	}

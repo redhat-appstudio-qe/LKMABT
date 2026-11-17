@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -108,6 +109,16 @@ var _ = Describe("ExecRunner.Run", func() {
 			Expect(log.String()).Should(ContainSubstring("err"))
 		})
 	})
+
+	When("the context expires", func() {
+		It("should kill the command", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+
+			err := (ExecRunner{}).Run(ctx, CommandSpec{Name: "sh", Args: []string{"-c", "sleep 5"}})
+			Expect(err).Should(HaveOccurred())
+		})
+	})
 })
 
 var _ = Describe("ExecRunner.Output", func() {
@@ -124,6 +135,17 @@ var _ = Describe("ExecRunner.Output", func() {
 			output, err := (ExecRunner{}).Output(context.Background(), CommandSpec{Name: "sh", Args: []string{"-c", "printf failed 1>&2; exit 1"}})
 			Expect(err).Should(MatchError(ContainSubstring("sh -c")))
 			Expect(output).Should(Equal("failed"))
+		})
+	})
+
+	When("the context expires", func() {
+		It("should kill the command and return the error", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+
+			output, err := (ExecRunner{}).Output(ctx, CommandSpec{Name: "sh", Args: []string{"-c", "sleep 5"}})
+			Expect(err).Should(HaveOccurred())
+			Expect(output).Should(BeEmpty())
 		})
 	})
 })
