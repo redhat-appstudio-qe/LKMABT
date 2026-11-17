@@ -18,12 +18,19 @@ resources.
 ## Prerequisites
 
 - A clusters file (`.lkmabt-clusters.yaml` by default; override with
-  `--clusters-file <path>`). Each entry has a `name` (required, unique), an
-  optional `kubeconfig` path (defaults to `~/.kube/config-<name>`), and an
+  `--clusters-file <path>`). Each entry has a `name` (required, unique; the
+  report directory name and the `--cluster` identity), an optional `kflux`
+  catalog name (defaults to `name`; the `kflux cluster login -c` target), an
+  optional `kubeconfig` path (defaults to `~/.kube/config-<kflux>`), and an
   optional `server` API server URL (omitted means the kubeconfig's own server
   is used). See `.lkmabt-clusters.yaml.example`.
+- `kflux` names are the short catalog names, not the API server hosts:
+  `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is catalog cluster `ocp-p01`, so
+  that entry needs `kflux: ocp-p01`. List the catalog with `kflux cluster list`;
+  an unknown name fails with kflux's own `unknown cluster` error.
 - Authentication follows a ladder per cluster: an existing valid kubeconfig is
-  used first; otherwise `kflux cluster login -c <name>` (or `-C`) runs, with
+  used first; otherwise one `kflux cluster login -c <kflux> [-c <kflux>...]`
+  runs for every entry that uses its default kubeconfig path, with
   kflux installed from
   https://gitlab.cee.redhat.com/hares/kflux.git into
   `~/.local/share/lkmabt/kflux-src` and `~/.local/bin/kflux` when
@@ -41,8 +48,11 @@ resources.
 
 ## Commands
 
+Run from this checkout's root, the directory holding `bin/`, `.lkmabt.env`, and
+`.lkmabt-clusters.yaml`; the example paths are relative to it.
+
 ```bash
-cd <repository-root>
+cd /path/to/konflux-test
 ./bin/lkmabt run github --env-file .lkmabt.env --clusters-file .lkmabt-clusters.yaml
 ./bin/lkmabt run gitlab --env-file .lkmabt.env
 ./bin/lkmabt run both --env-file .lkmabt.env

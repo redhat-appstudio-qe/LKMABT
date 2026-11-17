@@ -80,8 +80,9 @@ go test -v ./internal/workflow
 - Owns the aggregate run directory, the fixed cap of three concurrent clusters, and the per-cluster/per-provider run logs
 
 **`internal/clusterfile/`** — Clusters-file schema
-- Strict parsing of `name`, `kubeconfig`, and `server` per entry
-- Resolves kubeconfig paths (`~` expansion, relative-to-file) and server defaults
+- Strict parsing of `name`, `kflux`, `kubeconfig`, and `server` per entry
+- `name` is the report/`--cluster` identity; `kflux` is the kflux catalog name (`cluster login -c`) and defaults to `name`
+- Resolves kubeconfig paths (`~` expansion, relative-to-file); the default is `~/.kube/config-<kflux>`, kflux's own per-cluster path
 
 **`internal/clusterauth/`** — Authentication ladder
 - Existing kubeconfig → `kflux cluster login` → `oc login` per cluster

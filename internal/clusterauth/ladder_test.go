@@ -65,7 +65,7 @@ var _ = Describe("Authenticate", func() {
 	})
 
 	When("two default-path kubeconfigs are missing", func() {
-		It("should run one catalog login", func() {
+		It("should name both clusters without touching the rest of the catalog", func() {
 			home := GinkgoT().TempDir()
 			c1 := defaultEntry("c1", home)
 			c2 := defaultEntry("c2", home)
@@ -81,7 +81,26 @@ var _ = Describe("Authenticate", func() {
 			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1, c2})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(HaveLen(1))
-			Expect(fake.runs[0].Args).Should(Equal([]string{"cluster", "login", "-C"}))
+			Expect(fake.runs[0].Args).Should(Equal([]string{"cluster", "login", "-c", "c1", "-c", "c2"}))
+		})
+	})
+
+	When("an entry maps to a different kflux catalog name", func() {
+		It("should log in to the catalog name and accept its kubeconfig", func() {
+			home := GinkgoT().TempDir()
+			entry := clusterfile.Entry{Name: "kflux-ocp-p01", Kflux: "ocp-p01", Kubeconfig: clusterfile.DefaultKubeconfig(home, "ocp-p01")}
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onRun = func(spec CommandSpec) error {
+				if spec.Name == "/usr/local/bin/kflux" {
+					writeFile(entry.Kubeconfig)
+				}
+				return nil
+			}
+
+			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			Expect(failures).Should(BeEmpty())
+			Expect(fake.runs).Should(HaveLen(1))
+			Expect(fake.runs[0]).Should(Equal(CommandSpec{Name: "/usr/local/bin/kflux", Args: []string{"cluster", "login", "-c", "ocp-p01"}}))
 		})
 	})
 
