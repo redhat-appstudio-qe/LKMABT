@@ -18,9 +18,13 @@ Every session establishes its own base; never inherit one.
 
 - Before the first edit, run `git status --short --branch` and
   `git log --oneline origin/main..HEAD`. A non-empty range means the checkout
-  already carries another session's or workstream's commits: stop and create a
-  fresh branch from `origin/main` instead of stacking new work on them.
-- Start work with `git fetch origin` and
+  carries commits that are not on `main`.
+- Continuing an open PR is the one valid reason to work on such a branch: its
+  commits are the PR, and addressing review feedback belongs on it. Confirm the
+  branch is that PR's head (its upstream branch is the PR head) before editing.
+- Any other non-empty range is inherited work: stop and create a fresh branch
+  from `origin/main` instead of stacking new work on it.
+- Start new work with `git fetch origin` and
   `git switch -c <type>/<slug> origin/main`. A local topic branch — including
   one that looks related to the task — is not a valid base.
 - Work already merged is finished. A squash merge shows the PR number in the
