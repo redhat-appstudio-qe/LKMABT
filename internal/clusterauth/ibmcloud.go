@@ -14,9 +14,6 @@ import (
 
 const (
 	ibmcloudBinaryName = "ibmcloud"
-	// roksVerifyTimeout bounds the non-interactive oc whoami check, which can stall
-	// in an exec credential plugin before any API request is made.
-	roksVerifyTimeout = time.Minute
 	// ibmcloudCommandTimeout bounds non-interactive IBM Cloud CLI calls; the
 	// interactive login --sso is never bounded.
 	ibmcloudCommandTimeout = 2 * time.Minute
@@ -47,7 +44,7 @@ func (l Ladder) authenticateROKS(ctx context.Context, targets []clusterfile.Entr
 		// A readable kubeconfig still needs proof: oc whoami can reject it while the
 		// file stays on disk, and a rerun would otherwise trust that file.
 		if readableFile(target.Kubeconfig) {
-			output, err := l.verifyROKSCluster(ctx, target)
+			output, err := l.verifyKubeconfig(ctx, target)
 			if err == nil {
 				continue
 			}
@@ -121,30 +118,11 @@ func (l Ladder) loginROKSCluster(ctx context.Context, binary string, entry clust
 		}
 		return fmt.Errorf("authentication failed: cluster %s: ibmcloud ks cluster config: %w", entry.Name, err)
 	}
-	output, err := l.verifyROKSCluster(ctx, entry)
+	output, err := l.verifyKubeconfig(ctx, entry)
 	if err != nil {
 		return roksVerificationFailure(entry, output, err)
 	}
 	return nil
-}
-
-// verifyROKSCluster proves a ROKS kubeconfig works and returns oc whoami's output.
-func (l Ladder) verifyROKSCluster(ctx context.Context, entry clusterfile.Entry) (string, error) {
-	verifyCtx, cancel := context.WithTimeout(ctx, roksVerifyTimeout)
-	output, err := l.Runner.Output(verifyCtx, CommandSpec{Name: "oc", Args: []string{"whoami", "--request-timeout=30s"}, Env: []string{"KUBECONFIG=" + entry.Kubeconfig}})
-	timedOut := errors.Is(verifyCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)
-	cancel()
-	if err != nil {
-		if detail := strings.TrimSpace(output); detail != "" {
-			l.logf("cluster %s: oc whoami said: %s", entry.Name, detail)
-		}
-		if timedOut {
-			return output, fmt.Errorf("oc whoami timed out after %s", roksVerifyTimeout)
-		}
-		return output, err
-	}
-	l.logf("cluster %s authenticated as %s", entry.Name, strings.TrimSpace(output))
-	return output, nil
 }
 
 // roksVerificationFailure explains why a written ROKS kubeconfig is unusable.

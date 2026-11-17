@@ -412,6 +412,7 @@ var _ = Describe("RunClusters", func() {
 			home := GinkgoT().TempDir()
 			stateDir := GinkgoT().TempDir()
 			GinkgoT().Setenv("HOME", home)
+			stubOC()
 			entries := []clusterfile.Entry{
 				{Name: "c1", Kubeconfig: writeKubeconfig(dir, "c1"), Server: "https://api.c1.example"},
 				{Name: "c2", Kubeconfig: writeKubeconfig(dir, "c2"), Server: "https://api.c2.example"},
@@ -463,6 +464,7 @@ var _ = Describe("RunClusters", func() {
 			home := GinkgoT().TempDir()
 			stateDir := GinkgoT().TempDir()
 			GinkgoT().Setenv("HOME", home)
+			stubOC()
 			entries := []clusterfile.Entry{
 				{Name: "c1", Kubeconfig: writeKubeconfig(dir, "c1"), Server: "https://api.c1.example"},
 				{Name: "c2", Kubeconfig: writeKubeconfig(dir, "c2"), Server: "https://api.c2.example"},
@@ -532,6 +534,7 @@ var _ = Describe("rejectDuplicateServers", func() {
 			home := GinkgoT().TempDir()
 			stateDir := GinkgoT().TempDir()
 			GinkgoT().Setenv("HOME", home)
+			stubOC()
 			entries := []clusterfile.Entry{
 				{Name: "c1", Kubeconfig: writeSharedServerKubeconfig(dir, "c1", "https://api.shared.example")},
 				{Name: "c2", Kubeconfig: writeSharedServerKubeconfig(dir, "c2", "https://api.shared.example")},
@@ -573,6 +576,7 @@ var _ = Describe("RunClusters under the aggregate layout", func() {
 			home := GinkgoT().TempDir()
 			stateDir := GinkgoT().TempDir()
 			GinkgoT().Setenv("HOME", home)
+			stubOC()
 			entries := []clusterfile.Entry{
 				{Name: "c1", Kubeconfig: writeKubeconfig(dir, "c1"), Server: "https://api.c1.example"},
 				{Name: "c2", Kubeconfig: writeKubeconfig(dir, "c2"), Server: "https://api.c2.example"},
