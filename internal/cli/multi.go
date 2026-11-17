@@ -17,6 +17,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/providers/github"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
 )
 
@@ -26,6 +27,13 @@ var (
 	authenticateGitLab = auth.GitLabToken
 	refreshGitLabToken = auth.RefreshGitLabToken
 	destroyCredentials = (*auth.Store).Destroy
+	checkGitHubAccess  = func(ctx context.Context, token string) error {
+		adapter, err := github.NewFromCredentials(token)
+		if err != nil {
+			return err
+		}
+		return adapter.CheckOrganizationAccess(ctx)
+	}
 )
 
 type clusterRun struct {
@@ -44,6 +52,13 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 	}
 	githubTokenNeeded := providerNeedsGitHub(request.Provider) && strings.TrimSpace(request.Credentials.GitHubToken) == ""
 	gitlabTokenNeeded := providerNeedsGitLab(request.Provider) && strings.TrimSpace(request.Credentials.GitLabToken) == ""
+	if len(entries) > 0 && providerNeedsGitHub(request.Provider) && !githubTokenNeeded && console.Interactive() {
+		if err := checkGitHubAccess(ctx, request.Credentials.GitHubToken); err != nil {
+			console.Printf("github: configured token cannot list App installations: %v; starting the gh browser login", err)
+			request.Credentials.GitHubToken = ""
+			githubTokenNeeded = true
+		}
+	}
 	var (
 		store           *auth.Store
 		gitlabEphemeral bool

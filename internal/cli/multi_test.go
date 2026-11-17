@@ -146,15 +146,17 @@ var _ = BeforeEach(func() {
 	defaultGitHubAuth = &githubAuthStub{token: "test-github-token"}
 	defaultGitLabAuth = &gitlabAuthStub{token: "test-gitlab-token"}
 	defaultGitLabToken = &gitlabRefreshStub{token: "test-gitlab-token"}
-	originalGitHub, originalGitLab, originalRefresh, originalDestroy := authenticateGitHub, authenticateGitLab, refreshGitLabToken, destroyCredentials
+	originalGitHub, originalGitLab, originalRefresh, originalDestroy, originalCheck := authenticateGitHub, authenticateGitLab, refreshGitLabToken, destroyCredentials, checkGitHubAccess
 	authenticateGitHub = defaultGitHubAuth.authenticate
 	authenticateGitLab = defaultGitLabAuth.authenticate
 	refreshGitLabToken = defaultGitLabToken.refresh
+	checkGitHubAccess = func(context.Context, string) error { return nil }
 	DeferCleanup(func() {
 		authenticateGitHub = originalGitHub
 		authenticateGitLab = originalGitLab
 		refreshGitLabToken = originalRefresh
 		destroyCredentials = originalDestroy
+		checkGitHubAccess = originalCheck
 	})
 })
 
@@ -676,6 +678,39 @@ var _ = Describe("RunClusters credential authentication", func() {
 				Expect(runRequest.Credentials.GitHubToken).Should(Equal("test-github-token"))
 			}
 			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
+		})
+	})
+
+	When("a configured GitHub token cannot list App installations", func() {
+		It("should fall back to the gh login in an interactive session", func() {
+			request, runner := runClustersFixture(1)
+			request.Credentials.GitHubToken = "bad-token"
+			tempRoot := credentialTempRoot()
+			checkGitHubAccess = func(_ context.Context, token string) error {
+				Expect(token).Should(Equal("bad-token"))
+				return errors.New("404 Not Found")
+			}
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})).Should(Succeed())
+
+			Expect(defaultGitHubAuth.calls).Should(Equal(1))
+			Expect(runner.requests).Should(HaveLen(1))
+			Expect(runner.requests[0].Credentials.GitHubToken).Should(Equal("test-github-token"))
+			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
+		})
+	})
+
+	When("a configured GitHub token can list App installations", func() {
+		It("should use it without a login", func() {
+			request, runner := runClustersFixture(1)
+			request.Credentials.GitHubToken = "good-token"
+			checkGitHubAccess = func(context.Context, string) error { return nil }
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})).Should(Succeed())
+
+			Expect(defaultGitHubAuth.calls).Should(Equal(0))
+			Expect(runner.requests).Should(HaveLen(1))
+			Expect(runner.requests[0].Credentials.GitHubToken).Should(Equal("good-token"))
 		})
 	})
 
