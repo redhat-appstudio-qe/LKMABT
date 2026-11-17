@@ -10,7 +10,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	gh "github.com/google/go-github/v66/github"
-	"github.com/redhat-appstudio/konflux-test/internal/providers"
+	"github.com/redhat-appstudio/lkmabt/internal/providers"
 )
 
 type fakeClient struct {

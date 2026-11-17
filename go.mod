@@ -1,4 +1,4 @@
-module github.com/redhat-appstudio/konflux-test
+module github.com/redhat-appstudio/lkmabt
 
 go 1.26
 

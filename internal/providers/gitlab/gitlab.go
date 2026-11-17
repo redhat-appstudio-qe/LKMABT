@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/redhat-appstudio/konflux-test/internal/providers"
+	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	gl "github.com/xanzy/go-gitlab"
 )
 
@@ -26,7 +27,9 @@ type client interface {
 	// GetFile fetches the encoded file content for a branch and path.
 	GetFile(string, string, string) (string, error)
 	// UpdateFile commits replacement content using the current file SHA.
-	UpdateFile(string, string, string, string, string, string) error
+	UpdateFile(project, path, content, branch, expectedSHA, message string) error
+	// GetBranchHead fetches the head commit of a branch.
+	GetBranchHead(project, branch string) (*gl.Commit, error)
 }
 
 type apiClient struct{ client *gl.Client }
@@ -56,6 +59,18 @@ func (c apiClient) GetFile(project, path, branch string) (string, error) {
 func (c apiClient) UpdateFile(project, path, content, branch, expectedSHA, message string) error {
 	_, _, err := c.client.RepositoryFiles.UpdateFile(project, path, &gl.UpdateFileOptions{Branch: &branch, Content: &content, LastCommitID: &expectedSHA, CommitMessage: &message})
 	return err
+}
+
+// GetBranchHead fetches the head commit of a branch.
+func (c apiClient) GetBranchHead(project, branch string) (*gl.Commit, error) {
+	result, _, err := c.client.Branches.GetBranch(project, branch)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil || result.Commit == nil {
+		return nil, fmt.Errorf("gitlab branch %s has no head commit", branch)
+	}
+	return result.Commit, nil
 }
 
 type Adapter struct {
@@ -148,7 +163,10 @@ func (a *Adapter) ReadFile(ctx context.Context, fixture providers.FixtureReposit
 	return providers.FileVersion{Path: path, Branch: branch, Content: string(decoded), SHA: sha, URL: metadata.FilePath}, nil
 }
 
-// UpdateFile checks the current SHA, commits replacement content, and returns updated version metadata.
+// UpdateFile checks the current SHA, commits replacement content, and returns the
+// commit created by the update. The commit SHA is the post-update branch head,
+// validated against the pre-update head so another run's commit cannot be
+// misattributed to this run's trigger.
 func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepository, path, branch, content, expectedSHA string) (providers.Commit, error) {
 	current, err := a.ReadFile(ctx, fixture, path, branch)
 	if err != nil {
@@ -158,26 +176,45 @@ func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepos
 		return providers.Commit{}, err
 	}
 	project := fixture.Owner + "/" + fixture.Name
-	err = providers.RetryOn5xx(ctx, a.retry, func() error {
-		return a.client.UpdateFile(project, path, content, branch, expectedSHA, "konflux-test trigger")
-	}, isGitLab5xx)
+	// The pre-update head is the ancestor the post-update head must descend from;
+	// the file's expectedSHA is not necessarily the branch head.
+	before, err := a.branchHead(ctx, project, branch)
 	if err != nil {
 		return providers.Commit{}, err
 	}
-	var metadata *gl.File
-	err = providers.RetryOn5xx(ctx, a.retry, func() error {
+	if err := providers.RetryOn5xx(ctx, a.retry, func() error {
+		return a.client.UpdateFile(project, path, content, branch, expectedSHA, "lkmabt trigger")
+	}, isGitLab5xx); err != nil {
+		return providers.Commit{}, err
+	}
+	after, err := a.branchHead(ctx, project, branch)
+	if err != nil {
+		return providers.Commit{}, err
+	}
+	if before.ID == after.ID {
+		return providers.Commit{}, fmt.Errorf("gitlab update of %s did not create a new commit on %s", path, branch)
+	}
+	if !slices.Contains(after.ParentIDs, before.ID) {
+		return providers.Commit{}, fmt.Errorf("gitlab branch %s moved during the update of %s: head %s does not descend from %s", branch, path, after.ID, before.ID)
+	}
+	return providers.Commit{SHA: after.ID, Message: "lkmabt trigger", CreatedAt: time.Now().UTC()}, nil
+}
+
+// branchHead reads the head commit of a branch, retrying GitLab 5xx responses.
+func (a *Adapter) branchHead(ctx context.Context, project, branch string) (*gl.Commit, error) {
+	var head *gl.Commit
+	err := providers.RetryOn5xx(ctx, a.retry, func() error {
 		var err error
-		metadata, err = a.client.GetFileMetaData(project, path, branch)
+		head, err = a.client.GetBranchHead(project, branch)
 		return err
 	}, isGitLab5xx)
 	if err != nil {
-		return providers.Commit{}, err
+		return nil, fmt.Errorf("read gitlab branch head: %w", err)
 	}
-	sha := metadata.CommitID
-	if sha == "" {
-		sha = metadata.LastCommitID
+	if head == nil || strings.TrimSpace(head.ID) == "" {
+		return nil, fmt.Errorf("gitlab branch %s of %s returned no head commit", branch, project)
 	}
-	return providers.Commit{SHA: sha, Message: "konflux-test trigger", CreatedAt: time.Now().UTC()}, nil
+	return head, nil
 }
 
 // isGitLab5xx reports whether err contains an HTTP 5xx GitLab response.

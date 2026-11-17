@@ -7,11 +7,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/redhat-appstudio/konflux-test/internal/evidence"
-	"github.com/redhat-appstudio/konflux-test/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/evidence"
+	"github.com/redhat-appstudio/lkmabt/internal/model"
 )
 
-const TriggerCommentFormat = "# konflux-test trigger %s %d"
+const TriggerCommentFormat = "# lkmabt trigger %s %d"
 
 type Confirmation interface {
 	// Confirm requests approval for the supplied action description.
@@ -32,14 +32,15 @@ type Stage interface {
 }
 
 type Options struct {
-	RunID            string
-	Provider         string
-	ClusterServer    string
-	Resume           bool
-	StateDir         string
-	FixtureNamespace string
-	Application      string
-	Timeouts         PhaseTimeouts
+	RunID             string
+	Provider          string
+	ClusterServer     string
+	OnManifestCreated func(model.RunManifest)
+	CreatedAt         time.Time // zero means time.Now()
+	StateDir          string
+	FixtureNamespace  string
+	Application       string
+	Timeouts          PhaseTimeouts
 }
 
 type PhaseTimeouts struct {
@@ -53,7 +54,7 @@ type Runner struct {
 	Now   func() time.Time
 }
 
-// Run creates or resumes a manifest and advances it through each workflow stage.
+// Run creates a manifest and advances it through each workflow stage.
 func (r Runner) Run(ctx context.Context, options Options) (model.RunManifest, error) {
 	if r.Stage == nil {
 		return model.RunManifest{}, fmt.Errorf("workflow stage is required")
@@ -67,29 +68,16 @@ func (r Runner) Run(ctx context.Context, options Options) (model.RunManifest, er
 		runID = "run-" + uuid.NewString()
 	}
 	var manifest model.RunManifest
-	if options.Resume {
-		if !validRunID(runID) {
-			return model.RunManifest{}, fmt.Errorf("invalid resume run ID %q", runID)
-		}
-		var err error
-		manifest, err = r.Store.Load(runID)
-		if err != nil {
-			return model.RunManifest{}, fmt.Errorf("load run %s: %w", runID, err)
-		}
-		if manifest.Provider != options.Provider || manifest.TargetClusterServer != options.ClusterServer {
-			return manifest, fmt.Errorf("resume ownership mismatch")
-		}
-		if manifest.Fixture.TenantNamespace == "" || options.FixtureNamespace == "" || manifest.Fixture.TenantNamespace != options.FixtureNamespace {
-			return manifest, fmt.Errorf("resume ownership mismatch")
-		}
-		if manifest.Phase == model.PhaseFailed {
-			return manifest, fmt.Errorf("cannot resume failed run %s; start a new run", runID)
-		}
-	} else {
-		manifest = model.RunManifest{RunID: runID, Provider: options.Provider, TargetClusterServer: options.ClusterServer, Phase: model.PhasePreflight, CreatedAt: now().UTC(), Fixture: model.FixtureIdentity{TenantNamespace: options.FixtureNamespace, Application: options.Application}}
-		if err := r.Store.Create(&manifest); err != nil {
-			return manifest, err
-		}
+	created := options.CreatedAt
+	if created.IsZero() {
+		created = now().UTC()
+	}
+	manifest = model.RunManifest{RunID: runID, Provider: options.Provider, TargetClusterServer: options.ClusterServer, Phase: model.PhasePreflight, CreatedAt: created, Fixture: model.FixtureIdentity{TenantNamespace: options.FixtureNamespace, Application: options.Application}}
+	if err := r.Store.Create(&manifest); err != nil {
+		return manifest, err
+	}
+	if options.OnManifestCreated != nil {
+		options.OnManifestCreated(manifest)
 	}
 	steps := []struct {
 		phase   model.Phase
@@ -155,17 +143,4 @@ func contextWithTimeout(parent context.Context, timeout time.Duration) (context.
 // failureReason derives the failure code for a workflow phase.
 func failureReason(phase model.Phase) string {
 	return strings.TrimSuffix(string(phase), "-wait") + "-failed"
-}
-
-// validRunID reports whether value is a non-empty run identifier with allowed characters.
-func validRunID(value string) bool {
-	if value == "" || len(value) > 100 {
-		return false
-	}
-	for _, char := range value {
-		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '-' && char != '_' && char != '.' {
-			return false
-		}
-	}
-	return true
 }

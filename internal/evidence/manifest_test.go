@@ -7,7 +7,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/redhat-appstudio/konflux-test/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -131,9 +131,195 @@ var _ = Describe("ManifestStore", func() {
 	})
 })
 
+var _ = Describe("PointLatestAt", func() {
+	When("the aggregate directory exists", func() {
+		It("should point latest at it with a relative link", func() {
+			store := NewManifestStore(GinkgoT().TempDir())
+			name := ArtifactDirectoryName("multi", time.Date(2026, 10, 8, 10, 46, 0, 0, time.UTC), "run-a")
+			Expect(name).Should(Equal("multi-run-10:46_8.10.2026_run-a"))
+			Expect(os.MkdirAll(filepath.Join(store.Root, name), 0o750)).Should(Succeed())
+
+			Expect(store.PointLatestAt(name)).Should(Succeed())
+
+			latestPath := filepath.Join(store.Root, "latest")
+			info, err := os.Lstat(latestPath)
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(info.Mode() & os.ModeSymlink).ShouldNot(BeZero())
+			target, err := os.Readlink(latestPath)
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(target).Should(Equal(name))
+			Expect(filepath.IsAbs(target)).Should(BeFalse())
+		})
+	})
+
+	When("the path is not a single directory name", func() {
+		DescribeTable("should reject the path",
+			func(directory string) {
+				store := NewManifestStore(GinkgoT().TempDir())
+
+				err := store.PointLatestAt(directory)
+				Expect(err).Should(MatchError(ContainSubstring("single directory name")))
+				_, statErr := os.Lstat(filepath.Join(store.Root, "latest"))
+				Expect(statErr).Should(MatchError(os.ErrNotExist))
+			},
+			Entry("escapes the state root", "../outside"),
+			Entry("nests below the state root", "nested/child"),
+			Entry("is empty", ""),
+		)
+	})
+
+	When("the directory does not exist", func() {
+		It("should report the missing aggregate directory", func() {
+			store := NewManifestStore(GinkgoT().TempDir())
+
+			err := store.PointLatestAt("multi-run-10:46_8.10.2026_run-gone")
+			Expect(err).Should(MatchError(ContainSubstring("read aggregate run directory")))
+		})
+	})
+
+	When("the path is a regular file", func() {
+		It("should reject a non-directory", func() {
+			store := NewManifestStore(GinkgoT().TempDir())
+			Expect(os.WriteFile(filepath.Join(store.Root, "multi-run-file"), nil, 0o640)).Should(Succeed())
+
+			err := store.PointLatestAt("multi-run-file")
+			Expect(err).Should(MatchError(ContainSubstring("aggregate run path is not a directory")))
+		})
+	})
+
+	When("latest already points at a newer run", func() {
+		It("should keep the newer target", func() {
+			store := NewManifestStore(GinkgoT().TempDir())
+			manifest := model.RunManifest{RunID: "run-newer", Provider: "github", CreatedAt: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC), Phase: model.PhasePreflight}
+			Expect(store.Create(&manifest)).Should(Succeed())
+			name := ArtifactDirectoryName("multi", time.Date(2026, 10, 8, 10, 46, 0, 0, time.UTC), "run-a")
+			Expect(os.MkdirAll(filepath.Join(store.Root, name), 0o750)).Should(Succeed())
+
+			Expect(store.PointLatestAt(name)).Should(Succeed())
+
+			target, err := os.Readlink(filepath.Join(store.Root, "latest"))
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(target).Should(Equal(manifest.ArtifactDirectory))
+		})
+	})
+
+	When("the manifest store root is missing", func() {
+		It("should create it before linking", func() {
+			root := filepath.Join(GinkgoT().TempDir(), "runs")
+			store := NewManifestStore(root)
+			name := ArtifactDirectoryName("multi", time.Date(2026, 10, 8, 10, 46, 0, 0, time.UTC), "run-a")
+			Expect(os.MkdirAll(filepath.Join(store.Root, name), 0o750)).Should(Succeed())
+
+			Expect(store.PointLatestAt(name)).Should(Succeed())
+			Expect(filepath.Join(store.Root, "latest")).Should(BeAnExistingFile())
+		})
+	})
+})
+
+var _ = Describe("RecordAggregateStart", func() {
+	minute := time.Date(2026, 10, 8, 10, 46, 0, 0, time.UTC)
+
+	When("two aggregate runs share one clock minute", func() {
+		It("should follow the recorded start time, not the run ID order", func() {
+			store := NewManifestStore(GinkgoT().TempDir())
+			older := ArtifactDirectoryName("multi", minute, "run-zzz")
+			newer := ArtifactDirectoryName("multi", minute.Add(time.Second), "run-aaa")
+			// Both names encode the same minute; only the recorded times differ.
+			Expect(older).Should(Equal("multi-run-10:46_8.10.2026_run-zzz"))
+			Expect(newer).Should(Equal("multi-run-10:46_8.10.2026_run-aaa"))
+			Expect(os.MkdirAll(filepath.Join(store.Root, older), 0o750)).Should(Succeed())
+			Expect(os.MkdirAll(filepath.Join(store.Root, newer), 0o750)).Should(Succeed())
+			Expect(store.RecordAggregateStart(older, minute)).Should(Succeed())
+			Expect(store.RecordAggregateStart(newer, minute.Add(time.Second))).Should(Succeed())
+
+			Expect(store.PointLatestAt(older)).Should(Succeed())
+			Expect(latestTarget(store)).Should(Equal(older))
+			Expect(store.PointLatestAt(newer)).Should(Succeed())
+			Expect(latestTarget(store)).Should(Equal(newer))
+			// A delayed older invocation must not steal the pointer back.
+			Expect(store.PointLatestAt(older)).Should(Succeed())
+			Expect(latestTarget(store)).Should(Equal(newer))
+		})
+	})
+
+	When("only one candidate has a recorded time", func() {
+		It("should decide by the directory name", func() {
+			store := NewManifestStore(GinkgoT().TempDir())
+			withMarker := ArtifactDirectoryName("multi", minute, "run-zzz")
+			withoutMarker := ArtifactDirectoryName("multi", minute.Add(time.Minute), "run-aaa")
+			Expect(os.MkdirAll(filepath.Join(store.Root, withMarker), 0o750)).Should(Succeed())
+			Expect(os.MkdirAll(filepath.Join(store.Root, withoutMarker), 0o750)).Should(Succeed())
+			Expect(store.RecordAggregateStart(withMarker, minute)).Should(Succeed())
+
+			Expect(store.PointLatestAt(withoutMarker)).Should(Succeed())
+			Expect(store.PointLatestAt(withMarker)).Should(Succeed())
+			Expect(latestTarget(store)).Should(Equal(withoutMarker))
+		})
+	})
+
+	When("the marker request is invalid", func() {
+		DescribeTable("should reject the marker request",
+			func(directory string, startedAt time.Time, prepare func(store ManifestStore, name string), expected string) {
+				store := NewManifestStore(GinkgoT().TempDir())
+				prepare(store, directory)
+
+				err := store.RecordAggregateStart(directory, startedAt)
+				Expect(err).Should(MatchError(ContainSubstring(expected)))
+				_, statErr := os.Lstat(filepath.Join(store.Root, "latest"))
+				Expect(statErr).Should(MatchError(os.ErrNotExist))
+			},
+			Entry("escapes the state root", "../outside", minute, func(ManifestStore, string) {}, "single directory name"),
+			Entry("has a zero start time", "multi-run-10:46_8.10.2026_run-gone", time.Time{}, func(store ManifestStore, name string) {
+				Expect(os.MkdirAll(filepath.Join(store.Root, name), 0o750)).Should(Succeed())
+			}, "aggregate start time is required"),
+			Entry("names an absent directory", "multi-run-10:46_8.10.2026_run-gone", minute, func(ManifestStore, string) {}, "read aggregate run directory"),
+			Entry("names a regular file", "multi-run-file", minute, func(store ManifestStore, name string) {
+				Expect(os.WriteFile(filepath.Join(store.Root, name), nil, 0o640)).Should(Succeed())
+			}, "aggregate run path is not a directory"),
+		)
+	})
+})
+
+var _ = Describe("ManifestStore.Transition", func() {
+	When("the manifest cannot be persisted", func() {
+		It("should keep the last persisted phase in memory", func() {
+			store := NewManifestStore(GinkgoT().TempDir())
+			manifest := model.RunManifest{RunID: "run-1", Provider: "github", Phase: model.PhasePreflight}
+			Expect(store.Create(&manifest)).Should(Succeed())
+			runDir := store.RunDirFor(manifest)
+			Expect(os.Remove(filepath.Join(runDir, "manifest.json"))).Should(Succeed())
+			Expect(os.Mkdir(filepath.Join(runDir, "manifest.json"), 0o750)).Should(Succeed())
+
+			Expect(store.Transition(&manifest, model.PhaseFixtureReady)).Should(HaveOccurred())
+			Expect(manifest.Phase).Should(Equal(model.PhasePreflight))
+		})
+	})
+
+	When("the transition is valid", func() {
+		It("should advance the in-memory and persisted phase", func() {
+			store := NewManifestStore(GinkgoT().TempDir())
+			manifest := model.RunManifest{RunID: "run-1", Provider: "github", Phase: model.PhasePreflight}
+			Expect(store.Create(&manifest)).Should(Succeed())
+
+			Expect(store.Transition(&manifest, model.PhaseFixtureReady)).Should(Succeed())
+			Expect(manifest.Phase).Should(Equal(model.PhaseFixtureReady))
+			loaded, err := store.Load("run-1")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(loaded.Phase).Should(Equal(model.PhaseFixtureReady))
+		})
+	})
+})
+
 // expectLatestRun asserts that store's latest alias resolves to runID.
 func expectLatestRun(store ManifestStore, runID string) {
 	latest, err := store.Latest()
 	Expect(err).ShouldNot(HaveOccurred())
 	Expect(latest).Should(Equal(runID))
+}
+
+// latestTarget returns the current latest symlink target.
+func latestTarget(store ManifestStore) string {
+	target, err := os.Readlink(filepath.Join(store.Root, "latest"))
+	Expect(err).ShouldNot(HaveOccurred())
+	return target
 }

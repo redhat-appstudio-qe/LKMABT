@@ -10,7 +10,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/redhat-appstudio/konflux-test/internal/providers"
+	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	gl "github.com/xanzy/go-gitlab"
 )
 
@@ -18,8 +18,11 @@ type fakeClient struct {
 	project          *gl.Project
 	getProjectErrors []error
 	updateErrors     []error
+	headCommits      []*gl.Commit
+	headErrors       []error
 	getCalls         int
 	updateCalls      int
+	headCalls        int
 }
 
 // GetProject returns the configured fake project or the next queued error.
@@ -46,7 +49,7 @@ func (f *fakeClient) GetFile(string, string, string) (string, error) {
 	return base64.StdEncoding.EncodeToString([]byte("FROM base\n")), nil
 }
 
-// UpdateFile returns the next queued error or nil for provider tests.
+// UpdateFile returns the update's error or nil for provider tests.
 func (f *fakeClient) UpdateFile(string, string, string, string, string, string) error {
 	f.updateCalls++
 	if len(f.updateErrors) > 0 {
@@ -57,16 +60,34 @@ func (f *fakeClient) UpdateFile(string, string, string, string, string, string) 
 	return nil
 }
 
+// GetBranchHead returns the next queued branch head for provider tests.
+func (f *fakeClient) GetBranchHead(string, string) (*gl.Commit, error) {
+	f.headCalls++
+	if len(f.headErrors) > 0 {
+		err := f.headErrors[0]
+		f.headErrors = f.headErrors[1:]
+		return nil, err
+	}
+	if len(f.headCommits) == 0 {
+		return nil, errors.New("no branch head configured")
+	}
+	index := f.headCalls - 1
+	if index >= len(f.headCommits) {
+		index = len(f.headCommits) - 1
+	}
+	return f.headCommits[index], nil
+}
+
 var _ = Describe("GitLab provider", func() {
 	It("reuses canonical project", func() {
 		client := &fakeClient{project: &gl.Project{Path: "dr_test_mathwizz_gl", PathWithNamespace: "konflux-qe/dr_test_mathwizz_gl", WebURL: CanonicalFixtureURL}}
 		got, err := New(client).ValidateFixture(context.Background(), providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl"})
 		if err != nil {
-			Expect(err).NotTo(HaveOccurred())
+			Expect(err).ShouldNot(HaveOccurred())
 		}
 		want := providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl", URL: CanonicalFixtureURL}
-		Expect(got).To(Equal(want))
-		Expect(client.getCalls).To(Equal(1))
+		Expect(got).Should(Equal(want))
+		Expect(client.getCalls).Should(Equal(1))
 	})
 
 	It("retries project validation after a 5xx response", func() {
@@ -77,40 +98,41 @@ var _ = Describe("GitLab provider", func() {
 		adapter := NewWithRetry(client, providers.RetryPolicy{MaxRetries: 3, Sleep: func(context.Context, time.Duration) error { return nil }})
 
 		_, err := adapter.ValidateFixture(context.Background(), providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl"})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(client.getCalls).To(Equal(2))
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(client.getCalls).Should(Equal(2))
 	})
 
 	It("rejects non-canonical project without creation", func() {
 		client := &fakeClient{}
 		_, err := New(client).ValidateFixture(context.Background(), providers.FixtureRepository{Owner: "other", Name: "dr_test_mathwizz_gl"})
-		Expect(err).To(HaveOccurred())
-		Expect(client.getCalls).To(Equal(0))
-		Expect(client.updateCalls).To(Equal(0))
+		Expect(err).Should(HaveOccurred())
+		Expect(client.getCalls).Should(Equal(0))
+		Expect(client.updateCalls).Should(Equal(0))
 	})
 
 	It("reads and updates files in canonical project", func() {
-		client := &fakeClient{}
+		client := &fakeClient{headCommits: []*gl.Commit{{ID: "head-1"}, {ID: "commit-1", ParentIDs: []string{"head-1"}}}}
 		adapter := New(client)
 		fixture := providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl", URL: CanonicalFixtureURL}
 		file, err := adapter.ReadFile(context.Background(), fixture, "web-server/Dockerfile", "main")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(file.SHA).To(Equal("sha-1"))
-		Expect(file.Content).To(Equal("FROM base\n"))
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(file.SHA).Should(Equal("sha-1"))
+		Expect(file.Content).Should(Equal("FROM base\n"))
 		_, err = adapter.UpdateFile(context.Background(), fixture, "web-server/Dockerfile", "main", "content", "sha-1")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(client.updateCalls).To(Equal(1))
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(client.updateCalls).Should(Equal(1))
 	})
 
 	It("retries file updates after a 5xx response", func() {
 		client := &fakeClient{
 			updateErrors: []error{&gl.ErrorResponse{Response: &http.Response{StatusCode: http.StatusBadGateway}}},
+			headCommits:  []*gl.Commit{{ID: "head-1"}, {ID: "commit-1", ParentIDs: []string{"head-1"}}},
 		}
 		adapter := NewWithRetry(client, providers.RetryPolicy{MaxRetries: 3, Sleep: func(context.Context, time.Duration) error { return nil }})
 		fixture := providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl", URL: CanonicalFixtureURL}
 
 		_, err := adapter.UpdateFile(context.Background(), fixture, "web-server/Dockerfile", "main", "content", "sha-1")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(client.updateCalls).To(Equal(2))
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(client.updateCalls).Should(Equal(2))
 	})
 })

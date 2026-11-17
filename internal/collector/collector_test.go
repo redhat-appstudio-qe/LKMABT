@@ -10,7 +10,7 @@ import (
 	ginkgo "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/redhat-appstudio/konflux-test/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/model"
 )
 
 var _ = ginkgo.Describe("Collector", func() {
@@ -209,7 +209,7 @@ var _ = ginkgo.Describe("Collector", func() {
 
 		for _, pathMode := range []string{"run-root-relative", "state-dir-relative"} {
 			ginkgo.By(pathMode)
-			stateDir := ".konflux-test-runs"
+			stateDir := ".lkmabt-runs"
 			artifactDirectory := "run-9-" + strings.ReplaceAll(pathMode, "-", "_")
 			logPath := filepath.Join("failed-builds", "build.log")
 			if pathMode == "state-dir-relative" {

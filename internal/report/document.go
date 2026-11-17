@@ -1,0 +1,78 @@
+package report
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+// StageAuthentication labels rows that never reached a cluster because the auth ladder failed.
+const StageAuthentication = "authentication"
+
+// Link is one artifact hyperlink in a report row.
+type Link struct {
+	Label  string
+	Target string // slash-separated, relative to the report file, always prefixed with "./"
+}
+
+// Row reports the outcome of one cluster-provider pair.
+type Row struct {
+	Cluster  string
+	Provider string
+	Passed   bool
+	Stage    string
+	Error    string
+	Links    []Link
+}
+
+// Document is the aggregate report content for one LKMABT invocation.
+type Document struct {
+	RunID        string
+	ClustersFile string
+	StartedAt    time.Time
+	EndedAt      time.Time
+	Passed       bool
+	Rows         []Row
+}
+
+// Result renders the row outcome as "passed" or "failed".
+func (r Row) Result() string {
+	if r.Passed {
+		return "passed"
+	}
+	return "failed"
+}
+
+// Result renders the aggregate outcome as "passed" or "failed".
+func (d Document) Result() string {
+	if d.Passed {
+		return "passed"
+	}
+	return "failed"
+}
+
+// StartedAtText renders the aggregate start time in RFC 3339.
+func (d Document) StartedAtText() string {
+	return d.StartedAt.UTC().Format(time.RFC3339)
+}
+
+// EndedAtText renders the aggregate end time in RFC 3339.
+func (d Document) EndedAtText() string {
+	return d.EndedAt.UTC().Format(time.RFC3339)
+}
+
+// Write renders report.md and report.html into directory.
+func Write(directory string, document Document) error {
+	if err := os.WriteFile(filepath.Join(directory, "report.md"), []byte(RenderMarkdown(document)), 0o640); err != nil {
+		return fmt.Errorf("write report.md: %w", err)
+	}
+	html, err := RenderHTML(document)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(directory, "report.html"), []byte(html), 0o640); err != nil {
+		return fmt.Errorf("write report.html: %w", err)
+	}
+	return nil
+}

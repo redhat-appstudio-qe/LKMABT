@@ -5,20 +5,27 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/redhat-appstudio/konflux-test/internal/cleanup"
-	"github.com/redhat-appstudio/konflux-test/internal/cluster"
-	"github.com/redhat-appstudio/konflux-test/internal/collector"
-	"github.com/redhat-appstudio/konflux-test/internal/config"
-	"github.com/redhat-appstudio/konflux-test/internal/model"
-	"github.com/redhat-appstudio/konflux-test/internal/providers"
+	"github.com/redhat-appstudio/lkmabt/internal/cleanup"
+	"github.com/redhat-appstudio/lkmabt/internal/cluster"
+	"github.com/redhat-appstudio/lkmabt/internal/collector"
+	"github.com/redhat-appstudio/lkmabt/internal/config"
+	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+// fixtureUpdateMutex serializes fixture read-and-commit pairs across concurrent clusters.
+// All clusters update the same fixture branch, so unserialized pairs leave one cluster's
+// expected SHA stale and fail its trigger.
+var fixtureUpdateMutex sync.Mutex
 
 var PipelineRunGVR = schema.GroupVersionResource{Group: "tekton.dev", Version: "v1", Resource: "pipelineruns"}
 
@@ -32,6 +39,7 @@ type LiveStage struct {
 	Prompt               Confirmation
 	Namespace            cleanup.NamespaceService
 	FailedBuildCollector *collector.FailedBuildCollector
+	Log                  io.Writer
 }
 
 // NewLiveStage parses the source repository and wires clients for the live workflow stages.
@@ -50,8 +58,9 @@ func NewLiveStage(request config.Request, clients *cluster.ClientSet, provider p
 		Provider:             provider,
 		Source:               source,
 		Fixture:              providers.FixtureRepository{Owner: source.Owner, Name: source.Name, URL: source.URL},
-		Namespace:            cleanup.NamespaceService{Dynamic: clients.Dynamic},
+		Namespace:            cleanup.NamespaceService{Dynamic: clients.Dynamic, NameLister: cleanup.OCNamespaceNameLister{Kubeconfig: request.Kubeconfig}},
 		FailedBuildCollector: &collector.FailedBuildCollector{Dynamic: clients.Dynamic, Kubernetes: clients.Kubernetes},
+		Log:                  io.Discard,
 	}
 	return stage, nil
 }
@@ -128,38 +137,55 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 	return nil
 }
 
-// ensureTenantNamespaceAvailable approves and removes stale owned namespaces before the run proceeds.
+// ensureTenantNamespaceAvailable deletes owned stale tenant namespaces and asks before deleting unowned ones.
 func (s *LiveStage) ensureTenantNamespaceAvailable(ctx context.Context, manifest *model.RunManifest) error {
 	namespace := manifest.Fixture.TenantNamespace
 	if namespace == "" {
 		namespace = s.Request.TenantNamespace
 	}
-	candidates, err := s.Namespace.FindCandidates(ctx, namespace)
+	scoped, err := s.Namespace.FindScoped(ctx, namespace)
 	if err != nil {
 		return fmt.Errorf("discover tenant namespace %s: %w", namespace, err)
 	}
-	for _, info := range candidates {
-		if s.Request.ResumeRunID != "" && info.Name == namespace && info.RunID == manifest.RunID {
+	for _, info := range scoped {
+		if info.Owned() {
+			if err := s.deleteOwnedNamespace(ctx, info); err != nil {
+				return err
+			}
 			continue
 		}
-		if s.Prompt == nil {
-			return fmt.Errorf("tenant namespace %s from run %s requires interactive approval before deletion", info.Name, info.RunID)
-		}
-		approved, err := s.Prompt.Confirm(ctx, fmt.Sprintf("Delete owned stale tenant namespace %s from run %s", info.Name, info.RunID))
-		if err != nil {
-			return fmt.Errorf("confirm deletion of tenant namespace %s: %w", info.Name, err)
-		}
-		if !approved {
-			return fmt.Errorf("tenant namespace %s retained; preflight refused to continue", info.Name)
-		}
-		if err := s.Namespace.Delete(ctx, info.Name, info.RunID); err != nil {
-			return err
-		}
-		if err := s.Namespace.WaitDeleted(ctx, info.Name); err != nil {
+		if err := s.deleteUnownedNamespace(ctx, info); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// deleteOwnedNamespace removes a stale LKMABT namespace without prompting and logs the removal.
+func (s *LiveStage) deleteOwnedNamespace(ctx context.Context, info cleanup.NamespaceInfo) error {
+	fmt.Fprintf(s.Log, "deleting stale owned tenant namespace %s from run %s\n", info.Name, info.RunID)
+	if err := s.Namespace.Delete(ctx, info.Name, info.RunID); err != nil {
+		return err
+	}
+	return s.Namespace.WaitDeleted(ctx, info.Name)
+}
+
+// deleteUnownedNamespace asks per namespace before deleting a scoped namespace that lacks exact ownership labels.
+func (s *LiveStage) deleteUnownedNamespace(ctx context.Context, info cleanup.NamespaceInfo) error {
+	if s.Prompt == nil {
+		return fmt.Errorf("tenant namespace %s has absent or different LKMABT ownership labels and requires interactive approval before deletion", info.Name)
+	}
+	approved, err := s.Prompt.Confirm(ctx, fmt.Sprintf("Namespace %s has absent or different LKMABT ownership labels (run ID %q); delete it", info.Name, info.RunID))
+	if err != nil {
+		return fmt.Errorf("confirm deletion of tenant namespace %s: %w", info.Name, err)
+	}
+	if !approved {
+		return fmt.Errorf("tenant namespace %s retained; preflight refused to continue", info.Name)
+	}
+	if err := s.Namespace.DeleteApproved(ctx, info); err != nil {
+		return err
+	}
+	return s.Namespace.WaitDeleted(ctx, info.Name)
 }
 
 // TriggerComponents waits for PaC onboarding, updates fixture files, and records trigger commits.
@@ -194,19 +220,32 @@ func (s *LiveStage) TriggerComponents(ctx context.Context, manifest *model.RunMa
 		return fmt.Errorf("wait for PaC onboarding: %w", err)
 	}
 	for index, component := range components {
-		file, err := s.Provider.ReadFile(ctx, s.Fixture, paths[index], s.Request.SourceBranch)
+		commit, err := s.triggerComponent(ctx, manifest, component, paths[index])
 		if err != nil {
-			return fmt.Errorf("read %s: %w", paths[index], err)
-		}
-		comment := fmt.Sprintf(TriggerCommentFormat, manifest.RunID, time.Now().Unix())
-		content := strings.TrimRight(file.Content, "\n") + "\n" + comment + "\n"
-		commit, err := s.Provider.UpdateFile(ctx, s.Fixture, paths[index], s.Request.SourceBranch, content, file.SHA)
-		if err != nil {
-			return fmt.Errorf("trigger %s: %w", component, err)
+			return err
 		}
 		manifest.TriggerCommits = append(manifest.TriggerCommits, model.TriggerCommit{Component: component, SHA: commit.SHA, URL: commit.URL, CreatedAt: commit.CreatedAt})
 	}
 	return nil
+}
+
+// triggerComponent commits one Dockerfile comment while holding the shared fixture lock.
+func (s *LiveStage) triggerComponent(ctx context.Context, manifest *model.RunManifest, component, path string) (providers.Commit, error) {
+	// Hold the shared lock across the read and the commit so a concurrent cluster cannot
+	// invalidate the SHA the update must present.
+	fixtureUpdateMutex.Lock()
+	defer fixtureUpdateMutex.Unlock()
+	file, err := s.Provider.ReadFile(ctx, s.Fixture, path, s.Request.SourceBranch)
+	if err != nil {
+		return providers.Commit{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	comment := fmt.Sprintf(TriggerCommentFormat, manifest.RunID, time.Now().Unix())
+	content := strings.TrimRight(file.Content, "\n") + "\n" + comment + "\n"
+	commit, err := s.Provider.UpdateFile(ctx, s.Fixture, path, s.Request.SourceBranch, content, file.SHA)
+	if err != nil {
+		return providers.Commit{}, fmt.Errorf("trigger %s: %w", component, err)
+	}
+	return commit, nil
 }
 
 // fixtureFromManifest reconstructs a provider repository from saved fixture identity.

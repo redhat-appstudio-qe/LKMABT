@@ -1,0 +1,190 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+// countingPrompt blocks inside Confirm until release is closed.
+type countingPrompt struct {
+	approved bool
+	calls    int
+	entered  chan struct{}
+	release  chan struct{}
+}
+
+// Confirm signals entry, blocks on release, then records the call and returns the decision.
+func (p *countingPrompt) Confirm(context.Context, string) (bool, error) {
+	p.calls++
+	if p.entered != nil {
+		p.entered <- struct{}{}
+		<-p.release
+	}
+	return p.approved, nil
+}
+
+// recordingPrompt records confirmation requests and returns the configured decision.
+type recordingPrompt struct {
+	approved bool
+	calls    int
+	messages []string
+}
+
+// Confirm records the message and returns the configured decision.
+func (p *recordingPrompt) Confirm(_ context.Context, message string) (bool, error) {
+	p.calls++
+	p.messages = append(p.messages, message)
+	return p.approved, nil
+}
+
+// overlapPrompt tracks whether Confirm calls ever run concurrently.
+type overlapPrompt struct {
+	inFlight *atomic.Int32
+	overlaps *atomic.Int32
+}
+
+// Confirm records concurrent entries, holds the prompt briefly, then returns approval.
+func (p *overlapPrompt) Confirm(context.Context, string) (bool, error) {
+	if previous := p.inFlight.Add(1) - 1; previous != 0 {
+		p.overlaps.Add(1)
+	}
+	time.Sleep(10 * time.Millisecond)
+	p.inFlight.Add(-1)
+	return true, nil
+}
+
+var _ = Describe("Console.Printf", func() {
+	When("a writer is configured", func() {
+		It("should write one terminated line", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out}
+			console.Printf("cluster %s: started", "c1")
+			Expect(out.String()).Should(Equal("cluster c1: started\n"))
+		})
+	})
+
+	When("the console is nil", func() {
+		It("should do nothing", func() {
+			var console *Console
+			Expect(func() { console.Printf("x") }).ShouldNot(Panic())
+		})
+	})
+
+	When("Out is nil", func() {
+		It("should do nothing", func() {
+			Expect(func() { (&Console{}).Printf("x") }).ShouldNot(Panic())
+		})
+	})
+
+	When("several goroutines print", func() {
+		It("should keep every line whole", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out}
+			var group sync.WaitGroup
+			for range 8 {
+				group.Add(2)
+				go func() {
+					defer group.Done()
+					for range 25 {
+						console.Printf(strings.Repeat("A", 200))
+					}
+				}()
+				go func() {
+					defer group.Done()
+					for range 25 {
+						console.Printf(strings.Repeat("B", 200))
+					}
+				}()
+			}
+			group.Wait()
+			lines := strings.Split(out.String(), "\n")
+			nonEmpty := 0
+			for _, line := range lines {
+				if line == "" {
+					continue
+				}
+				nonEmpty++
+				Expect(line).Should(SatisfyAny(Equal(strings.Repeat("A", 200)), Equal(strings.Repeat("B", 200))))
+			}
+			Expect(nonEmpty).Should(Equal(400))
+		})
+	})
+})
+
+var _ = Describe("Console.Confirm", func() {
+	When("no prompt is configured", func() {
+		It("should report misconfiguration", func() {
+			console := &Console{Out: io.Discard}
+			_, err := console.Confirm(context.Background(), "msg")
+			Expect(err).Should(MatchError(ContainSubstring("interactive confirmation is not configured")))
+		})
+	})
+
+	When("a prompt is configured", func() {
+		It("should delegate the message and return its decision", func() {
+			prompt := &recordingPrompt{approved: true}
+			console := &Console{Out: io.Discard, Prompt: prompt}
+			approved, err := console.Confirm(context.Background(), "delete tenant")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(approved).Should(BeTrue())
+			Expect(prompt.calls).Should(Equal(1))
+			Expect(prompt.messages).Should(ConsistOf("delete tenant"))
+		})
+	})
+
+	When("one prompt is open", func() {
+		It("should block status lines until the prompt completes", func() {
+			prompt := &countingPrompt{approved: true, entered: make(chan struct{}), release: make(chan struct{})}
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, Prompt: prompt}
+
+			confirmDone := make(chan struct{})
+			go func() {
+				defer close(confirmDone)
+				_, _ = console.Confirm(context.Background(), "delete tenant")
+			}()
+			<-prompt.entered
+
+			printDone := make(chan struct{})
+			go func() {
+				defer close(printDone)
+				console.Printf("cluster c1: started")
+			}()
+			Consistently(printDone, 100*time.Millisecond, time.Millisecond).ShouldNot(BeClosed())
+			close(prompt.release)
+
+			Eventually(confirmDone).Should(BeClosed())
+			Eventually(printDone).Should(BeClosed())
+			Expect(out.String()).Should(ContainSubstring("cluster c1: started"))
+		})
+	})
+
+	When("several prompts run concurrently", func() {
+		It("should serialize them", func() {
+			prompt := &overlapPrompt{inFlight: &atomic.Int32{}, overlaps: &atomic.Int32{}}
+			console := &Console{Out: io.Discard, Prompt: prompt}
+			var group sync.WaitGroup
+			results := make([]bool, 8)
+			for index := range 8 {
+				group.Add(1)
+				go func() {
+					defer group.Done()
+					approved, err := console.Confirm(context.Background(), "delete tenant")
+					Expect(err).ShouldNot(HaveOccurred())
+					results[index] = approved
+				}()
+			}
+			group.Wait()
+			Expect(prompt.overlaps.Load()).Should(BeZero())
+			Expect(results).Should(ConsistOf(true, true, true, true, true, true, true, true))
+		})
+	})
+})

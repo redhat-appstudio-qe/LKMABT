@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,12 +12,12 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/redhat-appstudio/konflux-test/internal/cleanup"
-	"github.com/redhat-appstudio/konflux-test/internal/cluster"
-	"github.com/redhat-appstudio/konflux-test/internal/collector"
-	"github.com/redhat-appstudio/konflux-test/internal/config"
-	"github.com/redhat-appstudio/konflux-test/internal/model"
-	"github.com/redhat-appstudio/konflux-test/internal/providers"
+	"github.com/redhat-appstudio/lkmabt/internal/cleanup"
+	"github.com/redhat-appstudio/lkmabt/internal/cluster"
+	"github.com/redhat-appstudio/lkmabt/internal/collector"
+	"github.com/redhat-appstudio/lkmabt/internal/config"
+	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,11 +31,13 @@ import (
 type confirmationStub struct {
 	approved bool
 	calls    int
+	messages []string
 }
 
-// Confirm records a prompt and returns the stub's configured approval.
-func (s *confirmationStub) Confirm(context.Context, string) (bool, error) {
+// Confirm records the prompt message and returns the stub's configured approval.
+func (s *confirmationStub) Confirm(_ context.Context, message string) (bool, error) {
 	s.calls++
+	s.messages = append(s.messages, message)
 	return s.approved, nil
 }
 
@@ -48,75 +51,221 @@ func (l testNameLister) List(context.Context) ([]string, error) {
 }
 
 var _ = Describe("LiveStage", func() {
-	It("allows missing tenant namespace", func() {
-		stage := &LiveStage{
-			Request:   config.Request{TenantNamespace: "tenant"},
-			Namespace: cleanup.NamespaceService{Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), NameLister: testNameLister{names: nil}},
-		}
-		Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-1"})).To(Succeed())
+	Describe("LiveStage tenant namespace preflight", func() {
+		When("namespaces are owned", func() {
+			It("should delete an owned stale namespace without prompting", func() {
+				dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+				prompt := &confirmationStub{approved: true}
+				log := &bytes.Buffer{}
+				stage := &LiveStage{
+					Request:   config.Request{TenantNamespace: "tenant"},
+					Prompt:    prompt,
+					Log:       log,
+					Namespace: cleanup.NamespaceService{Dynamic: dynamic, PollInterval: time.Millisecond, NameLister: testNameLister{names: []string{"tenant"}}},
+				}
+				Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-2"})).Should(Succeed())
+				Expect(prompt.calls).Should(Equal(0))
+				_, err := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+				Expect(apierrors.IsNotFound(err)).Should(BeTrue())
+				Expect(log.String()).Should(ContainSubstring("deleting stale owned tenant namespace tenant from run run-1"))
+			})
+
+			It("should delete owned exact and prefixed namespaces without prompting", func() {
+				dynamic := namespaceDynamicClient(
+					namespaceObject("tenant", "run-1"),
+					namespaceObject("tenant-20261005b", "run-2"),
+				)
+				prompt := &confirmationStub{approved: true}
+				stage := &LiveStage{
+					Request: config.Request{TenantNamespace: "tenant"},
+					Prompt:  prompt,
+					Log:     &bytes.Buffer{},
+					Namespace: cleanup.NamespaceService{
+						Dynamic:      dynamic,
+						PollInterval: time.Millisecond,
+						NameLister:   testNameLister{names: []string{"tenant-20261005b", "tenant"}},
+					},
+				}
+
+				Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-3"})).Should(Succeed())
+				Expect(prompt.calls).Should(Equal(0))
+				for _, name := range []string{"tenant", "tenant-20261005b"} {
+					_, err := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), name, metav1.GetOptions{})
+					Expect(apierrors.IsNotFound(err)).Should(BeTrue(), name)
+				}
+			})
+		})
+
+		When("namespaces are unowned", func() {
+			It("should retain an unowned namespace when the prompt is declined", func() {
+				dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+				object, err := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+				Expect(err).ShouldNot(HaveOccurred())
+				object.SetLabels(map[string]string{cleanup.RunIDLabel: "run-1"})
+				_, err = dynamic.Resource(cleanup.NamespaceGVR).Update(context.Background(), object, metav1.UpdateOptions{})
+				Expect(err).ShouldNot(HaveOccurred())
+				prompt := &confirmationStub{}
+				stage := &LiveStage{
+					Request:   config.Request{TenantNamespace: "tenant"},
+					Prompt:    prompt,
+					Log:       &bytes.Buffer{},
+					Namespace: cleanup.NamespaceService{Dynamic: dynamic, NameLister: testNameLister{names: []string{"tenant"}}},
+				}
+				err = stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-2"})
+				Expect(err).Should(MatchError(ContainSubstring("tenant namespace tenant retained")))
+				Expect(prompt.calls).Should(Equal(1))
+				_, getErr := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+				Expect(getErr).ShouldNot(HaveOccurred())
+			})
+
+			It("should delete an approved unowned namespace", func() {
+				dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+				object, err := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+				Expect(err).ShouldNot(HaveOccurred())
+				object.SetLabels(map[string]string{cleanup.RunIDLabel: "run-1"})
+				_, err = dynamic.Resource(cleanup.NamespaceGVR).Update(context.Background(), object, metav1.UpdateOptions{})
+				Expect(err).ShouldNot(HaveOccurred())
+				prompt := &confirmationStub{approved: true}
+				stage := &LiveStage{
+					Request:   config.Request{TenantNamespace: "tenant"},
+					Prompt:    prompt,
+					Log:       &bytes.Buffer{},
+					Namespace: cleanup.NamespaceService{Dynamic: dynamic, PollInterval: time.Millisecond, NameLister: testNameLister{names: []string{"tenant"}}},
+				}
+				Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-2"})).Should(Succeed())
+				_, getErr := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+				Expect(apierrors.IsNotFound(getErr)).Should(BeTrue())
+			})
+
+			It("should prompt and delete after approval when the manager label differs", func() {
+				dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+				object, err := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+				Expect(err).ShouldNot(HaveOccurred())
+				object.SetLabels(map[string]string{cleanup.ManagedByLabel: "other-tool", cleanup.RunIDLabel: "run-1"})
+				_, err = dynamic.Resource(cleanup.NamespaceGVR).Update(context.Background(), object, metav1.UpdateOptions{})
+				Expect(err).ShouldNot(HaveOccurred())
+				prompt := &confirmationStub{approved: true}
+				stage := &LiveStage{
+					Request:   config.Request{TenantNamespace: "tenant"},
+					Prompt:    prompt,
+					Log:       &bytes.Buffer{},
+					Namespace: cleanup.NamespaceService{Dynamic: dynamic, PollInterval: time.Millisecond, NameLister: testNameLister{names: []string{"tenant"}}},
+				}
+				Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-2"})).Should(Succeed())
+				Expect(prompt.calls).Should(Equal(1))
+				Expect(prompt.messages).Should(HaveLen(1))
+				Expect(prompt.messages[0]).Should(ContainSubstring("tenant"))
+				Expect(prompt.messages[0]).Should(ContainSubstring("ownership labels"))
+				_, getErr := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+				Expect(apierrors.IsNotFound(getErr)).Should(BeTrue())
+			})
+
+			It("should auto-delete the owned one and prompt once for the unowned one when owned and unowned namespaces are mixed", func() {
+				dynamic := namespaceDynamicClient(
+					namespaceObject("tenant", "run-1"),
+					namespaceObject("tenant-20261005b", "run-2"),
+				)
+				object, err := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-20261005b", metav1.GetOptions{})
+				Expect(err).ShouldNot(HaveOccurred())
+				object.SetLabels(map[string]string{cleanup.RunIDLabel: "run-2"})
+				_, err = dynamic.Resource(cleanup.NamespaceGVR).Update(context.Background(), object, metav1.UpdateOptions{})
+				Expect(err).ShouldNot(HaveOccurred())
+				prompt := &confirmationStub{approved: true}
+				stage := &LiveStage{
+					Request: config.Request{TenantNamespace: "tenant"},
+					Prompt:  prompt,
+					Log:     &bytes.Buffer{},
+					Namespace: cleanup.NamespaceService{
+						Dynamic:      dynamic,
+						PollInterval: time.Millisecond,
+						NameLister:   testNameLister{names: []string{"tenant", "tenant-20261005b"}},
+					},
+				}
+				Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-3"})).Should(Succeed())
+				Expect(prompt.calls).Should(Equal(1))
+				for _, name := range []string{"tenant", "tenant-20261005b"} {
+					_, getErr := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), name, metav1.GetOptions{})
+					Expect(apierrors.IsNotFound(getErr)).Should(BeTrue(), name)
+				}
+			})
+		})
+
+		When("ownership labels are absent and no prompt is configured", func() {
+			It("should refuse to continue", func() {
+				dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+				object, err := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+				Expect(err).ShouldNot(HaveOccurred())
+				object.SetLabels(map[string]string{cleanup.RunIDLabel: "run-1"})
+				_, err = dynamic.Resource(cleanup.NamespaceGVR).Update(context.Background(), object, metav1.UpdateOptions{})
+				Expect(err).ShouldNot(HaveOccurred())
+				stage := &LiveStage{
+					Request:   config.Request{TenantNamespace: "tenant"},
+					Namespace: cleanup.NamespaceService{Dynamic: dynamic, NameLister: testNameLister{names: []string{"tenant"}}},
+				}
+				err = stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-2"})
+				Expect(err).Should(MatchError(ContainSubstring("ownership labels")))
+				Expect(err).Should(MatchError(ContainSubstring("requires interactive approval")))
+				_, getErr := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+				Expect(getErr).ShouldNot(HaveOccurred())
+			})
+		})
+
+		When("namespaces are out of scope", func() {
+			It("should leave them untouched", func() {
+				dynamic := namespaceDynamicClient(
+					namespaceObject("other", "run-1"),
+					namespaceObject("tenantx", "run-2"),
+				)
+				prompt := &confirmationStub{approved: true}
+				stage := &LiveStage{
+					Request: config.Request{TenantNamespace: "tenant"},
+					Prompt:  prompt,
+					Log:     &bytes.Buffer{},
+					Namespace: cleanup.NamespaceService{
+						Dynamic:      dynamic,
+						PollInterval: time.Millisecond,
+						NameLister:   testNameLister{names: []string{"other", "tenantx"}},
+					},
+				}
+				Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-3"})).Should(Succeed())
+				Expect(prompt.calls).Should(Equal(0))
+				for _, name := range []string{"other", "tenantx"} {
+					_, getErr := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), name, metav1.GetOptions{})
+					Expect(getErr).ShouldNot(HaveOccurred(), name)
+				}
+			})
+
+			It("allows missing tenant namespace", func() {
+				stage := &LiveStage{
+					Request:   config.Request{TenantNamespace: "tenant"},
+					Log:       &bytes.Buffer{},
+					Namespace: cleanup.NamespaceService{Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), NameLister: testNameLister{names: nil}},
+				}
+				Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-1"})).Should(Succeed())
+			})
+		})
+
+		When("the lister returns no scoped names", func() {
+			It("should not prompt", func() {
+				dynamic := namespaceDynamicClient(namespaceObject("other", "run-1"))
+				prompt := &confirmationStub{approved: true}
+				stage := &LiveStage{
+					Request: config.Request{TenantNamespace: "tenant"},
+					Prompt:  prompt,
+					Log:     &bytes.Buffer{},
+					Namespace: cleanup.NamespaceService{
+						Dynamic:      dynamic,
+						PollInterval: time.Millisecond,
+						NameLister:   testNameLister{names: []string{"other"}},
+					},
+				}
+				Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-2"})).Should(Succeed())
+				Expect(prompt.calls).Should(Equal(0))
+				_, getErr := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "other", metav1.GetOptions{})
+				Expect(getErr).ShouldNot(HaveOccurred())
+			})
+		})
 	})
-
-	It("deletes owned stale namespace after approval", func() {
-		dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
-		prompt := &confirmationStub{approved: true}
-		stage := &LiveStage{
-			Request:   config.Request{TenantNamespace: "tenant"},
-			Prompt:    prompt,
-			Namespace: cleanup.NamespaceService{Dynamic: dynamic, PollInterval: time.Millisecond, NameLister: testNameLister{names: []string{"tenant"}}},
-		}
-		Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-2"})).To(Succeed())
-		Expect(prompt.calls).To(Equal(1))
-		_, err := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
-		Expect(apierrors.IsNotFound(err)).To(BeTrue())
-	})
-
-	It("stops when stale namespace is retained", func() {
-		dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
-		prompt := &confirmationStub{}
-		stage := &LiveStage{
-			Request:   config.Request{TenantNamespace: "tenant"},
-			Prompt:    prompt,
-			Namespace: cleanup.NamespaceService{Dynamic: dynamic, NameLister: testNameLister{names: []string{"tenant"}}},
-		}
-		Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-2"})).To(HaveOccurred())
-		Expect(prompt.calls).To(Equal(1))
-	})
-
-	It("rejects unowned namespace", func() {
-		dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
-		object, err := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
-		Expect(err).NotTo(HaveOccurred())
-		object.SetLabels(map[string]string{"app.konflux.org/run-id": "run-1"})
-		_, err = dynamic.Resource(cleanup.NamespaceGVR).Update(context.Background(), object, metav1.UpdateOptions{})
-		Expect(err).NotTo(HaveOccurred())
-		stage := &LiveStage{
-			Request:   config.Request{TenantNamespace: "tenant"},
-			Prompt:    &confirmationStub{approved: true},
-			Namespace: cleanup.NamespaceService{Dynamic: dynamic, NameLister: testNameLister{names: []string{"tenant"}}},
-		}
-		Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-2"})).To(HaveOccurred())
-	})
-
-	It("deletes owned suffixed namespaces", func() {
-		dynamic := namespaceDynamicClient(
-			namespaceObject("tenant", "run-1"),
-			namespaceObject("tenant-20261005b", "run-2"),
-		)
-		prompt := &confirmationStub{approved: true}
-		stage := &LiveStage{
-			Request: config.Request{TenantNamespace: "tenant"},
-			Prompt:  prompt,
-			Namespace: cleanup.NamespaceService{
-				Dynamic:      dynamic,
-				PollInterval: time.Millisecond,
-				NameLister:   testNameLister{names: []string{"tenant-20261005b", "tenant"}},
-			},
-		}
-
-		Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-3"})).To(Succeed())
-		Expect(prompt.calls).To(Equal(2))
-	})
-
 	It("restores recorded canonical repository from manifest", func() {
 		got := fixtureFromManifest(model.FixtureIdentity{
 			RepositoryOwner: "redhat-appstudio-qe",
@@ -124,7 +273,7 @@ var _ = Describe("LiveStage", func() {
 			Repository:      "https://github.com/redhat-appstudio-qe/dr_test_mathwizz",
 		})
 		want := providers.FixtureRepository{Owner: "redhat-appstudio-qe", Name: "dr_test_mathwizz", URL: "https://github.com/redhat-appstudio-qe/dr_test_mathwizz"}
-		Expect(got).To(Equal(want))
+		Expect(got).Should(Equal(want))
 	})
 
 	It("derives component context and Dockerfile from configured paths", func() {
@@ -139,8 +288,8 @@ var _ = Describe("LiveStage", func() {
 			{path: "Dockerfile", wantContext: ".", wantFile: "Dockerfile"},
 		} {
 			got := componentSpec("component", "https://github.com/example/repository", "main", test.path)
-			Expect(got.Context).To(Equal(test.wantContext), test.path)
-			Expect(got.Dockerfile).To(Equal(test.wantFile), test.path)
+			Expect(got.Context).Should(Equal(test.wantContext), test.path)
+			Expect(got.Dockerfile).Should(Equal(test.wantFile), test.path)
 		}
 	})
 
@@ -154,11 +303,11 @@ var _ = Describe("LiveStage", func() {
 			}
 			return []unstructured.Unstructured{pipelineRun("run-1", "mathwizz-web-server", "sha-1", "uid-1", "True")}, nil
 		})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(calls).To(BeNumerically(">=", 2))
-		Expect(identities).To(HaveLen(1))
-		Expect(identities[0].Name).To(Equal("run-1"))
-		Expect(identities[0].Succeeded).To(BeTrue())
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(calls).Should(BeNumerically(">=", 2))
+		Expect(identities).Should(HaveLen(1))
+		Expect(identities[0].Name).Should(Equal("run-1"))
+		Expect(identities[0].Succeeded).Should(BeTrue())
 	})
 
 	It("rejects failed PipelineRun", func() {
@@ -166,7 +315,7 @@ var _ = Describe("LiveStage", func() {
 		_, err := waitForBuildMatches(context.Background(), time.Second, time.Second, time.Millisecond, "mathwizz-test", commits, func(context.Context) ([]unstructured.Unstructured, error) {
 			return []unstructured.Unstructured{pipelineRun("run-1", "mathwizz-web-server", "sha-1", "uid-1", "False")}, nil
 		})
-		Expect(err).To(HaveOccurred())
+		Expect(err).Should(HaveOccurred())
 	})
 
 	It("fails with component, namespace, trigger SHA, and observed count when no PipelineRun appears", func() {
@@ -174,7 +323,7 @@ var _ = Describe("LiveStage", func() {
 		_, err := waitForBuildMatches(context.Background(), 10*time.Millisecond, time.Second, time.Millisecond, "mathwizz-test", []model.TriggerCommit{commit}, func(context.Context) ([]unstructured.Unstructured, error) {
 			return nil, nil
 		})
-		Expect(err).To(MatchError(And(
+		Expect(err).Should(MatchError(And(
 			ContainSubstring("mathwizz-web-server"),
 			ContainSubstring("mathwizz-test"),
 			ContainSubstring("trigger-sha"),
@@ -187,10 +336,10 @@ var _ = Describe("LiveStage", func() {
 		object := pipelineRun("run-fallback", "mathwizz-web-server", "observed-sha", "uid-fallback", "True")
 		object.SetCreationTimestamp(metav1.NewTime(triggeredAt.Add(time.Second)))
 		identities, pending, err := matchBuildsWithObjects([]unstructured.Unstructured{object}, []model.TriggerCommit{{Component: "mathwizz-web-server", SHA: "trigger-sha", CreatedAt: triggeredAt}})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(pending).To(BeFalse())
-		Expect(identities).To(HaveLen(1))
-		Expect(identities[0].SourceSHA).To(Equal("observed-sha"))
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeFalse())
+		Expect(identities).Should(HaveLen(1))
+		Expect(identities[0].SourceSHA).Should(Equal("observed-sha"))
 	})
 
 	It("rejects stale and ambiguous fallback PipelineRuns", func() {
@@ -198,15 +347,15 @@ var _ = Describe("LiveStage", func() {
 		stale := pipelineRun("run-stale", "mathwizz-web-server", "stale-sha", "uid-stale", "True")
 		stale.SetCreationTimestamp(metav1.NewTime(triggeredAt.Add(-time.Second)))
 		_, pending, err := matchBuildsWithObjects([]unstructured.Unstructured{stale}, []model.TriggerCommit{{Component: "mathwizz-web-server", SHA: "trigger-sha", CreatedAt: triggeredAt}})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(pending).To(BeTrue())
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeTrue())
 
 		first := pipelineRun("run-fallback-1", "mathwizz-web-server", "observed-sha-1", "uid-fallback-1", "Unknown")
 		first.SetCreationTimestamp(metav1.NewTime(triggeredAt.Add(time.Second)))
 		second := pipelineRun("run-fallback-2", "mathwizz-web-server", "observed-sha-2", "uid-fallback-2", "Unknown")
 		second.SetCreationTimestamp(metav1.NewTime(triggeredAt.Add(2 * time.Second)))
 		_, _, err = matchBuildsWithObjects([]unstructured.Unstructured{first, second}, []model.TriggerCommit{{Component: "mathwizz-web-server", SHA: "trigger-sha", CreatedAt: triggeredAt}})
-		Expect(err).To(MatchError(ContainSubstring("ambiguous")))
+		Expect(err).Should(MatchError(ContainSubstring("ambiguous")))
 	})
 
 	It("waits for Buildah TaskRuns without waiting for validation TaskRuns", func() {
@@ -217,9 +366,9 @@ var _ = Describe("LiveStage", func() {
 		identities, err := waitForBuildTaskRuns(context.Background(), time.Second, time.Second, time.Millisecond, "mathwizz-test", []model.TriggerCommit{commit}, func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error) {
 			return []unstructured.Unstructured{pipeline}, []unstructured.Unstructured{build, validation}, nil
 		})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(identities).To(HaveLen(1))
-		Expect(identities[0].Name).To(Equal("run-build"))
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(identities).Should(HaveLen(1))
+		Expect(identities[0].Name).Should(Equal("run-build"))
 	})
 
 	It("collects failed container logs", func() {
@@ -245,12 +394,12 @@ var _ = Describe("LiveStage", func() {
 		}
 		err := stage.VerifyBuilds(context.Background(), manifest)
 		var pipelineRunError *PipelineRunFailedError
-		Expect(errors.As(err, &pipelineRunError)).To(BeTrue())
-		Expect(manifest.FailedBuildLogs).To(HaveLen(1))
-		Expect(manifest.FailedBuildLogs[0].LogPath).NotTo(BeEmpty())
-		Expect(manifest.FailedBuildLogs[0].LogPath).To(Equal(filepath.Join("failed-builds", "build-task_step-build.log")))
+		Expect(errors.As(err, &pipelineRunError)).Should(BeTrue())
+		Expect(manifest.FailedBuildLogs).Should(HaveLen(1))
+		Expect(manifest.FailedBuildLogs[0].LogPath).ShouldNot(BeEmpty())
+		Expect(manifest.FailedBuildLogs[0].LogPath).Should(Equal(filepath.Join("failed-builds", "build-task_step-build.log")))
 		_, err = os.Stat(filepath.Join(stateDir, manifest.ArtifactDirectory, manifest.FailedBuildLogs[0].LogPath))
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).ShouldNot(HaveOccurred())
 	})
 
 	It("counts baseline PipelineRuns", func() {
@@ -260,12 +409,12 @@ var _ = Describe("LiveStage", func() {
 			pipelineRun("existing-3", "mathwizz-web-server", "old-sha-3", "uid-old-3", "Unknown"),
 		}
 		succeeded, total := countBaselinePRs(objects)
-		Expect(succeeded).To(Equal(1))
-		Expect(total).To(Equal(3))
+		Expect(succeeded).Should(Equal(1))
+		Expect(total).Should(Equal(3))
 
 		succeeded, total = countBaselinePRs(nil)
-		Expect(succeeded).To(BeZero())
-		Expect(total).To(BeZero())
+		Expect(succeeded).Should(BeZero())
+		Expect(total).Should(BeZero())
 	})
 
 	It("detects build overshoot", func() {
@@ -276,7 +425,7 @@ var _ = Describe("LiveStage", func() {
 				pipelineRun("run-2", "mathwizz-web-server", "sha-1", "uid-2", "True"),
 			}, nil
 		})
-		Expect(err).To(MatchError(ContainSubstring("overshoot")))
+		Expect(err).Should(MatchError(ContainSubstring("overshoot")))
 	})
 
 	It("polls PaC before triggering commits", func() {
@@ -294,8 +443,8 @@ var _ = Describe("LiveStage", func() {
 			}
 			return objects, nil
 		})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(calls).To(BeNumerically(">=", 2))
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(calls).Should(BeNumerically(">=", 2))
 	})
 
 	It("detects repository onboarding failure in PaC status", func() {
@@ -307,7 +456,7 @@ var _ = Describe("LiveStage", func() {
 				},
 			},
 		}}
-		Expect(paCStatusError(&object)).To(HaveOccurred())
+		Expect(paCStatusError(&object)).Should(HaveOccurred())
 	})
 })
 

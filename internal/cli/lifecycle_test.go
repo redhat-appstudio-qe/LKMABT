@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -9,10 +10,10 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/redhat-appstudio/konflux-test/internal/cleanup"
-	"github.com/redhat-appstudio/konflux-test/internal/collector"
-	"github.com/redhat-appstudio/konflux-test/internal/evidence"
-	"github.com/redhat-appstudio/konflux-test/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/cleanup"
+	"github.com/redhat-appstudio/lkmabt/internal/collector"
+	"github.com/redhat-appstudio/lkmabt/internal/evidence"
+	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
@@ -103,6 +104,23 @@ var _ = Describe("Lifecycle", func() {
 		if _, err := lifecycle.Namespace.Inspect(context.Background(), "tenant"); err != nil {
 			Fail("incomplete successful-run artifacts deleted namespace")
 		}
+	})
+
+	When("the tenant namespace is retained", func() {
+		It("should write the retention line to the configured log", func() {
+			stateDir := GinkgoT().TempDir()
+			client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"))
+			prompt := &fakePrompt{approved: false}
+			log := &bytes.Buffer{}
+			manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseCompleted, Fixture: model.FixtureIdentity{TenantNamespace: "tenant"}}
+			store := evidence.NewManifestStore(stateDir)
+			Expect(store.Create(&manifest)).Should(Succeed())
+			lifecycle := Lifecycle{Store: store, Namespace: cleanup.NamespaceService{Dynamic: client}, Collector: collector.Collector{StateDir: stateDir}, Prompt: prompt, Sources: lifecycleTestSources(), Log: log}
+			Expect(lifecycle.Finalize(context.Background(), manifest, nil)).Should(Succeed())
+			Expect(log.String()).Should(ContainSubstring("retained tenant namespace tenant\n"))
+			_, err := lifecycle.Namespace.Inspect(context.Background(), "tenant")
+			Expect(err).ShouldNot(HaveOccurred())
+		})
 	})
 })
 

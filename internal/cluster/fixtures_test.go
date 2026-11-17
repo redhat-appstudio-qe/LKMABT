@@ -251,6 +251,6 @@ var _ = Describe("FixtureService", func() {
 		if err != nil {
 			Expect(err).NotTo(HaveOccurred())
 		}
-		Expect(namespace.GetLabels()).To(SatisfyAll(HaveKeyWithValue("app.konflux-ci.org/managed-by", "konflux-test"), HaveKeyWithValue("app.konflux.org/run-id", "run-1"), HaveKeyWithValue("konflux-ci.dev/type", "tenant"), HaveKeyWithValue("cost-center", "670")))
+		Expect(namespace.GetLabels()).To(SatisfyAll(HaveKeyWithValue("app.konflux-ci.org/managed-by", "lkmabt"), HaveKeyWithValue("app.konflux.org/run-id", "run-1"), HaveKeyWithValue("konflux-ci.dev/type", "tenant"), HaveKeyWithValue("cost-center", "670")))
 	})
 })

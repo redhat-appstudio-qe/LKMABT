@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 )
 
 const (
@@ -15,7 +17,7 @@ const (
 	ProviderGitHub               = "github"
 	ProviderGitLab               = "gitlab"
 	ProviderBoth                 = "both"
-	DefaultStateDir              = ".konflux-test-runs"
+	DefaultStateDir              = ".lkmabt-runs"
 	DefaultGitHubRepo            = "https://github.com/redhat-appstudio-qe/dr_test_mathwizz"
 	DefaultGitLabRepo            = "https://gitlab.com/konflux-qe/dr_test_mathwizz_gl"
 	DefaultGitHubTenantNamespace = "mathwizz-test-github"
@@ -45,8 +47,10 @@ type Request struct {
 	Command          string
 	Provider         string
 	RunID            string
-	ResumeRunID      string
 	ClusterServer    string
+	ClustersFile     string
+	ClusterName      string
+	Kubeconfig       string
 	StateDir         string
 	TenantNamespace  string
 	ApplicationName  string
@@ -60,6 +64,7 @@ type Request struct {
 // Defaults returns a request populated with the tool's default run settings.
 func Defaults() Request {
 	return Request{
+		ClustersFile:     clusterfile.DefaultPath,
 		StateDir:         DefaultStateDir,
 		SourceRepository: DefaultGitHubRepo,
 		SourceBranch:     DefaultBranch,
@@ -77,7 +82,7 @@ func Defaults() Request {
 // Parse builds and validates a request from command-line arguments and environment values.
 func Parse(args []string) (Request, error) {
 	if len(args) == 0 {
-		return Request{}, errors.New("usage: konflux-test run <github|gitlab|both> ... | cleanup --run-id <id> ...")
+		return Request{}, errors.New("usage: lkmabt run <github|gitlab|both> ... | cleanup --run-id <id> ...")
 	}
 	req := Defaults()
 	req.Command = args[0]
@@ -102,9 +107,9 @@ func Parse(args []string) (Request, error) {
 		return Request{}, fmt.Errorf("unsupported command %q", req.Command)
 	}
 
-	fs := flag.NewFlagSet("konflux-test", flag.ContinueOnError)
+	fs := flag.NewFlagSet("lkmabt", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	fs.StringVar(&req.ClusterServer, "cluster-server", "", "expected Kubernetes API server URL")
+	fs.StringVar(&req.ClustersFile, "clusters-file", req.ClustersFile, "YAML file listing the clusters to test")
 	fs.StringVar(&req.StateDir, "state-dir", req.StateDir, "run state directory")
 	var envFile string
 	fs.StringVar(&envFile, "env-file", "", "dotenv file containing provider credentials")
@@ -114,20 +119,17 @@ func Parse(args []string) (Request, error) {
 		fs.StringVar(&req.SourceRepository, "source-repository", req.SourceRepository, "source repository")
 		fs.StringVar(&req.SourceBranch, "branch", req.SourceBranch, "source branch")
 		fs.DurationVar(&req.Timeouts.Preflight, "preflight-timeout", req.Timeouts.Preflight, "preflight timeout")
-		fs.DurationVar(&req.Timeouts.Trigger, "trigger-timeout", req.Timeouts.Trigger, "PipelineRun trigger window")
+		fs.DurationVar(&req.Timeouts.Trigger, "trigger-timeout", req.Timeouts.Trigger, "trigger timeout")
 		fs.DurationVar(&req.Timeouts.Build, "build-timeout", req.Timeouts.Build, "build timeout")
-		fs.StringVar(&req.ResumeRunID, "resume", "", "resume an existing run ID")
 	} else {
 		fs.StringVar(&req.RunID, "run-id", "", "exact run whose owned namespace should be deleted")
+		fs.StringVar(&req.ClusterName, "cluster", "", "name of the cluster in the clusters file")
 	}
 	if err := fs.Parse(remaining); err != nil {
 		return Request{}, err
 	}
 	if fs.NArg() != 0 {
 		return Request{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
-	}
-	if req.Command == CommandRun && req.ResumeRunID != "" {
-		req.RunID = req.ResumeRunID
 	}
 	fileValues := map[string]string{}
 	if strings.TrimSpace(envFile) != "" {
@@ -138,9 +140,6 @@ func Parse(args []string) (Request, error) {
 		}
 	}
 	req.Credentials = credentialsFromEnv(fileValues)
-	if strings.TrimSpace(req.ClusterServer) == "" {
-		req.ClusterServer = envValue("KONFLUX_CLUSTER_SERVER", fileValues)
-	}
 	return req, req.Validate()
 }
 
@@ -193,8 +192,8 @@ func (r Request) Validate() error {
 	if r.Command == "" {
 		return errors.New("command is required")
 	}
-	if strings.TrimSpace(r.ClusterServer) == "" {
-		return errors.New("--cluster-server is required")
+	if strings.TrimSpace(r.ClustersFile) == "" {
+		return errors.New("--clusters-file is required")
 	}
 	if (r.Command == CommandRun || r.Command == CommandCleanup) && strings.TrimSpace(r.StateDir) == "" {
 		return errors.New("state directory is required")
@@ -204,16 +203,13 @@ func (r Request) Validate() error {
 		if !validRunID(r.RunID) {
 			return fmt.Errorf("cleanup requires a valid --run-id")
 		}
+		if !clusterfile.ValidName(strings.TrimSpace(r.ClusterName)) {
+			return errors.New("cleanup requires --cluster naming a cluster in the clusters file")
+		}
 		return nil
 	case CommandRun:
 		if r.Provider != ProviderGitHub && r.Provider != ProviderGitLab && r.Provider != ProviderBoth {
 			return fmt.Errorf("unsupported provider %q", r.Provider)
-		}
-		if r.ResumeRunID != "" && !validRunID(r.ResumeRunID) {
-			return fmt.Errorf("invalid resume run ID %q", r.ResumeRunID)
-		}
-		if r.Provider == ProviderBoth && r.ResumeRunID != "" {
-			return errors.New("run both cannot resume an existing run")
 		}
 		if len(r.ComponentPaths) != len(DefaultComponentPaths) {
 			return fmt.Errorf("exactly %d component paths are required", len(DefaultComponentPaths))

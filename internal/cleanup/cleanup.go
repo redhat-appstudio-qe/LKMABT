@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"sort"
@@ -14,21 +15,31 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 )
 
 const (
 	ManagedByLabel = "app.konflux-ci.org/managed-by"
 	RunIDLabel     = "app.konflux.org/run-id"
-	ManagedByValue = "konflux-test"
+	ManagedByValue = "lkmabt"
 )
 
 var NamespaceGVR = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
 
+// NamespaceInfo is a namespace's name, ownership labels, run ID, and object
+// identity; UID and ResourceVersion are the approval and delete preconditions.
 type NamespaceInfo struct {
-	Name   string
-	RunID  string
-	Labels map[string]string
+	Name            string
+	RunID           string
+	UID             types.UID
+	ResourceVersion string
+	Labels          map[string]string
+}
+
+// Owned reports whether the namespace carries both exact LKMABT ownership labels.
+func (i NamespaceInfo) Owned() bool {
+	return i.Labels[ManagedByLabel] == ManagedByValue && strings.TrimSpace(i.RunID) != ""
 }
 
 type NamespaceNameLister interface {
@@ -43,25 +54,33 @@ type NamespaceService struct {
 }
 
 type OCNamespaceNameLister struct {
-	Command string
+	Command    string
+	Kubeconfig string
 }
 
 // List runs the configured namespace CLI to retrieve and parse namespace names.
+// An empty Kubeconfig inherits the ambient environment, so the CLI targets
+// whatever cluster the process's current context points at.
 func (l OCNamespaceNameLister) List(ctx context.Context) ([]string, error) {
-	command := strings.TrimSpace(l.Command)
-	if command == "" {
-		command = strings.TrimSpace(os.Getenv("KONFLUX_TEST_OC"))
+	name := strings.TrimSpace(l.Command)
+	if name == "" {
+		name = strings.TrimSpace(os.Getenv("LKMABT_OC"))
 	}
-	if command == "" {
-		command = "oc"
+	if name == "" {
+		name = "oc"
 	}
 	var stderr bytes.Buffer
-	output, err := exec.CommandContext(ctx, command, "get", "namespaces", "-o", "name", "--no-headers").Output()
+	command := exec.CommandContext(ctx, name, "get", "namespaces", "-o", "name", "--no-headers")
+	// List the selected cluster: bind the CLI to the run's kubeconfig, never the ambient one.
+	if kubeconfig := strings.TrimSpace(l.Kubeconfig); kubeconfig != "" {
+		command.Env = append(os.Environ(), "KUBECONFIG="+kubeconfig)
+	}
+	output, err := command.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			stderr.Write(exitErr.Stderr)
 		}
-		return nil, fmt.Errorf("list namespaces with %s: %w: %s", command, err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("list namespaces with %s: %w: %s", name, err, strings.TrimSpace(stderr.String()))
 	}
 	return parseNamespaceNames(output)
 }
@@ -105,8 +124,8 @@ func (s NamespaceService) Inspect(ctx context.Context, name string) (NamespaceIn
 	return namespaceInfo(object), nil
 }
 
-// FindCandidates lists namespaces matching target and requires the konflux-test manager label and a run ID.
-func (s NamespaceService) FindCandidates(ctx context.Context, target string) ([]NamespaceInfo, error) {
+// FindScoped returns every namespace named target or prefixed with "target-", owned or not.
+func (s NamespaceService) FindScoped(ctx context.Context, target string) ([]NamespaceInfo, error) {
 	if s.Dynamic == nil {
 		return nil, fmt.Errorf("dynamic client is required")
 	}
@@ -122,43 +141,23 @@ func (s NamespaceService) FindCandidates(ctx context.Context, target string) ([]
 	if err != nil {
 		return nil, err
 	}
-	scopedNames := make([]string, 0, len(names))
-	seen := make(map[string]struct{}, len(names))
+	scoped := make([]NamespaceInfo, 0, len(names))
+	// names are already deduplicated and sorted by parseNamespaceNames.
 	for _, name := range names {
 		if name != target && !strings.HasPrefix(name, target+"-") {
 			continue
 		}
-		if _, found := seen[name]; found {
+		info, err := s.Inspect(ctx, name)
+		if apierrors.IsNotFound(err) {
 			continue
 		}
-		seen[name] = struct{}{}
-		scopedNames = append(scopedNames, name)
-	}
-	if len(scopedNames) == 0 {
-		return nil, nil
-	}
-	owned, err := s.Dynamic.Resource(NamespaceGVR).List(ctx, metav1.ListOptions{LabelSelector: ManagedByLabel + "=" + ManagedByValue})
-	if err != nil {
-		return nil, fmt.Errorf("verify namespace ownership: %w", err)
-	}
-	ownedByName := make(map[string]unstructured.Unstructured, len(owned.Items))
-	for _, object := range owned.Items {
-		ownedByName[object.GetName()] = object
-	}
-	candidates := make([]NamespaceInfo, 0)
-	for _, name := range scopedNames {
-		object, found := ownedByName[name]
-		if !found {
-			return nil, fmt.Errorf("tenant namespace %s exists without exact konflux-test ownership labels; manual intervention required", name)
+		if err != nil {
+			return nil, fmt.Errorf("inspect tenant namespace %s: %w", name, err)
 		}
-		info := namespaceInfo(&object)
-		if info.RunID == "" {
-			return nil, fmt.Errorf("tenant namespace %s exists without exact konflux-test ownership labels; manual intervention required", name)
-		}
-		candidates = append(candidates, info)
+		scoped = append(scoped, info)
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Name < candidates[j].Name })
-	return candidates, nil
+	sort.Slice(scoped, func(i, j int) bool { return scoped[i].Name < scoped[j].Name })
+	return scoped, nil
 }
 
 // Delete removes name only after confirming exact manager and run ID ownership labels.
@@ -174,11 +173,38 @@ func (s NamespaceService) Delete(ctx context.Context, name, runID string) error 
 		return fmt.Errorf("namespace identity mismatch: expected %q, got %q", name, info.Name)
 	}
 	if info.Labels[ManagedByLabel] != ManagedByValue || info.RunID != runID {
-		return fmt.Errorf("refusing to delete namespace %q without exact konflux-test ownership labels", name)
+		return fmt.Errorf("refusing to delete namespace %q without exact LKMABT ownership labels", name)
 	}
 	_, _ = StripAllFinalizers(ctx, s.Dynamic, name)
 	if err := s.Dynamic.Resource(NamespaceGVR).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete namespace %s: %w", name, err)
+	}
+	return nil
+}
+
+// DeleteApproved removes an explicitly approved namespace after re-reading it and
+// confirming its name, identity, labels, and run ID are unchanged since the
+// approval. The delete request carries the approved UID and resourceVersion as
+// preconditions, so a replaced object fails the deletion. Finalizer stripping
+// runs after that re-inspection; its failure aborts the deletion.
+func (s NamespaceService) DeleteApproved(ctx context.Context, approved NamespaceInfo) error {
+	if strings.TrimSpace(approved.Name) == "" {
+		return fmt.Errorf("namespace name is required")
+	}
+	current, err := s.Inspect(ctx, approved.Name)
+	if err != nil {
+		return fmt.Errorf("re-read namespace %s: %w", approved.Name, err)
+	}
+	// Any drift since the user's approval, including object identity, invalidates the approval.
+	if current.Name != approved.Name || current.RunID != approved.RunID || current.UID != approved.UID || current.ResourceVersion != approved.ResourceVersion || !maps.Equal(current.Labels, approved.Labels) {
+		return fmt.Errorf("namespace %q changed after approval; refusing to delete", approved.Name)
+	}
+	if _, err := StripAllFinalizers(ctx, s.Dynamic, approved.Name); err != nil {
+		return fmt.Errorf("strip finalizers in namespace %s: %w", approved.Name, err)
+	}
+	options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &approved.UID, ResourceVersion: &approved.ResourceVersion}}
+	if err := s.Dynamic.Resource(NamespaceGVR).Delete(ctx, approved.Name, options); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete namespace %s: %w", approved.Name, err)
 	}
 	return nil
 }
@@ -210,12 +236,12 @@ func (s NamespaceService) WaitDeleted(ctx context.Context, name string) error {
 	}
 }
 
-// namespaceInfo copies namespace labels into the service's value representation.
+// namespaceInfo copies namespace identity and labels into the service's value representation.
 func namespaceInfo(object *unstructured.Unstructured) NamespaceInfo {
 	labels := object.GetLabels()
 	copyLabels := make(map[string]string, len(labels))
 	for key, value := range labels {
 		copyLabels[key] = value
 	}
-	return NamespaceInfo{Name: object.GetName(), RunID: labels[RunIDLabel], Labels: copyLabels}
+	return NamespaceInfo{Name: object.GetName(), RunID: labels[RunIDLabel], UID: object.GetUID(), ResourceVersion: object.GetResourceVersion(), Labels: copyLabels}
 }

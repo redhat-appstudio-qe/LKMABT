@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Purpose
 
-`konflux-test` is a validation harness for multi-architecture builds on ROKS Konflux clusters. It validates that the multi-platform-controller properly handles `linux/amd64` and `linux/arm64` build orchestration by:
+`LKMABT` is a validation harness for multi-architecture builds on ROKS Konflux clusters. It validates that the multi-platform-controller properly handles `linux/amd64` and `linux/arm64` build orchestration by:
 
 1. Triggering builds against fixed test repositories (GitHub and GitLab)
 2. Waiting for successful PipelineRuns
@@ -27,7 +27,7 @@ The harness never creates, forks, or deletes repositories. It reuses fixed fixtu
 
 ### Building
 ```bash
-go build -o bin/konflux-test ./cmd/konflux-test
+go build -o bin/lkmabt ./cmd/lkmabt
 ```
 
 ### Testing
@@ -55,34 +55,39 @@ go test -v ./internal/workflow
 ### Running the Tool
 ```bash
 # GitHub test run
-./bin/konflux-test run github --env-file .konflux-test.env
+./bin/lkmabt run github --env-file .lkmabt.env --clusters-file .lkmabt-clusters.yaml
 
 # GitLab test run
-./bin/konflux-test run gitlab --env-file .konflux-test.env
+./bin/lkmabt run gitlab --env-file .lkmabt.env
 
 # Run both fixed providers concurrently
-./bin/konflux-test run both --env-file .konflux-test.env
+./bin/lkmabt run both --env-file .lkmabt.env
 
 # Clean up the exact namespace recorded for a run after ownership checks
-./bin/konflux-test cleanup --run-id <run-id> --env-file .konflux-test.env
-```
-
-Setup helper (validates cluster connectivity and prerequisites):
-```bash
-./scripts/run-local.sh --setup .konflux-test.env github
-./scripts/run-local.sh --setup .konflux-test.env gitlab
+./bin/lkmabt cleanup --cluster <name> --run-id <run-id> --env-file .lkmabt.env
 ```
 
 ## Architecture
 
 ### Package Organization
 
-**`cmd/konflux-test/`** — Entry point
-- `main.go` orchestrates setup → config parsing → CLI execution
+**`cmd/lkmabt/`** — Entry point
+- `main.go` parses the command line and dispatches through `cli.Execute`
 
 **`internal/cli/`** — Command execution
 - `Runner` interface defines the execution contract
 - `Execute()` drives the full workflow lifecycle
+- Owns the aggregate run directory, the fixed cap of three concurrent clusters, and the per-cluster/per-provider run logs
+
+**`internal/clusterfile/`** — Clusters-file schema
+- Strict parsing of `name`, `kubeconfig`, and `server` per entry
+- Resolves kubeconfig paths (`~` expansion, relative-to-file) and server defaults
+
+**`internal/clusterauth/`** — Authentication ladder
+- Existing kubeconfig → `kflux cluster login` → `oc login` per cluster
+
+**`internal/report/`** — Aggregate reports
+- Renders Markdown and HTML reports for a multi-cluster run
 
 **`internal/config/`** — Configuration parsing
 - Parses environment files and command-line arguments
@@ -110,14 +115,14 @@ Setup helper (validates cluster connectivity and prerequisites):
 
 **`internal/collector/`** — Failure artifact collection
 - On test failure, collects PipelineRuns, TaskRuns, Pods, logs
-- Evidence is redacted and stored under `.konflux-test-runs/`
+- Evidence is redacted and stored under `.lkmabt-runs/`
 
 **`internal/evidence/`** — Artifact storage and manifest generation
 - `manifest.json` and `status.json` are written for each run
 - Credential-like fields are redacted before writing
 
 **`internal/cleanup/`** — Namespace lifecycle management
-- Creates namespaces labeled with `app.konflux-ci.org/managed-by=konflux-test`
+- Creates namespaces labeled with `app.konflux-ci.org/managed-by=lkmabt`
 - Prompts before deletion (retains namespace on user decline or failure-artifact collection errors)
 - Strips finalizers from known deadlock-prone resources before namespace deletion
 
@@ -166,13 +171,13 @@ The harness operates against two hardcoded test repositories:
 Never suggest creating, forking, or deleting repositories. The harness reuses these fixtures across runs.
 
 ### Namespace Ownership
-Namespaces are labeled with `app.konflux-ci.org/managed-by=konflux-test` and `app.konflux.org/run-id=<run-id>`. The harness:
+Namespaces are labeled with `app.konflux-ci.org/managed-by=lkmabt` and `app.konflux.org/run-id=<run-id>`. The harness:
 - Creates namespaces if missing
-- Prompts before deleting stale namespaces (user can decline)
-- Refuses to delete unowned namespaces
+- Deletes owned scoped namespaces (`<tenant>` and `<tenant>-*`) automatically and logs the deletion
+- Prompts for unowned or label-mismatched namespaces individually, re-inspecting each before deletion; a declined prompt fails only that cluster at `preflight`
 
 ### Artifact Retention
-All runtime evidence is stored under `.konflux-test-runs/`:
+All runtime evidence is stored under `.lkmabt-runs/`:
 - `latest/` resolves to the most recently started run directory from run
   creation. It is a relative symlink that exposes artifacts as they are written
   and remains on that run through success or failure until another run starts.
@@ -180,7 +185,7 @@ All runtime evidence is stored under `.konflux-test-runs/`:
 - Credential-like fields in JSON evidence are redacted before writing
 
 ### Cluster Context Validation
-The tool requires an explicit `KONFLUX_CLUSTER_SERVER` guard in the environment file. It validates the current kubeconfig context matches this server before proceeding.
+The API server for each cluster comes from the `server` field of its clusters-file entry; when omitted, it defaults to the loaded kubeconfig's own server.
 
 ## Design Decisions & Constraints
 
@@ -211,10 +216,10 @@ Build output verification uses TaskRun labels, annotations, params, and results 
 
 ### Namespace Ownership Model
 Namespaces are labeled with:
-- `app.konflux-ci.org/managed-by=konflux-test`
+- `app.konflux-ci.org/managed-by=lkmabt`
 - `app.konflux.org/run-id=<run-id>`
 
-Cleanup **refuses to delete** namespaces without both labels. Resumed runs require exact run-id match. Stale namespaces prompt for approval before deletion.
+Cleanup deletes owned scoped namespaces (`<tenant>` and `<tenant>-*`) automatically with logging. Unowned or label-mismatched namespaces are prompted individually and re-inspected before deletion; a declined prompt fails only that cluster at `preflight`.
 
 **Rationale**: Prevents accidental deletion of unrelated namespaces. Ownership labels are explicit, not inferred.
 
@@ -233,21 +238,18 @@ Extracts patterns from `infra-deployments/tests/disaster-recovery` but is not pa
 ## Artifact Collection Details
 
 ### Runtime Evidence Structure
-Each run creates a timestamped directory under `.konflux-test-runs/`:
+Each run creates a timestamped directory under `.lkmabt-runs/`:
 
 ```
-.konflux-test-runs/
-├── latest -> <provider>-run-<timestamp>_<run-id>/  # Relative symlink to newest started run
-└── <provider>-run-<timestamp>_<run-id>/
-    ├── manifest.json           # Run metadata, fixture identity, trigger commits
-    ├── status.json             # Phase progression timestamps
-    ├── failed-builds/          # Container logs from failed TaskRuns (on failure)
-    │   └── <taskrun>_<container>.log
-    ├── workload/
-    │   ├── taskruns.json       # Aggregate TaskRun snapshot
-    │   └── taskruns/           # Per-TaskRun YAML files (REQUIRED for cleanup)
-    │       └── <namespace>_<taskrun-name>.yaml
-    └── collection-report.json  # Artifact collection success/failure per source
+.lkmabt-runs/
+├── latest -> multi-run-<hh:mm_d.m.yyyy>_<run-id>/
+└── multi-run-<hh:mm_d.m.yyyy>_<run-id>/
+    ├── report.md
+    ├── report.html
+    ├── run.log
+    └── <cluster>/
+        ├── run.log
+        └── <provider>-run-<hh:mm_d.m.yyyy>_<run-id>/   (run.log, manifest.json, status.json, workload/, failed-builds/, logs/, collection-report.json)
 ```
 
 ### TaskRun YAML Artifact Collection (Oct 2026)
@@ -298,6 +300,9 @@ If cleanup hangs despite finalizer stripping, check:
 ### Complete
 - ✅ GitHub and GitLab provider abstraction
 - ✅ Fixed fixture validation and reuse
+- ✅ Multi-cluster execution against every clusters-file entry (fixed cap of three concurrent clusters)
+- ✅ Authentication ladder (existing kubeconfig → `kflux cluster login` → `oc login`)
+- ✅ Aggregate Markdown and HTML reports per multi-cluster run
 - ✅ PaC trigger pattern (Dockerfile comment → commit → wait for PipelineRun)
 - ✅ Build output verification (Buildah TaskRun platform detection via labels/results)
 - ✅ Container log collection for failed builds
@@ -311,5 +316,4 @@ If cleanup hangs despite finalizer stripping, check:
 - ⏸️ Registry image validation (multi-arch manifest inspection)
 - ⏸️ PipelineRun pruning wait
 - ⏸️ Cluster-side archive resource verification
-- ⏸️ Resume from interrupted run (`--resume <run-id>` flag defined but not wired)
 - ⏸️ Standalone `collect-logs` subcommand (functionality exists, CLI wiring incomplete)

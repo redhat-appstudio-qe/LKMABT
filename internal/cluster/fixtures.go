@@ -65,7 +65,7 @@ func (s FixtureService) EnsureFixture(ctx context.Context, spec FixtureSpec) (Fi
 	}
 	namespaces := s.Dynamic.Resource(NamespaceGVR)
 	if _, err := namespaces.Get(ctx, spec.Namespace, metav1.GetOptions{}); errors.IsNotFound(err) {
-		object := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": spec.Namespace, "labels": map[string]any{"app.konflux-ci.org/managed-by": "konflux-test", "app.konflux.org/run-id": spec.RunID, "konflux-ci.dev/type": "tenant", "cost-center": "670"}}}}
+		object := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": spec.Namespace, "labels": map[string]any{"app.konflux-ci.org/managed-by": "lkmabt", "app.konflux.org/run-id": spec.RunID, "konflux-ci.dev/type": "tenant", "cost-center": "670"}}}}
 		if _, err := namespaces.Create(ctx, object, metav1.CreateOptions{}); err != nil {
 			return FixtureResult{}, fmt.Errorf("create namespace: %w", err)
 		}

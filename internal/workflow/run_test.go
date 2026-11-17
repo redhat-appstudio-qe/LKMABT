@@ -2,12 +2,14 @@ package workflow
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/redhat-appstudio/konflux-test/internal/evidence"
-	"github.com/redhat-appstudio/konflux-test/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/evidence"
+	"github.com/redhat-appstudio/lkmabt/internal/model"
 )
 
 type fakeStage struct {
@@ -56,59 +58,125 @@ func (s *fakeStage) VerifyBuildOutputs(ctx context.Context, _ *model.RunManifest
 	return s.call(ctx, "build-outputs")
 }
 
+// fixedClock returns a clock that always reports at.
+func fixedClock(at time.Time) func() time.Time {
+	return func() time.Time { return at }
+}
+
 var _ = Describe("Runner", func() {
 	It("persists successful phase sequence", func() {
 		stage := &fakeStage{}
-		runner := Runner{Store: evidence.NewManifestStore(GinkgoT().TempDir()), Stage: stage, Now: func() time.Time { return time.Unix(100, 0) }}
+		runner := Runner{Store: evidence.NewManifestStore(GinkgoT().TempDir()), Stage: stage, Now: fixedClock(time.Unix(100, 0))}
 		manifest, err := runner.Run(context.Background(), Options{RunID: "run-1", Provider: "github", ClusterServer: "https://api.example", FixtureNamespace: "tenant", Application: "app"})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(manifest.Phase).To(Equal(model.PhaseCompleted))
-		Expect(stage.calls).To(Equal([]string{"preflight", "fixture", "trigger", "builds", "build-outputs"}))
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(manifest.Phase).Should(Equal(model.PhaseCompleted))
+		Expect(stage.calls).Should(Equal([]string{"preflight", "fixture", "trigger", "builds", "build-outputs"}))
 	})
 
 	It("persists failure", func() {
 		stage := &fakeStage{fail: "build-outputs"}
 		runner := Runner{Store: evidence.NewManifestStore(GinkgoT().TempDir()), Stage: stage}
 		manifest, err := runner.Run(context.Background(), Options{RunID: "run-2", Provider: "github", ClusterServer: "https://api.example"})
-		Expect(err).To(HaveOccurred())
-		Expect(manifest.Phase).To(Equal(model.PhaseFailed))
-		Expect(manifest.Failure).NotTo(BeNil())
+		Expect(err).Should(HaveOccurred())
+		Expect(manifest.Phase).Should(Equal(model.PhaseFailed))
+		Expect(manifest.Failure).ShouldNot(BeNil())
 	})
 
 	It("applies phase timeouts", func() {
 		stage := &fakeStage{}
 		runner := Runner{Store: evidence.NewManifestStore(GinkgoT().TempDir()), Stage: stage}
 		_, err := runner.Run(context.Background(), Options{RunID: "run-timeout", Provider: "github", ClusterServer: "https://api.example", Timeouts: PhaseTimeouts{Preflight: time.Minute}})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(stage.deadlines["preflight"]).To(BeTrue())
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(stage.deadlines["preflight"]).Should(BeTrue())
 	})
 
-	It("rejects resume from failed run", func() {
-		store := evidence.NewManifestStore(GinkgoT().TempDir())
-		failedStage := &fakeStage{fail: "build-outputs"}
-		_, _ = (Runner{Store: store, Stage: failedStage}).Run(context.Background(), Options{RunID: "run-failed", Provider: "github", ClusterServer: "https://api.example", FixtureNamespace: "tenant"})
-		resumed, err := (Runner{Store: store, Stage: &fakeStage{}}).Run(context.Background(), Options{RunID: "run-failed", Provider: "github", ClusterServer: "https://api.example", FixtureNamespace: "tenant", Resume: true})
-		Expect(err).To(MatchError(ContainSubstring("failed run")))
-		Expect(resumed.Phase).To(Equal(model.PhaseFailed))
+	When("a manifest is created", func() {
+		It("should call OnManifestCreated with the persisted manifest", func() {
+			store := evidence.NewManifestStore(GinkgoT().TempDir())
+			var created model.RunManifest
+			calls := 0
+			hook := func(manifest model.RunManifest) {
+				calls++
+				created = manifest
+				// manifest.json exists on disk by the time the hook runs.
+				_, statErr := os.Stat(filepath.Join(store.Root, created.ArtifactDirectory, "manifest.json"))
+				Expect(statErr).ShouldNot(HaveOccurred())
+			}
+			runner := Runner{Store: store, Stage: &fakeStage{}, Now: fixedClock(time.Date(2026, 10, 5, 14, 23, 0, 0, time.UTC))}
+
+			_, err := runner.Run(context.Background(), Options{RunID: "run-1", Provider: "github", ClusterServer: "https://api.example", FixtureNamespace: "tenant", Application: "app", OnManifestCreated: hook})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(calls).Should(Equal(1))
+			Expect(created.RunID).Should(Equal("run-1"))
+			Expect(created.ArtifactDirectory).Should(Equal("github-run-14:23_5.10.2026_run-1"))
+			Expect(created.Phase).Should(Equal(model.PhasePreflight))
+		})
+
+		It("should not call OnManifestCreated when the manifest cannot be created", func() {
+			store := evidence.NewManifestStore(GinkgoT().TempDir())
+			calls := 0
+			hook := func(model.RunManifest) { calls++ }
+			// A regular file where the run directory should go makes Create fail.
+			Expect(os.WriteFile(filepath.Join(store.Root, "github-run-14:23_5.10.2026_run-1"), nil, 0o640)).Should(Succeed())
+			runner := Runner{Store: store, Stage: &fakeStage{}, Now: fixedClock(time.Date(2026, 10, 5, 14, 23, 0, 0, time.UTC))}
+
+			_, err := runner.Run(context.Background(), Options{RunID: "run-1", Provider: "github", ClusterServer: "https://api.example", OnManifestCreated: hook})
+			Expect(err).Should(MatchError(ContainSubstring("already exists")))
+			Expect(calls).Should(Equal(0))
+		})
 	})
 
-	It("rejects resume with different tenant", func() {
-		store := evidence.NewManifestStore(GinkgoT().TempDir())
-		runner := Runner{Store: store, Stage: &fakeStage{}}
-		_, err := runner.Run(context.Background(), Options{RunID: "run-tenant", Provider: "github", ClusterServer: "https://api.example", FixtureNamespace: "tenant-a"})
-		Expect(err).NotTo(HaveOccurred())
-		resumed, err := (Runner{Store: store, Stage: &fakeStage{}}).Run(context.Background(), Options{RunID: "run-tenant", Provider: "github", ClusterServer: "https://api.example", FixtureNamespace: "tenant-b", Resume: true})
-		Expect(err).To(MatchError(ContainSubstring("resume ownership mismatch")))
-		Expect(resumed.Fixture.TenantNamespace).To(Equal("tenant-a"))
+	When("the run ID already exists", func() {
+		It("should reject the second run instead of resuming", func() {
+			store := evidence.NewManifestStore(GinkgoT().TempDir())
+			runner := Runner{Store: store, Stage: &fakeStage{}, Now: fixedClock(time.Date(2026, 10, 5, 14, 23, 0, 0, time.UTC))}
+			options := Options{RunID: "run-1", Provider: "github", ClusterServer: "https://api.example", FixtureNamespace: "tenant", Application: "app"}
+
+			_, err := runner.Run(context.Background(), options)
+			Expect(err).ShouldNot(HaveOccurred())
+			manifest, err := runner.Run(context.Background(), options)
+			Expect(err).Should(MatchError(ContainSubstring("already exists")))
+			Expect(manifest.RunID).Should(Equal("run-1"))
+			Expect(manifest.Phase).Should(Equal(model.PhasePreflight))
+		})
 	})
 
-	It("rejects resume without tenant", func() {
-		store := evidence.NewManifestStore(GinkgoT().TempDir())
-		runner := Runner{Store: store, Stage: &fakeStage{}}
-		_, err := runner.Run(context.Background(), Options{RunID: "run-tenant-empty", Provider: "github", ClusterServer: "https://api.example", FixtureNamespace: "tenant-a"})
-		Expect(err).NotTo(HaveOccurred())
-		resumed, err := (Runner{Store: store, Stage: &fakeStage{}}).Run(context.Background(), Options{RunID: "run-tenant-empty", Provider: "github", ClusterServer: "https://api.example", Resume: true})
-		Expect(err).To(MatchError(ContainSubstring("resume ownership mismatch")))
-		Expect(resumed.Fixture.TenantNamespace).To(Equal("tenant-a"))
+	When("Options.CreatedAt is set", func() {
+		It("should use it for the manifest and directory", func() {
+			store := evidence.NewManifestStore(GinkgoT().TempDir())
+			runner := Runner{Store: store, Stage: &fakeStage{}, Now: fixedClock(time.Date(2026, 10, 9, 23, 0, 0, 0, time.UTC))}
+
+			manifest, err := runner.Run(context.Background(), Options{RunID: "run-1", Provider: "github", ClusterServer: "https://api.example",
+				CreatedAt: time.Date(2026, 10, 5, 14, 23, 0, 0, time.FixedZone("IDT", 3*3600))})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(manifest.CreatedAt).Should(Equal(time.Date(2026, 10, 5, 14, 23, 0, 0, time.FixedZone("IDT", 3*3600))))
+			Expect(manifest.ArtifactDirectory).Should(Equal("github-run-14:23_5.10.2026_run-1"))
+		})
+	})
+
+	When("Options.CreatedAt is zero", func() {
+		It("should use the runner clock", func() {
+			store := evidence.NewManifestStore(GinkgoT().TempDir())
+			runner := Runner{Store: store, Stage: &fakeStage{}, Now: fixedClock(time.Date(2026, 10, 5, 14, 23, 0, 0, time.UTC))}
+
+			manifest, err := runner.Run(context.Background(), Options{RunID: "run-1", Provider: "github", ClusterServer: "https://api.example"})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(manifest.CreatedAt).Should(Equal(time.Date(2026, 10, 5, 14, 23, 0, 0, time.UTC)))
+			Expect(manifest.ArtifactDirectory).Should(Equal("github-run-14:23_5.10.2026_run-1"))
+		})
+	})
+
+	When("the run fails", func() {
+		It("should still publish the created manifest", func() {
+			store := evidence.NewManifestStore(GinkgoT().TempDir())
+			calls := 0
+			hook := func(model.RunManifest) { calls++ }
+			runner := Runner{Store: store, Stage: &fakeStage{fail: "build-outputs"}}
+
+			manifest, err := runner.Run(context.Background(), Options{RunID: "run-1", Provider: "github", ClusterServer: "https://api.example", OnManifestCreated: hook})
+			Expect(err).Should(HaveOccurred())
+			Expect(calls).Should(Equal(1))
+			Expect(manifest.Phase).Should(Equal(model.PhaseFailed))
+		})
 	})
 })

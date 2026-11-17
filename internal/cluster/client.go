@@ -76,6 +76,20 @@ func NewClientSet(kubeconfig string) (*ClientSet, error) {
 	return NewClientSetFromConfig(config)
 }
 
+// ServerFromKubeconfig returns the API server URL recorded in the kubeconfig at path.
+func ServerFromKubeconfig(path string) (string, error) {
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	// An empty path keeps the ambient KUBECONFIG/default kubeconfig resolution.
+	if path != "" {
+		loadingRules.ExplicitPath = path
+	}
+	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	if err != nil {
+		return "", fmt.Errorf("load kubeconfig: %w", err)
+	}
+	return strings.TrimRight(config.Host, "/"), nil
+}
+
 // NewClientSetFromConfig creates Kubernetes, dynamic, and discovery clients from a REST config.
 func NewClientSetFromConfig(config *rest.Config) (*ClientSet, error) {
 	if config == nil {

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redhat-appstudio/konflux-test/internal/evidence"
-	"github.com/redhat-appstudio/konflux-test/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/evidence"
+	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"sigs.k8s.io/yaml"
 )
 
