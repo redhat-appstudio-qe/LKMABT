@@ -126,6 +126,25 @@ var _ = Describe("GitHub provider", func() {
 	})
 })
 
+var _ = Describe("CheckOrganizationAccess", func() {
+	When("the token can list installations", func() {
+		It("should pass", func() {
+			client := &fakeClient{installations: []*gh.Installation{{AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("all")}}}
+
+			Expect(New(client).CheckOrganizationAccess(context.Background())).Should(Succeed())
+		})
+	})
+
+	When("the token cannot list installations", func() {
+		It("should return the API error", func() {
+			client := &fakeClient{installationErr: &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}}
+
+			err := New(client).CheckOrganizationAccess(context.Background())
+			Expect(err).Should(MatchError(ContainSubstring("list GitHub App installations for redhat-appstudio-qe")))
+		})
+	})
+})
+
 var _ = Describe("VerifyGitHubAppInstallation", func() {
 	When("the cluster app is installed for all repositories", func() {
 		It("should pass", func() {

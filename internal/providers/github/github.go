@@ -145,6 +145,17 @@ func (a *Adapter) ValidateFixture(ctx context.Context, fixture providers.Fixture
 	return providers.FixtureRepository{Owner: canonicalOwner, Name: canonicalName, URL: CanonicalFixtureURL}, nil
 }
 
+// CheckOrganizationAccess confirms the token can list App installations for the fixture organization.
+func (a *Adapter) CheckOrganizationAccess(ctx context.Context) error {
+	if a == nil || a.client == nil {
+		return fmt.Errorf("github client is required")
+	}
+	if _, err := a.client.ListOrganizationInstallations(ctx, canonicalOwner); err != nil {
+		return fmt.Errorf("list GitHub App installations for %s: %w", canonicalOwner, err)
+	}
+	return nil
+}
+
 // VerifyGitHubAppInstallation confirms the cluster GitHub App can onboard the canonical fixture repository.
 func (a *Adapter) VerifyGitHubAppInstallation(ctx context.Context, appSlug string) error {
 	if a == nil || a.client == nil {
