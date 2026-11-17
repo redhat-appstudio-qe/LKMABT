@@ -14,7 +14,9 @@
 # ibmcloud-endpoint optional, roks only ; vpe (default), private, or link ; the
 #            master endpoint the written kubeconfig points at
 # kubeconfig optional, defaults to ~/.kube/config-<kflux> (kflux's own per-cluster
-#            path); "~" expands, relative paths resolve against this file
+#            path); "~" expands, relative paths resolve against this file. Every
+#            kubeconfig is verified with "oc whoami" before the run; a rejected
+#            one is refreshed through kflux or "oc login".
 # server     optional API server URL ; omitted means the kubeconfig's own server is used
 clusters:
   - name: kflux-ocp-p01

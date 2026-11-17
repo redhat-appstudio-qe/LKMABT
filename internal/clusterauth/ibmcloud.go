@@ -14,23 +14,10 @@ import (
 
 const (
 	ibmcloudBinaryName = "ibmcloud"
-	// roksVerifyTimeout bounds the non-interactive oc whoami check, which can stall
-	// in an exec credential plugin before any API request is made.
-	roksVerifyTimeout = time.Minute
 	// ibmcloudCommandTimeout bounds non-interactive IBM Cloud CLI calls; the
 	// interactive login --sso is never bounded.
 	ibmcloudCommandTimeout = 2 * time.Minute
 )
-
-// ibmcloudRejections are the oc whoami messages a ROKS cluster returns when the
-// IBM Cloud user has no working cluster identity.
-var ibmcloudRejections = []string{
-	"Unauthorized",
-	"must be logged in to the server",
-	"Authentication failed",
-	"Could not find user",
-	"the server has asked for the client to provide credentials",
-}
 
 // authenticateROKS verifies or writes one kubeconfig per ROKS entry, returning
 // one error per cluster that remains unusable.
@@ -47,11 +34,11 @@ func (l Ladder) authenticateROKS(ctx context.Context, targets []clusterfile.Entr
 		// A readable kubeconfig still needs proof: oc whoami can reject it while the
 		// file stays on disk, and a rerun would otherwise trust that file.
 		if readableFile(target.Kubeconfig) {
-			output, err := l.verifyROKSCluster(ctx, target)
+			output, err := l.verifyKubeconfig(ctx, target)
 			if err == nil {
 				continue
 			}
-			if !isROKSRejection(strings.TrimSpace(output)) {
+			if !isCredentialRejection(strings.TrimSpace(output)) {
 				failures[target.Name] = roksVerificationFailure(target, output, err)
 				continue
 			}
@@ -121,50 +108,21 @@ func (l Ladder) loginROKSCluster(ctx context.Context, binary string, entry clust
 		}
 		return fmt.Errorf("authentication failed: cluster %s: ibmcloud ks cluster config: %w", entry.Name, err)
 	}
-	output, err := l.verifyROKSCluster(ctx, entry)
+	output, err := l.verifyKubeconfig(ctx, entry)
 	if err != nil {
 		return roksVerificationFailure(entry, output, err)
 	}
 	return nil
 }
 
-// verifyROKSCluster proves a ROKS kubeconfig works and returns oc whoami's output.
-func (l Ladder) verifyROKSCluster(ctx context.Context, entry clusterfile.Entry) (string, error) {
-	verifyCtx, cancel := context.WithTimeout(ctx, roksVerifyTimeout)
-	output, err := l.Runner.Output(verifyCtx, CommandSpec{Name: "oc", Args: []string{"whoami", "--request-timeout=30s"}, Env: []string{"KUBECONFIG=" + entry.Kubeconfig}})
-	timedOut := errors.Is(verifyCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)
-	cancel()
-	if err != nil {
-		if detail := strings.TrimSpace(output); detail != "" {
-			l.logf("cluster %s: oc whoami said: %s", entry.Name, detail)
-		}
-		if timedOut {
-			return output, fmt.Errorf("oc whoami timed out after %s", roksVerifyTimeout)
-		}
-		return output, err
-	}
-	l.logf("cluster %s authenticated as %s", entry.Name, strings.TrimSpace(output))
-	return output, nil
-}
-
 // roksVerificationFailure explains why a written ROKS kubeconfig is unusable.
 func roksVerificationFailure(entry clusterfile.Entry, output string, cause error) error {
 	detail := strings.TrimSpace(output)
-	if isROKSRejection(detail) {
+	if isCredentialRejection(detail) {
 		return fmt.Errorf("authentication failed: cluster %s: the API server rejected the credentials from the kubeconfig written by ibmcloud ks cluster config. If you have never opened this cluster's OpenShift web console, complete that first-time login once from the IBM Cloud console, then re-run. If you have logged in before, run ibmcloud login --sso and retry", entry.Name)
 	}
 	if detail == "" {
 		detail = cause.Error()
 	}
 	return fmt.Errorf("authentication failed: cluster %s: oc whoami failed: %s", entry.Name, detail)
-}
-
-// isROKSRejection reports whether oc whoami output rejects the cluster identity.
-func isROKSRejection(output string) bool {
-	for _, rejection := range ibmcloudRejections {
-		if strings.Contains(output, rejection) {
-			return true
-		}
-	}
-	return false
 }

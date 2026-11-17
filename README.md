@@ -32,10 +32,10 @@ resources.
   `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is catalog cluster `ocp-p01`, so
   that entry needs `kflux: ocp-p01`. List the catalog with `kflux cluster list`;
   an unknown name fails with kflux's own `unknown cluster` error.
-- Authentication follows a ladder per cluster: an existing valid kubeconfig is
-  used first. `roks` kubeconfigs are verified with `oc whoami` on every run,
-  because a rejected file stays readable; a rejected one is refreshed through
-  the IBM Cloud CLI, and every other entry goes through kflux then `oc login`.
+- Authentication follows a ladder per cluster: every kubeconfig is verified
+  with `oc whoami` on every run, because a rejected token leaves the file
+  readable. A rejected `roks` kubeconfig is refreshed through the IBM Cloud CLI;
+  every other entry goes through kflux then `oc login`.
   ROKS runs reuse an active `ibmcloud` session, run `ibmcloud login --sso` when
   there is none, write the entry's kubeconfig with
   `ibmcloud ks cluster config --cluster <ibmcloud> --endpoint <ibmcloud-endpoint>`
@@ -45,8 +45,8 @@ resources.
   Cloud console, then re-run. ROKS entries never fall through to kflux or
   `oc login`. For other entries, one
   `kflux cluster login -c <kflux> [-c <kflux>...]` runs for every entry that
-  uses its default kubeconfig path, with kflux installed from
-  https://gitlab.cee.redhat.com/hares/kflux.git into
+  fails verification and uses its default kubeconfig path, with kflux installed
+  from https://gitlab.cee.redhat.com/hares/kflux.git into
   `~/.local/share/lkmabt/kflux-src` and `~/.local/bin/kflux` when missing from
   `PATH`; otherwise `oc login` runs with `KUBECONFIG` set to the entry's
   kubeconfig path.
@@ -54,10 +54,9 @@ resources.
   `PATH`, `oc` for the post-login check, and network access to the configured
   master endpoint (VPE endpoints require the VPC VPN). An existing ROKS
   kubeconfig needs only `oc` for its verification.
-- For `ocp` entries, an existing kubeconfig with expired credentials fails that
-  cluster at `preflight`, not at `authentication`. For `roks` entries, a rejected
-  kubeconfig fails at `authentication` so the refresh path and first-time-login
-  instructions stay visible.
+- A kubeconfig the ladder cannot replace fails that cluster at `authentication`,
+  before any cluster API work starts. For `roks` entries the failure keeps the
+  refresh path and first-time-login instructions visible.
 - A ready `multi-platform-controller` deployment and `host-config` entries for
   `linux/amd64` and `linux/arm64`. Dynamic arm64 provisioning is sufficient;
   physical arm64 nodes are not required.

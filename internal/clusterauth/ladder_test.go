@@ -31,7 +31,7 @@ func writeFile(path string) {
 
 var _ = Describe("Authenticate", func() {
 	When("every kubeconfig exists", func() {
-		It("should return no failures and run nothing", func() {
+		It("should verify each kubeconfig without logging in", func() {
 			home := GinkgoT().TempDir()
 			c1 := defaultEntry("c1", home)
 			c2 := defaultEntry("c2", home)
@@ -41,6 +41,103 @@ var _ = Describe("Authenticate", func() {
 
 			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1, c2})
 			Expect(failures).Should(BeEmpty())
+			Expect(fake.runs).Should(BeEmpty())
+			Expect(fake.outputs).Should(HaveLen(2))
+			Expect(fake.outputs[0].Name).Should(Equal("oc"))
+			Expect(fake.outputs[0].Args).Should(Equal([]string{"whoami", "--request-timeout=30s"}))
+			Expect(fake.outputs[0].Env).Should(Equal([]string{"KUBECONFIG=" + c1.Kubeconfig}))
+		})
+	})
+
+	When("the stored credentials were rejected", func() {
+		It("should refresh a default-path kubeconfig with kflux before running", func() {
+			home := GinkgoT().TempDir()
+			c1 := defaultEntry("c1", home)
+			writeFile(c1.Kubeconfig)
+			log := &bytes.Buffer{}
+			authenticated := false
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onRun = func(spec CommandSpec) error {
+				if spec.Name == "/usr/local/bin/kflux" {
+					authenticated = true
+				}
+				return nil
+			}
+			fake.onOutput = func(CommandSpec) (string, error) {
+				if !authenticated {
+					return "error: You must be logged in to the server (Unauthorized)", errors.New("exit status 1")
+				}
+				return "mrath\n", nil
+			}
+
+			failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{c1})
+			Expect(failures).Should(BeEmpty())
+			Expect(fake.runs).Should(HaveLen(1))
+			Expect(fake.runs[0]).Should(Equal(CommandSpec{Name: "/usr/local/bin/kflux", Args: []string{"cluster", "login", "-c", "c1"}}))
+			Expect(fake.outputs).Should(HaveLen(2))
+			Expect(log.String()).Should(ContainSubstring("cluster c1 authenticated as mrath"))
+		})
+
+		It("should run oc login for a custom-path kubeconfig without kflux", func() {
+			home := GinkgoT().TempDir()
+			c2 := customEntry("c2", filepath.Join(home, "custom", "c2"), "")
+			writeFile(c2.Kubeconfig)
+			authenticated := false
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onRun = func(spec CommandSpec) error {
+				if spec.Name == "oc" {
+					authenticated = true
+				}
+				return nil
+			}
+			fake.onOutput = func(CommandSpec) (string, error) {
+				if !authenticated {
+					return "Unauthorized", errors.New("exit status 1")
+				}
+				return "mrath\n", nil
+			}
+
+			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c2})
+			Expect(failures).Should(BeEmpty())
+			Expect(fake.runs).Should(HaveLen(1))
+			Expect(fake.runs[0].Name).Should(Equal("oc"))
+			Expect(fake.runs[0].Args).Should(Equal([]string{"login"}))
+		})
+
+		It("should fail at authentication when the ladder cannot replace the credentials", func() {
+			home := GinkgoT().TempDir()
+			c1 := defaultEntry("c1", home)
+			writeFile(c1.Kubeconfig)
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onOutput = func(CommandSpec) (string, error) {
+				return "error: You must be logged in to the server (Unauthorized)", errors.New("exit status 1")
+			}
+
+			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
+			Expect(failures).Should(HaveLen(1))
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("authentication failed")))
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring(c1.Kubeconfig)))
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("Unauthorized")))
+			Expect(fake.runs).Should(HaveLen(2))
+			Expect(fake.runs[0].Name).Should(Equal("/usr/local/bin/kflux"))
+			Expect(fake.runs[1].Name).Should(Equal("oc"))
+		})
+	})
+
+	When("the API server cannot be reached", func() {
+		It("should report the verification failure without attempting a login", func() {
+			home := GinkgoT().TempDir()
+			c1 := defaultEntry("c1", home)
+			writeFile(c1.Kubeconfig)
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onOutput = func(CommandSpec) (string, error) {
+				return "Unable to connect to the server: dial tcp: lookup api.c1.example: no such host", errors.New("exit status 1")
+			}
+
+			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
+			Expect(failures).Should(HaveLen(1))
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("could not verify kubeconfig")))
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("no such host")))
 			Expect(fake.runs).Should(BeEmpty())
 		})
 	})
@@ -61,6 +158,8 @@ var _ = Describe("Authenticate", func() {
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(HaveLen(1))
 			Expect(fake.runs[0]).Should(Equal(CommandSpec{Name: "/usr/local/bin/kflux", Args: []string{"cluster", "login", "-c", "c1"}}))
+			// The missing file is never handed to oc whoami; only the kflux result is verified.
+			Expect(fake.outputs).Should(HaveLen(1))
 		})
 	})
 
@@ -244,6 +343,10 @@ var _ = Describe("Authenticate", func() {
 			Expect(failures["c1"]).Should(HaveOccurred())
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("authentication failed")))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring(filepath.Join(home, ".kube", "config-c1"))))
+			// A kubeconfig that was never written is missing, not rejected; the
+			// API server never saw it.
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("no readable kubeconfig")))
+			Expect(failures["c1"]).ShouldNot(MatchError(ContainSubstring("was rejected")))
 		})
 	})
 

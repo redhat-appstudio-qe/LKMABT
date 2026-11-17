@@ -214,6 +214,7 @@ var _ = Describe("Execute", func() {
 					Expect(os.Unsetenv("HOME")).Should(Succeed())
 				}
 			}()
+			stubOC()
 
 			kubeconfigC1 := writeKubeconfig(dir, "c1")
 			kubeconfigC2 := writeKubeconfig(dir, "c2")
@@ -272,6 +273,7 @@ var _ = Describe("Execute", func() {
 					Expect(os.Unsetenv("HOME")).Should(Succeed())
 				}
 			}()
+			stubOC()
 
 			request := config.Defaults()
 			request.Command = config.CommandRun
@@ -298,4 +300,13 @@ var _ = Describe("Execute", func() {
 // writeKubeconfig writes a minimal kubeconfig for cluster name and returns its path.
 func writeKubeconfig(dir, name string) string {
 	return writeSharedServerKubeconfig(dir, name, "https://api."+name+".example")
+}
+
+// stubOC puts a no-op oc on PATH so the authentication ladder accepts fixture
+// kubeconfigs without contacting a live cluster.
+func stubOC() {
+	dir := GinkgoT().TempDir()
+	script := filepath.Join(dir, "oc")
+	Expect(os.WriteFile(script, []byte("#!/bin/sh\nif [ \"$1\" = whoami ]; then echo test-user; fi\nexit 0\n"), 0o700)).Should(Succeed())
+	GinkgoT().Setenv("PATH", dir)
 }
