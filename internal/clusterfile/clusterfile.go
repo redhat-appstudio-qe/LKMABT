@@ -19,8 +19,17 @@ const DefaultPath = ".lkmabt-clusters.yaml"
 // Entry is one cluster listed in the clusters file.
 type Entry struct {
 	Name       string `json:"name"`
+	Kflux      string `json:"kflux,omitempty"`
 	Kubeconfig string `json:"kubeconfig,omitempty"`
 	Server     string `json:"server,omitempty"`
+}
+
+// KfluxName returns the kflux catalog name, which defaults to the entry name.
+func (e Entry) KfluxName() string {
+	if e.Kflux != "" {
+		return e.Kflux
+	}
+	return e.Name
 }
 
 // document is the strict YAML shape of the clusters file.
@@ -38,9 +47,9 @@ func ValidName(name string) bool {
 	return name != "." && name != ".." && namePattern.MatchString(name)
 }
 
-// DefaultKubeconfig returns the default kubeconfig path for a cluster named name.
-func DefaultKubeconfig(home, name string) string {
-	return filepath.Join(home, ".kube", "config-"+name)
+// DefaultKubeconfig returns the default kubeconfig path for a kflux catalog name.
+func DefaultKubeconfig(home, kfluxName string) string {
+	return filepath.Join(home, ".kube", "config-"+kfluxName)
 }
 
 // Find returns the entry named name.
@@ -108,7 +117,17 @@ func normalize(entries []Entry, path, baseDir, home string) ([]Entry, error) {
 			return nil, fmt.Errorf("clusters file %q lists duplicate cluster name %q", path, name)
 		}
 		seen[name] = struct{}{}
-		kubeconfig := resolveKubeconfig(entry.Kubeconfig, name, baseDir, home)
+		kflux := strings.TrimSpace(entry.Kflux)
+		// An absent kflux name means the entry name is the catalog name.
+		if kflux == "" {
+			kflux = name
+		}
+		// kflux names are argv elements, not paths, but they still bound-check to
+		// keep one grammar for both fields and to reject accidental globs.
+		if !ValidName(kflux) {
+			return nil, fmt.Errorf("clusters file %q cluster %q kflux name %q must match [A-Za-z0-9._-]+", path, name, kflux)
+		}
+		kubeconfig := resolveKubeconfig(entry.Kubeconfig, kflux, baseDir, home)
 		if other, found := seenKubeconfigs[kubeconfig]; found {
 			return nil, fmt.Errorf("clusters file %q clusters %q and %q resolve to the same kubeconfig path %s", path, other, name, kubeconfig)
 		}
@@ -117,16 +136,16 @@ func normalize(entries []Entry, path, baseDir, home string) ([]Entry, error) {
 		if err != nil {
 			return nil, err
 		}
-		normalized = append(normalized, Entry{Name: name, Kubeconfig: kubeconfig, Server: server})
+		normalized = append(normalized, Entry{Name: name, Kflux: kflux, Kubeconfig: kubeconfig, Server: server})
 	}
 	return normalized, nil
 }
 
 // resolveKubeconfig applies the default path, ~ expansion, and relative-path anchoring.
-func resolveKubeconfig(value, name, baseDir, home string) string {
+func resolveKubeconfig(value, kfluxName, baseDir, home string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return DefaultKubeconfig(home, name)
+		return DefaultKubeconfig(home, kfluxName)
 	}
 	if value == "~" {
 		return home
@@ -158,6 +177,7 @@ func normalizeServer(value, name, path string) (string, error) {
 }
 
 // UsesDefaultKubeconfig reports whether the entry resolves to the default kubeconfig path.
+// The default path is kflux's own per-cluster path, so it follows the kflux catalog name.
 func (e Entry) UsesDefaultKubeconfig(home string) bool {
-	return e.Kubeconfig == DefaultKubeconfig(home, e.Name)
+	return e.Kubeconfig == DefaultKubeconfig(home, e.KfluxName())
 }

@@ -105,10 +105,11 @@ func (l Ladder) runKfluxLogin(ctx context.Context, targets []clusterfile.Entry) 
 		l.logf("kflux unavailable: %v; falling back to oc login", err)
 		return
 	}
-	args := []string{"cluster", "login", "-C"}
-	// A single target logs into that cluster alone instead of the whole catalog.
-	if len(targets) == 1 {
-		args = []string{"cluster", "login", "-c", targets[0].Name}
+	args := []string{"cluster", "login"}
+	// Naming each catalog cluster keeps the login to the configured set; -C would
+	// log in to every cluster in kflux's catalog.
+	for _, target := range targets {
+		args = append(args, "-c", target.KfluxName())
 	}
 	l.logf("running %s %s", binary, strings.Join(args, " "))
 	if err := l.Runner.Run(ctx, CommandSpec{Name: binary, Args: args}); err != nil {

@@ -1,9 +1,20 @@
 # Copy to .lkmabt-clusters.yaml and edit locally. Never commit the copy.
-# name       required, unique, [A-Za-z0-9._-]+ ; also the kflux -c target and the report directory name
-# kubeconfig optional, defaults to ~/.kube/config-<name> ; "~" expands, relative paths resolve against this file
+# name       required, unique, [A-Za-z0-9._-]+ ; the report directory name and the
+#            identity used by --cluster and in logs
+# kflux      optional, [A-Za-z0-9._-]+ ; the kflux catalog name passed to
+#            "kflux cluster login -c". Defaults to name. Set it when your own
+#            name for a cluster differs from kflux's, e.g. the API server host
+#            kflux-ocp-p01.7ayg.p1.openshiftapps.com is catalog cluster ocp-p01.
+#            List catalog names with "kflux cluster list".
+# kubeconfig optional, defaults to ~/.kube/config-<kflux> (kflux's own per-cluster
+#            path); "~" expands, relative paths resolve against this file
 # server     optional API server URL ; omitted means the kubeconfig's own server is used
 clusters:
-  - name: kflux-lw-p01
-  - name: kflux-rhel-p01
-    kubeconfig: ~/.kube/config-kflux-rhel-p01
-    server: https://api.kflux-rhel-p01.example.com:6443
+  - name: kflux-ocp-p01
+    kflux: ocp-p01
+#  - name: kflux-rhel-p01
+#    kflux: rhel-p01
+#    server: https://api.kflux-rhel-p01.example.com:6443
+#  - name: kflux-osp-p01
+#    kflux: osp-p01
+#    kubeconfig: ~/.kube/config-kflux-osp-p01
