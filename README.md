@@ -64,12 +64,13 @@ resources.
    `konflux-info/konflux-public-info` and that app must be installed for the
    fixture organization. GitHub runs verify the installation at `preflight`,
    before any cluster mutation. In an interactive session, a missing
-   installation opens the app's installation page, prints the URL, and waits
-   for an organization administrator to approve it, rechecking every 10
-   seconds. Failed checks are reported and retried; when the preflight timeout
-   expires, the run asks whether to keep waiting. Declining, or a
-   non-interactive run, fails that cluster with the installation URL. An app
-   installed for selected repositories must include the fixture repository;
+   installation opens the app's installation page, prints the installation
+   steps, and waits for an organization administrator to approve it,
+   rechecking every 10 seconds. Failed checks are retried, and progress,
+   including the latest failure, is reported every 5 minutes. When the
+   preflight timeout expires, the run asks whether to keep waiting. Declining,
+   or a non-interactive run, fails that cluster with the installation URL. An
+   app installed for selected repositories must include the fixture repository;
    the error names the installation settings URL. When the token cannot list
    installation repositories, preflight logs a warning and continues; the
    trigger-stage PaC wait remains the backstop for a missing selection.

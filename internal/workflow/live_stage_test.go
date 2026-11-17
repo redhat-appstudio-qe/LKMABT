@@ -405,7 +405,11 @@ var _ = Describe("LiveStage", func() {
 				Expect(opened).Should(Equal([]string{required.InstallURL}))
 				Expect(provider.calls).Should(Equal(3))
 				Expect(out.String()).Should(ContainSubstring(required.InstallURL))
-				Expect(out.String()).Should(ContainSubstring("waiting for GitHub App cluster-app installation"))
+				Expect(out.String()).Should(ContainSubstring("To install it:"))
+				Expect(out.String()).Should(ContainSubstring("Sign in to GitHub as an organization owner of redhat-appstudio-qe"))
+				Expect(out.String()).Should(ContainSubstring("Select the redhat-appstudio-qe organization"))
+				Expect(out.String()).Should(ContainSubstring("Grant access to redhat-appstudio-qe/dr_test_mathwizz, or to all repositories"))
+				Expect(out.String()).Should(ContainSubstring("Return to this terminal"))
 				Expect(out.String()).Should(ContainSubstring("GitHub App cluster-app installation verified"))
 			})
 		})
@@ -458,7 +462,7 @@ var _ = Describe("LiveStage", func() {
 		})
 
 		When("an installation check fails transiently", func() {
-			It("should report and retry the check", func() {
+			It("should retry without warning before the status interval", func() {
 				required := appInstallationRequired()
 				provider := &githubAppProviderStub{errs: []error{required, errors.New("502 Bad Gateway")}}
 				out := &bytes.Buffer{}
@@ -476,7 +480,39 @@ var _ = Describe("LiveStage", func() {
 
 				Expect(stage.verifyGitHubApp(context.Background())).Should(Succeed())
 				Expect(provider.calls).Should(Equal(3))
-				Expect(out.String()).Should(ContainSubstring("installation check failed: 502 Bad Gateway; retrying"))
+				Expect(out.String()).ShouldNot(ContainSubstring("502 Bad Gateway"))
+				Expect(out.String()).ShouldNot(ContainSubstring("Still waiting"))
+			})
+		})
+
+		When("installation checks keep failing", func() {
+			It("should report the latest failure at the status interval", func() {
+				required := appInstallationRequired()
+				provider := &githubAppProviderStub{errs: []error{required}, err: errors.New("502 Bad Gateway")}
+				out := &bytes.Buffer{}
+				stage := &LiveStage{
+					Provider:    provider,
+					Clients:     &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
+					Interactive: true,
+					Out:         out,
+					OpenURL:     func(string) error { return nil },
+					Log:         &bytes.Buffer{},
+				}
+				previousPoll, previousStatus := githubAppPollInterval, githubAppStatusInterval
+				githubAppPollInterval = time.Millisecond
+				githubAppStatusInterval = 5 * time.Millisecond
+				defer func() {
+					githubAppPollInterval = previousPoll
+					githubAppStatusInterval = previousStatus
+				}()
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+				defer cancel()
+
+				err := stage.verifyGitHubApp(ctx)
+				Expect(errors.Is(err, context.DeadlineExceeded)).Should(BeTrue())
+				Expect(err).Should(MatchError(ContainSubstring("last check: 502 Bad Gateway")))
+				Expect(out.String()).Should(ContainSubstring("Still waiting for GitHub App cluster-app installation"))
+				Expect(out.String()).Should(ContainSubstring("last check: 502 Bad Gateway"))
 			})
 		})
 

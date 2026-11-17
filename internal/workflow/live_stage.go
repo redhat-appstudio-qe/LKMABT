@@ -28,6 +28,9 @@ var PipelineRunGVR = schema.GroupVersionResource{Group: "tekton.dev", Version: "
 // githubAppPollInterval bounds how often an interactive preflight rechecks a pending App installation.
 var githubAppPollInterval = 10 * time.Second
 
+// githubAppStatusInterval bounds how often the wait reports progress to the user.
+var githubAppStatusInterval = 5 * time.Minute
+
 type LiveStage struct {
 	Request              config.Request
 	Clients              *cluster.ClientSet
@@ -132,15 +135,21 @@ func (s *LiveStage) verifyGitHubApp(ctx context.Context) error {
 
 // waitForGitHubAppInstallation opens the App installation page and polls until an administrator installs it.
 func (s *LiveStage) waitForGitHubAppInstallation(ctx context.Context, checker cluster.GitHubAppChecker, required *providers.AppInstallationRequiredError) error {
+	s.notice("GitHub App %s is not installed for organization %s.", required.AppSlug, required.Owner)
+	s.notice("To install it:")
+	s.notice("  1. Sign in to GitHub as an organization owner of %s.", required.Owner)
+	s.notice("  2. Open %s", required.InstallURL)
+	s.notice("  3. Select the %s organization.", required.Owner)
+	s.notice("  4. Grant access to %s, or to all repositories.", required.Repository)
+	s.notice("  5. Return to this terminal; the harness checks every %s and continues automatically.", githubAppPollInterval)
 	open := s.OpenURL
 	if open == nil {
 		open = openBrowser
 	}
-	s.notice("GitHub App %s is not installed for organization %s; opening %s", required.AppSlug, required.Owner, required.InstallURL)
 	if err := open(required.InstallURL); err != nil {
-		s.notice("could not open a browser: %v; install the app at %s", err, required.InstallURL)
+		s.notice("Could not open a browser: %v", err)
+		s.notice("Open the URL in step 2 manually.")
 	}
-	s.notice("waiting for GitHub App %s installation (checking every %s)", required.AppSlug, githubAppPollInterval)
 	err := s.pollGitHubAppInstallation(ctx, checker, required)
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) || !s.Interactive || s.Prompt == nil {
 		return err
@@ -163,10 +172,14 @@ func (s *LiveStage) waitForGitHubAppInstallation(ctx context.Context, checker cl
 }
 
 // pollGitHubAppInstallation checks the installation every interval and retries
-// check failures until the context ends.
+// check failures until the context ends. Progress, including the latest check
+// failure, is reported at most every status interval.
 func (s *LiveStage) pollGitHubAppInstallation(ctx context.Context, checker cluster.GitHubAppChecker, required *providers.AppInstallationRequiredError) error {
 	ticker := time.NewTicker(githubAppPollInterval)
 	defer ticker.Stop()
+	statusTicker := time.NewTicker(githubAppStatusInterval)
+	defer statusTicker.Stop()
+	started := time.Now()
 	var lastCheckError string
 	for {
 		select {
@@ -175,6 +188,12 @@ func (s *LiveStage) pollGitHubAppInstallation(ctx context.Context, checker clust
 				return fmt.Errorf("waiting for GitHub App %s installation in %s: %w (last check: %s)", required.AppSlug, required.Owner, ctx.Err(), lastCheckError)
 			}
 			return fmt.Errorf("waiting for GitHub App %s installation in %s: %w", required.AppSlug, required.Owner, ctx.Err())
+		case <-statusTicker.C:
+			if lastCheckError != "" {
+				s.notice("Still waiting for GitHub App %s installation after %s; last check: %s", required.AppSlug, time.Since(started).Round(time.Second), lastCheckError)
+				continue
+			}
+			s.notice("Still waiting for GitHub App %s installation after %s; install it from %s", required.AppSlug, time.Since(started).Round(time.Second), required.InstallURL)
 		case <-ticker.C:
 			err := checker.VerifyGitHubAppInstallation(ctx, required.AppSlug)
 			if err == nil {
@@ -189,10 +208,7 @@ func (s *LiveStage) pollGitHubAppInstallation(ctx context.Context, checker clust
 				lastCheckError = ""
 				continue
 			}
-			if message := err.Error(); message != lastCheckError {
-				s.notice("GitHub App %s installation check failed: %v; retrying", required.AppSlug, err)
-				lastCheckError = message
-			}
+			lastCheckError = err.Error()
 		}
 	}
 }
