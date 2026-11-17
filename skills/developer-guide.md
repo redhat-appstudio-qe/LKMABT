@@ -216,13 +216,16 @@ When `GITHUB_TOKEN` is empty, GitHub runs call `gh auth login --web` with a
 private `GH_CONFIG_DIR` and `--insecure-storage`, then read the token with
 `gh auth token`. A configured token is checked against the organization's App
 installations; an interactive run replaces a token that cannot list them with
-the `gh` login. When `GITLAB_BOT_TOKEN` is empty, GitLab runs `glab auth login`
-(choose Web) with a private `GLAB_CONFIG_DIR`, then reads the token with
-`glab config get token --host`; the glab directory stays in the store so
-`glab api user` can refresh the OAuth token before each cluster. Each acquired
-token is kept in a 0600 file inside one run-scoped `lkmabt-auth-*` temporary
-directory and reused for every cluster. The ephemeral GitLab token is also
-written to the tenant SCM Secret for PaC, and finalization deletes that Secret.
+the token from the existing `gh` login when it can list them, and otherwise
+with the `gh` browser login. When `GITLAB_BOT_TOKEN` is empty, GitLab runs
+`glab auth login` (choose Web) with a private `GLAB_CONFIG_DIR`, then reads the
+token with `glab config get token --host`; the glab directory stays in the
+store so `glab api user` can refresh the OAuth token before each cluster. Each
+acquired token is kept in a 0600 file inside one run-scoped `lkmabt-auth-*`
+temporary directory and reused for every cluster. The ephemeral GitLab token is
+also written to the tenant SCM Secret for PaC, and finalization deletes that
+Secret.
+
 The directory is removed when the run ends, including after failures and
 cancellations, and a removal failure fails the run. Authentication requires an
 interactive terminal; non-interactive runs must provide the tokens. A

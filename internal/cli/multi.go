@@ -23,11 +23,12 @@ import (
 
 // Credential acquisition and destruction are replaceable in tests.
 var (
-	authenticateGitHub = auth.GitHubToken
-	authenticateGitLab = auth.GitLabToken
-	refreshGitLabToken = auth.RefreshGitLabToken
-	destroyCredentials = (*auth.Store).Destroy
-	checkGitHubAccess  = func(ctx context.Context, token string) error {
+	authenticateGitHub      = auth.GitHubToken
+	authenticateGitLab      = auth.GitLabToken
+	refreshGitLabToken      = auth.RefreshGitLabToken
+	readExistingGitHubToken = auth.ExistingGitHubToken
+	destroyCredentials      = (*auth.Store).Destroy
+	checkGitHubAccess       = func(ctx context.Context, token string) error {
 		adapter, err := github.NewFromCredentials(token)
 		if err != nil {
 			return err
@@ -54,9 +55,19 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 	gitlabTokenNeeded := providerNeedsGitLab(request.Provider) && strings.TrimSpace(request.Credentials.GitLabToken) == ""
 	if len(entries) > 0 && providerNeedsGitHub(request.Provider) && !githubTokenNeeded && console.Interactive() {
 		if err := checkGitHubAccess(ctx, request.Credentials.GitHubToken); err != nil {
-			console.Printf("github: configured token cannot list App installations: %v; starting the gh browser login", err)
-			request.Credentials.GitHubToken = ""
-			githubTokenNeeded = true
+			console.Printf("github: configured token cannot list App installations: %v", err)
+			token, reuseErr := readExistingGitHubToken(ctx, clusterauth.ExecRunner{})
+			if reuseErr == nil {
+				reuseErr = checkGitHubAccess(ctx, token)
+			}
+			if reuseErr == nil {
+				console.Printf("github: using the existing gh login")
+				request.Credentials.GitHubToken = token
+			} else {
+				console.Printf("github: existing gh login is not usable: %v; starting the gh browser login", reuseErr)
+				request.Credentials.GitHubToken = ""
+				githubTokenNeeded = true
+			}
 		}
 	}
 	var (

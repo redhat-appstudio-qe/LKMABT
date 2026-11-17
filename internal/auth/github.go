@@ -17,6 +17,31 @@ const (
 	ghConfigSubdir      = "gh"
 )
 
+// ExistingGitHubToken returns the token stored by the user's normal gh login.
+// It clears provider token variables so gh reads its own credential instead of
+// an ambient GH_TOKEN or GITHUB_TOKEN.
+func ExistingGitHubToken(ctx context.Context, runner clusterauth.CommandRunner) (string, error) {
+	if runner == nil {
+		return "", fmt.Errorf("command runner is required")
+	}
+	if _, err := runner.LookPath("gh"); err != nil {
+		return "", fmt.Errorf("GitHub CLI is required to reuse an existing login: %w", err)
+	}
+	output, err := runner.Stdout(ctx, clusterauth.CommandSpec{
+		Name:     "gh",
+		Args:     []string{"auth", "token", "--hostname", githubHostname},
+		ClearEnv: []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("read the existing GitHub token: %w", err)
+	}
+	token := strings.TrimSpace(output)
+	if token == "" {
+		return "", errors.New("GitHub CLI returned an empty token")
+	}
+	return token, nil
+}
+
 // GitHubToken runs the gh web login in an isolated configuration directory and
 // stores the resulting token in store.
 func GitHubToken(ctx context.Context, runner clusterauth.CommandRunner, store *Store, interactive bool) (string, error) {
