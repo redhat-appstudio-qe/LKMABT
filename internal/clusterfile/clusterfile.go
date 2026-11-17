@@ -16,12 +16,29 @@ import (
 // DefaultPath is the clusters-file path used when --clusters-file is absent.
 const DefaultPath = ".lkmabt-clusters.yaml"
 
+// Cluster types accepted in the clusters file.
+const (
+	TypeOCP  = "ocp"
+	TypeROKS = "roks"
+)
+
+// DefaultIBMCloudEndpoint is the IBM Cloud CLI endpoint type used when an entry omits one.
+const DefaultIBMCloudEndpoint = "vpe"
+
 // Entry is one cluster listed in the clusters file.
 type Entry struct {
-	Name       string `json:"name"`
-	Kflux      string `json:"kflux,omitempty"`
-	Kubeconfig string `json:"kubeconfig,omitempty"`
-	Server     string `json:"server,omitempty"`
+	Name             string `json:"name"`
+	Type             string `json:"type,omitempty"`
+	Kflux            string `json:"kflux,omitempty"`
+	IBMCloud         string `json:"ibmcloud,omitempty"`
+	IBMCloudEndpoint string `json:"ibmcloud-endpoint,omitempty"`
+	Kubeconfig       string `json:"kubeconfig,omitempty"`
+	Server           string `json:"server,omitempty"`
+}
+
+// IsROKS reports whether the entry is an IBM Cloud ROKS cluster.
+func (e Entry) IsROKS() bool {
+	return e.Type == TypeROKS
 }
 
 // KfluxName returns the kflux catalog name, which defaults to the entry name.
@@ -117,6 +134,18 @@ func normalize(entries []Entry, path, baseDir, home string) ([]Entry, error) {
 			return nil, fmt.Errorf("clusters file %q lists duplicate cluster name %q", path, name)
 		}
 		seen[name] = struct{}{}
+		entryType := strings.TrimSpace(entry.Type)
+		// An absent type keeps the kflux and oc login ladder.
+		if entryType == "" {
+			entryType = TypeOCP
+		}
+		if entryType != TypeOCP && entryType != TypeROKS {
+			return nil, fmt.Errorf("clusters file %q cluster %q type %q must be %s or %s", path, name, entry.Type, TypeOCP, TypeROKS)
+		}
+		ibmCloud, endpoint, err := normalizeIBMCloud(entryType, entry.IBMCloud, entry.IBMCloudEndpoint, name, path)
+		if err != nil {
+			return nil, err
+		}
 		kflux := strings.TrimSpace(entry.Kflux)
 		// An absent kflux name means the entry name is the catalog name.
 		if kflux == "" {
@@ -136,9 +165,43 @@ func normalize(entries []Entry, path, baseDir, home string) ([]Entry, error) {
 		if err != nil {
 			return nil, err
 		}
-		normalized = append(normalized, Entry{Name: name, Kflux: kflux, Kubeconfig: kubeconfig, Server: server})
+		normalized = append(normalized, Entry{
+			Name:             name,
+			Type:             entryType,
+			Kflux:            kflux,
+			IBMCloud:         ibmCloud,
+			IBMCloudEndpoint: endpoint,
+			Kubeconfig:       kubeconfig,
+			Server:           server,
+		})
 	}
 	return normalized, nil
+}
+
+// ibmcloudEndpoints are the endpoint types accepted by ibmcloud ks cluster config --endpoint.
+var ibmcloudEndpoints = map[string]struct{}{"vpe": {}, "private": {}, "link": {}}
+
+// normalizeIBMCloud validates and defaults the IBM Cloud fields of a ROKS entry.
+func normalizeIBMCloud(entryType, cluster, endpoint, name, path string) (string, string, error) {
+	cluster = strings.TrimSpace(cluster)
+	endpoint = strings.TrimSpace(endpoint)
+	// kflux and oc login own non-ROKS entries, so IBM Cloud fields would never be read.
+	if entryType != TypeROKS {
+		if cluster != "" || endpoint != "" {
+			return "", "", fmt.Errorf("clusters file %q cluster %q sets ibmcloud fields but type is %q; set type: %s", path, name, entryType, TypeROKS)
+		}
+		return "", "", nil
+	}
+	if cluster == "" {
+		cluster = name
+	}
+	if endpoint == "" {
+		endpoint = DefaultIBMCloudEndpoint
+	}
+	if _, accepted := ibmcloudEndpoints[endpoint]; !accepted {
+		return "", "", fmt.Errorf("clusters file %q cluster %q ibmcloud-endpoint %q must be vpe, private, or link", path, name, endpoint)
+	}
+	return cluster, endpoint, nil
 }
 
 // resolveKubeconfig applies the default path, ~ expansion, and relative-path anchoring.

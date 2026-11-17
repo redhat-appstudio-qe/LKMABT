@@ -1,11 +1,18 @@
 # Copy to .lkmabt-clusters.yaml and edit locally. Never commit the copy.
 # name       required, unique, [A-Za-z0-9._-]+ ; the report directory name and the
 #            identity used by --cluster and in logs
+# type       optional, ocp (default) or roks ; roks logs in with "ibmcloud login --sso"
+#            and "ibmcloud ks cluster config" instead of kflux and oc login
 # kflux      optional, [A-Za-z0-9._-]+ ; the kflux catalog name passed to
-#            "kflux cluster login -c". Defaults to name. Set it when your own
-#            name for a cluster differs from kflux's, e.g. the API server host
-#            kflux-ocp-p01.7ayg.p1.openshiftapps.com is catalog cluster ocp-p01.
-#            List catalog names with "kflux cluster list".
+#            "kflux cluster login -c" for type ocp. Defaults to name. Set it when
+#            your own name for a cluster differs from kflux's, e.g. the API server
+#            host kflux-ocp-p01.7ayg.p1.openshiftapps.com is catalog cluster
+#            ocp-p01. List catalog names with "kflux cluster list". It also names
+#            the default kubeconfig path for every type.
+# ibmcloud   optional, roks only ; IBM Cloud cluster name or ID passed to
+#            "ibmcloud ks cluster config --cluster". Defaults to name.
+# ibmcloud-endpoint optional, roks only ; vpe (default), private, or link ; the
+#            master endpoint the written kubeconfig points at
 # kubeconfig optional, defaults to ~/.kube/config-<kflux> (kflux's own per-cluster
 #            path); "~" expands, relative paths resolve against this file
 # server     optional API server URL ; omitted means the kubeconfig's own server is used
@@ -18,3 +25,7 @@ clusters:
 #  - name: kflux-osp-p01
 #    kflux: osp-p01
 #    kubeconfig: ~/.kube/config-kflux-osp-p01
+#  - name: kflux-lw-p01
+#    type: roks
+#    ibmcloud: kflux-lw-p01
+#    ibmcloud-endpoint: vpe

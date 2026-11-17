@@ -19,25 +19,45 @@ resources.
 
 - A clusters file (`.lkmabt-clusters.yaml` by default; override with
   `--clusters-file <path>`). Each entry has a `name` (required, unique; the
-  report directory name and the `--cluster` identity), an optional `kflux`
-  catalog name (defaults to `name`; the `kflux cluster login -c` target), an
-  optional `kubeconfig` path (defaults to `~/.kube/config-<kflux>`), and an
-  optional `server` API server URL (omitted means the kubeconfig's own server
-  is used). See `.lkmabt-clusters.yaml.example`.
+  report directory name and the `--cluster` identity), an optional `type`
+  (`ocp` by default, or `roks`), an optional `kflux` catalog name (defaults to
+  `name`; the `kflux cluster login -c` target for `ocp` and the prefix of the
+  default kubeconfig path), an optional `kubeconfig` path (defaults to
+  `~/.kube/config-<kflux>`), and an optional `server` API server URL (omitted
+  means the kubeconfig's own server is used). `roks` entries also accept an
+  optional `ibmcloud` cluster name or ID (defaults to `name`) and an optional
+  `ibmcloud-endpoint` (`vpe` by default; `private` and `link` are also
+  accepted). See `.lkmabt-clusters.yaml.example`.
 - `kflux` names are the short catalog names, not the API server hosts:
   `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is catalog cluster `ocp-p01`, so
   that entry needs `kflux: ocp-p01`. List the catalog with `kflux cluster list`;
   an unknown name fails with kflux's own `unknown cluster` error.
 - Authentication follows a ladder per cluster: an existing valid kubeconfig is
-  used first; otherwise one `kflux cluster login -c <kflux> [-c <kflux>...]`
-  runs for every entry that uses its default kubeconfig path, with
-  kflux installed from
+  used first. `roks` kubeconfigs are verified with `oc whoami` on every run,
+  because a rejected file stays readable; a rejected one is refreshed through
+  the IBM Cloud CLI, and every other entry goes through kflux then `oc login`.
+  ROKS runs reuse an active `ibmcloud` session, run `ibmcloud login --sso` when
+  there is none, write the entry's kubeconfig with
+  `ibmcloud ks cluster config --cluster <ibmcloud> --endpoint <ibmcloud-endpoint>`
+  through `KUBECONFIG`, then prove the kubeconfig with `oc whoami`. A rejected
+  kubeconfig fails that cluster at `authentication` with first-time-login
+  instructions: open the cluster's OpenShift web console once from the IBM
+  Cloud console, then re-run. ROKS entries never fall through to kflux or
+  `oc login`. For other entries, one
+  `kflux cluster login -c <kflux> [-c <kflux>...]` runs for every entry that
+  uses its default kubeconfig path, with kflux installed from
   https://gitlab.cee.redhat.com/hares/kflux.git into
-  `~/.local/share/lkmabt/kflux-src` and `~/.local/bin/kflux` when
-  missing from `PATH`; otherwise `oc login` runs with `KUBECONFIG` set to the
-  entry's kubeconfig path.
-- An existing kubeconfig with expired credentials fails that cluster at
-  `preflight`, not at `authentication`.
+  `~/.local/share/lkmabt/kflux-src` and `~/.local/bin/kflux` when missing from
+  `PATH`; otherwise `oc login` runs with `KUBECONFIG` set to the entry's
+  kubeconfig path.
+- `type: roks` needs the IBM Cloud CLI with the `kubernetes-service` plug-in on
+  `PATH`, `oc` for the post-login check, and network access to the configured
+  master endpoint (VPE endpoints require the VPC VPN). An existing ROKS
+  kubeconfig needs only `oc` for its verification.
+- For `ocp` entries, an existing kubeconfig with expired credentials fails that
+  cluster at `preflight`, not at `authentication`. For `roks` entries, a rejected
+  kubeconfig fails at `authentication` so the refresh path and first-time-login
+  instructions stay visible.
 - A ready `multi-platform-controller` deployment and `host-config` entries for
   `linux/amd64` and `linux/arm64`. Dynamic arm64 provisioning is sufficient;
   physical arm64 nodes are not required.

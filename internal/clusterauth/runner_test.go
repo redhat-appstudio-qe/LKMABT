@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -20,7 +21,9 @@ func writeScript(dir, name, body string) string {
 type fakeRunner struct {
 	lookPaths map[string]string // name -> path, absent means not found
 	runs      []CommandSpec
-	onRun     func(CommandSpec) error // optional side effects / failures
+	outputs   []CommandSpec
+	onRun     func(CommandSpec) error           // optional side effects / failures
+	onOutput  func(CommandSpec) (string, error) // optional side effects / output
 }
 
 // LookPath resolves name against the fake PATH table.
@@ -38,6 +41,15 @@ func (r *fakeRunner) Run(_ context.Context, spec CommandSpec) error {
 		return r.onRun(spec)
 	}
 	return nil
+}
+
+// Output records the spec and applies the optional output hook.
+func (r *fakeRunner) Output(_ context.Context, spec CommandSpec) (string, error) {
+	r.outputs = append(r.outputs, spec)
+	if r.onOutput != nil {
+		return r.onOutput(spec)
+	}
+	return "", nil
 }
 
 var _ = Describe("ExecRunner.LookPath", func() {
@@ -95,6 +107,45 @@ var _ = Describe("ExecRunner.Run", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(log.String()).Should(ContainSubstring("out"))
 			Expect(log.String()).Should(ContainSubstring("err"))
+		})
+	})
+
+	When("the context expires", func() {
+		It("should kill the command", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+
+			err := (ExecRunner{}).Run(ctx, CommandSpec{Name: "sh", Args: []string{"-c", "sleep 5"}})
+			Expect(err).Should(HaveOccurred())
+		})
+	})
+})
+
+var _ = Describe("ExecRunner.Output", func() {
+	When("the command succeeds", func() {
+		It("should return stdout without touching the console", func() {
+			output, err := (ExecRunner{}).Output(context.Background(), CommandSpec{Name: "sh", Args: []string{"-c", "printf whoami"}})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(output).Should(Equal("whoami"))
+		})
+	})
+
+	When("the command fails", func() {
+		It("should return its combined output with the error", func() {
+			output, err := (ExecRunner{}).Output(context.Background(), CommandSpec{Name: "sh", Args: []string{"-c", "printf failed 1>&2; exit 1"}})
+			Expect(err).Should(MatchError(ContainSubstring("sh -c")))
+			Expect(output).Should(Equal("failed"))
+		})
+	})
+
+	When("the context expires", func() {
+		It("should kill the command and return the error", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+
+			output, err := (ExecRunner{}).Output(ctx, CommandSpec{Name: "sh", Args: []string{"-c", "sleep 5"}})
+			Expect(err).Should(HaveOccurred())
+			Expect(output).Should(BeEmpty())
 		})
 	})
 })

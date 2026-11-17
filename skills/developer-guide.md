@@ -36,12 +36,15 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 - Owns the aggregate run directory, the fixed cap of three concurrent clusters, and the per-cluster/per-provider run logs
 
 **`internal/clusterfile/`** — Clusters-file schema
-- Strict parsing of `name`, `kflux`, `kubeconfig`, and `server` per entry
+- Strict parsing of `name`, `type`, `kflux`, `ibmcloud`, `ibmcloud-endpoint`, `kubeconfig`, and `server` per entry
 - `name` is the report/`--cluster` identity; `kflux` is the kflux catalog name (`cluster login -c`) and defaults to `name`
+- `type: roks` defaults `ibmcloud` to `name` and `ibmcloud-endpoint` to `vpe`; IBM Cloud fields are rejected on `ocp` entries
 - Resolves kubeconfig paths (`~` expansion, relative-to-file); the default is `~/.kube/config-<kflux>`, kflux's own per-cluster path
 
 **`internal/clusterauth/`** — Authentication ladder
-- Existing kubeconfig → `kflux cluster login` → `oc login` per cluster
+- `ocp` entries win with an existing readable kubeconfig; `type: roks` entries are verified with `oc whoami` on every run and refreshed through the IBM Cloud CLI when the API server rejects the kubeconfig
+- ROKS: `ibmcloud target` probes for an active session, `ibmcloud login --sso` runs when absent, `ibmcloud ks cluster config --cluster <ibmcloud> --endpoint <ibmcloud-endpoint>` writes the entry's kubeconfig through `KUBECONFIG`, and a second `oc whoami` verifies the result
+- Non-interactive checks are bounded (`oc whoami` 60s, `ibmcloud target`/`ks cluster config` 2m) so one stalled credential plugin fails that cluster instead of blocking the run; only `ibmcloud login --sso` stays interactive
 
 **`internal/report/`** — Aggregate reports
 - Renders Markdown and HTML reports for a multi-cluster run
@@ -282,7 +285,16 @@ If cleanup hangs despite finalizer stripping, check:
 the catalog name (`kflux cluster list`). They differ when the user's name is the
 API server's first label, e.g. host `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is
 catalog cluster `ocp-p01`. An unknown catalog name surfaces kflux's own
-`unknown cluster` error.
+`unknown cluster` error. `type: roks` entries never call kflux; their `kflux`
+value only names the default kubeconfig path.
+
+### ROKS First-Time Login
+`type: roks` authenticates with `ibmcloud login --sso` and
+`ibmcloud ks cluster config`, then verifies with `oc whoami`. When the API
+server rejects the written kubeconfig, the cluster fails at `authentication`
+with instructions to open its OpenShift web console once from the IBM Cloud
+console. That console visit creates the user's cluster identity; no CLI-only
+check can prove it happened beforehand.
 
 ### Go Workspace Interference
 If the checkout sits inside an unrelated parent `go.work`, `./...` patterns fail
