@@ -82,10 +82,32 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 	if err != nil {
 		return err
 	}
+	if s.Request.Provider == config.ProviderGitHub {
+		if err := s.verifyGitHubApp(ctx); err != nil {
+			return err
+		}
+	}
 	if err := s.ensureTenantNamespaceAvailable(ctx, manifest); err != nil {
 		return err
 	}
 	manifest.TargetClusterServer = s.Request.ClusterServer
+	return nil
+}
+
+// verifyGitHubApp rejects clusters whose published GitHub App cannot onboard the fixture repository.
+func (s *LiveStage) verifyGitHubApp(ctx context.Context) error {
+	if s.Clients == nil {
+		return fmt.Errorf("cluster clients are not initialized")
+	}
+	checker, ok := s.Provider.(cluster.GitHubAppChecker)
+	if !ok {
+		return fmt.Errorf("github provider does not support GitHub App verification")
+	}
+	slug, err := cluster.VerifyGitHubAppOnboarding(ctx, s.Clients.Kubernetes, checker)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(s.Log, "GitHub App %s installation verified\n", slug)
 	return nil
 }
 

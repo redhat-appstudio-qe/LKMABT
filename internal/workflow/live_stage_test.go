@@ -50,6 +50,37 @@ func (l testNameLister) List(context.Context) ([]string, error) {
 	return append([]string(nil), l.names...), nil
 }
 
+type githubAppProviderStub struct {
+	slug string
+	err  error
+}
+
+func (p *githubAppProviderStub) ValidateFixture(context.Context, providers.FixtureRepository) (providers.FixtureRepository, error) {
+	return providers.FixtureRepository{}, nil
+}
+
+func (p *githubAppProviderStub) ReadFile(context.Context, providers.FixtureRepository, string, string) (providers.FileVersion, error) {
+	return providers.FileVersion{}, nil
+}
+
+func (p *githubAppProviderStub) UpdateFile(context.Context, providers.FixtureRepository, string, string, string, string) (providers.Commit, error) {
+	return providers.Commit{}, nil
+}
+
+// VerifyGitHubAppInstallation records the slug and returns the configured error.
+func (p *githubAppProviderStub) VerifyGitHubAppInstallation(_ context.Context, slug string) error {
+	p.slug = slug
+	return p.err
+}
+
+// konfluxInfoObject builds the ConfigMap that publishes the cluster's GitHub App URL.
+func konfluxInfoObject(appURL string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "konflux-info", Name: "konflux-public-info"},
+		Data:       map[string]string{"info.json": fmt.Sprintf(`{"integrations":{"github":{"application_url":%q}}}`, appURL)},
+	}
+}
+
 var _ = Describe("LiveStage", func() {
 	Describe("LiveStage tenant namespace preflight", func() {
 		When("namespaces are owned", func() {
@@ -266,6 +297,45 @@ var _ = Describe("LiveStage", func() {
 			})
 		})
 	})
+	Describe("LiveStage GitHub App preflight", func() {
+		When("the cluster publishes an installed app", func() {
+			It("should verify the app against the fixture", func() {
+				provider := &githubAppProviderStub{}
+				log := &bytes.Buffer{}
+				stage := &LiveStage{
+					Provider: provider,
+					Clients:  &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/konflux-kflux-ocp-p01"))},
+					Log:      log,
+				}
+
+				Expect(stage.verifyGitHubApp(context.Background())).Should(Succeed())
+				Expect(provider.slug).Should(Equal("konflux-kflux-ocp-p01"))
+				Expect(log.String()).Should(ContainSubstring("GitHub App konflux-kflux-ocp-p01 installation verified"))
+			})
+		})
+
+		When("the provider rejects the installation", func() {
+			It("should return the provider error", func() {
+				provider := &githubAppProviderStub{err: errors.New("GitHub App konflux-kflux-ocp-p01 is not installed")}
+				stage := &LiveStage{
+					Provider: provider,
+					Clients:  &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/konflux-kflux-ocp-p01"))},
+					Log:      &bytes.Buffer{},
+				}
+
+				Expect(stage.verifyGitHubApp(context.Background())).Should(MatchError("GitHub App konflux-kflux-ocp-p01 is not installed"))
+			})
+		})
+
+		When("the cluster clients are missing", func() {
+			It("should fail before reading the cluster info", func() {
+				stage := &LiveStage{Provider: &githubAppProviderStub{}, Log: &bytes.Buffer{}}
+
+				Expect(stage.verifyGitHubApp(context.Background())).Should(MatchError("cluster clients are not initialized"))
+			})
+		})
+	})
+
 	It("restores recorded canonical repository from manifest", func() {
 		got := fixtureFromManifest(model.FixtureIdentity{
 			RepositoryOwner: "redhat-appstudio-qe",

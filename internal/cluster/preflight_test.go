@@ -2,9 +2,11 @@ package cluster
 
 import (
 	"context"
+	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 type fakeCluster struct {
@@ -12,6 +14,17 @@ type fakeCluster struct {
 	checks      []CheckResult
 	scheduling  []CheckResult
 	accessCalls int
+}
+
+type fakeGitHubAppChecker struct {
+	slug string
+	err  error
+}
+
+// VerifyGitHubAppInstallation records the slug and returns the configured error.
+func (f *fakeGitHubAppChecker) VerifyGitHubAppInstallation(_ context.Context, slug string) error {
+	f.slug = slug
+	return f.err
 }
 
 // Server returns the fake cluster's configured API server URL.
@@ -57,5 +70,29 @@ var _ = Describe("RunPreflight", func() {
 		}
 		Expect(result.Scheduling).To(HaveLen(1))
 		Expect(result.Scheduling[0].Name).To(Equal("multi-platform-controller/linux/arm64"))
+	})
+})
+
+var _ = Describe("VerifyGitHubAppOnboarding", func() {
+	When("the checker accepts the cluster's published app", func() {
+		It("should return the app slug", func() {
+			checker := &fakeGitHubAppChecker{}
+			client := fake.NewSimpleClientset(konfluxInfoConfigMap(`{"integrations":{"github":{"application_url":"https://github.com/apps/konflux-kflux-ocp-p01"}}}`))
+
+			slug, err := VerifyGitHubAppOnboarding(context.Background(), client, checker)
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(slug).Should(Equal("konflux-kflux-ocp-p01"))
+			Expect(checker.slug).Should(Equal("konflux-kflux-ocp-p01"))
+		})
+	})
+
+	When("the checker rejects the installation", func() {
+		It("should return the checker's error", func() {
+			checker := &fakeGitHubAppChecker{err: errors.New("GitHub App cluster-app is not installed")}
+			client := fake.NewSimpleClientset(konfluxInfoConfigMap(`{"integrations":{"github":{"application_url":"https://github.com/apps/cluster-app"}}}`))
+
+			_, err := VerifyGitHubAppOnboarding(context.Background(), client, checker)
+			Expect(err).Should(MatchError("GitHub App cluster-app is not installed"))
+		})
 	})
 })

@@ -60,6 +60,15 @@ resources.
 - A ready `multi-platform-controller` deployment and `host-config` entries for
   `linux/amd64` and `linux/arm64`. Dynamic arm64 provisioning is sufficient;
   physical arm64 nodes are not required.
+- Every GitHub cluster must publish its Konflux GitHub App URL in
+  `konflux-info/konflux-public-info` and that app must be installed for the
+  fixture organization. GitHub runs verify the installation at `preflight`,
+  before any cluster mutation, and fail that cluster with the app's
+  installation URL when it is missing. `GITHUB_TOKEN` needs the `read:org`
+  scope and an owner who administers the fixture organization. An app
+  installed for selected repositories must include the fixture repository;
+  when the token cannot list installation repositories, preflight cannot
+  verify the selection and fails instead of proceeding blind.
 - PaC onboarding must be complete for all three components, with current
   `.tekton` configuration available on each fixture's default branch. The
   harness waits for PaC readiness before writing trigger comments and does not

@@ -4,7 +4,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"k8s.io/client-go/kubernetes"
 )
+
+// GitHubAppChecker verifies that a cluster's GitHub App can onboard the fixture repository.
+type GitHubAppChecker interface {
+	VerifyGitHubAppInstallation(context.Context, string) error
+}
 
 type PreflightSpec struct {
 	ExpectedServer string
@@ -48,4 +55,20 @@ func RunPreflight(ctx context.Context, cluster Cluster, spec PreflightSpec) (Pre
 		}
 	}
 	return result, nil
+}
+
+// VerifyGitHubAppOnboarding confirms the cluster's published GitHub App can onboard
+// the fixture repository before the run creates or deletes cluster resources.
+func VerifyGitHubAppOnboarding(ctx context.Context, client kubernetes.Interface, checker GitHubAppChecker) (string, error) {
+	if checker == nil {
+		return "", fmt.Errorf("GitHub App checker is required")
+	}
+	slug, err := ReadGitHubAppSlug(ctx, client)
+	if err != nil {
+		return "", err
+	}
+	if err := checker.VerifyGitHubAppInstallation(ctx, slug); err != nil {
+		return "", err
+	}
+	return slug, nil
 }

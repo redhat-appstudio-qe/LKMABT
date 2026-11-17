@@ -86,6 +86,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/cluster/`** — Kubernetes interactions
 - `RealCluster` wraps k8s client-go operations
 - Preflight checks validate cluster prerequisites (multi-platform-controller deployment, host-config entries)
+- GitHub preflight reads the cluster's app slug from `konflux-info/konflux-public-info` and confirms that app is installed for the fixture organization
 - Build output verification confirms node evidence (Buildah outputs) match expected architectures
 
 **`internal/providers/`** — Git forge abstraction
@@ -137,7 +138,7 @@ definitions via import when the same GVR is needed across packages.
 
 ## Workflow Execution Flow
 
-1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries
+1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries, and the cluster's GitHub App installation (GitHub runs)
 2. **Fixture Ready** — Validate test repositories are accessible, read current Dockerfile SHAs
 3. **Triggered** — Append trigger comments to Dockerfiles, commit changes
 4. **Builds Verified** — Wait for PipelineRuns to succeed (timeout configurable)
@@ -185,6 +186,16 @@ All runtime evidence is stored under `.lkmabt-runs/`:
 The API server for each cluster comes from the `server` field of its
 clusters-file entry; when omitted, it defaults to the loaded kubeconfig's own
 server.
+
+### Per-Cluster GitHub App Validation
+Each Konflux cluster onboards repositories through its own GitHub App. The
+harness reads that app from `konflux-info/konflux-public-info` and verifies
+during `preflight` that the app is installed for the fixture organization, so a
+cluster that cannot onboard the fixture fails before the run creates a tenant
+namespace or touches the fixture. The check needs a `GITHUB_TOKEN` with
+`read:org` owned by an organization administrator; installations limited to
+selected repositories must include the fixture or the check fails as
+unverifiable.
 
 ## Design Decisions
 
