@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redhat-appstudio/konflux-test/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	latestLockRootEnv = "KONFLUX_TEST_LATEST_LOCK_ROOT"
-	latestLockRunEnv  = "KONFLUX_TEST_LATEST_LOCK_RUN"
+	latestLockRootEnv = "LKMABT_LATEST_LOCK_ROOT"
+	latestLockRunEnv  = "LKMABT_LATEST_LOCK_RUN"
 )
 
 // TestSetLatestWaitsForCrossProcessLock verifies that concurrent latest updates wait for the file lock.

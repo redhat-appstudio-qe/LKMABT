@@ -1,18 +1,21 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/redhat-appstudio/konflux-test/internal/cleanup"
-	"github.com/redhat-appstudio/konflux-test/internal/collector"
-	"github.com/redhat-appstudio/konflux-test/internal/config"
-	"github.com/redhat-appstudio/konflux-test/internal/evidence"
-	"github.com/redhat-appstudio/konflux-test/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/cleanup"
+	"github.com/redhat-appstudio/lkmabt/internal/collector"
+	"github.com/redhat-appstudio/lkmabt/internal/config"
+	"github.com/redhat-appstudio/lkmabt/internal/evidence"
+	"github.com/redhat-appstudio/lkmabt/internal/model"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -27,7 +30,7 @@ var _ = Describe("cleanupRun", func() {
 		client := cleanupTestClient("run-1", cleanup.ManagedByValue)
 		prompt := &cleanupTestPrompt{approved: true}
 
-		Expect(cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt)).Should(Succeed())
+		Expect(cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt, io.Discard)).Should(Succeed())
 		Expect(prompt.calls).Should(Equal(1))
 		Expect(prompt.message).Should(ContainSubstring("tenant-run-1"))
 		Expect(prompt.message).Should(ContainSubstring("run-1"))
@@ -40,8 +43,8 @@ var _ = Describe("cleanupRun", func() {
 		client := cleanupTestClient("another-run", cleanup.ManagedByValue)
 		prompt := &cleanupTestPrompt{approved: true}
 
-		err := cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt)
-		Expect(err).Should(MatchError(ContainSubstring("exact konflux-test ownership")))
+		err := cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt, io.Discard)
+		Expect(err).Should(MatchError(ContainSubstring("exact LKMABT ownership")))
 		Expect(prompt.calls).Should(BeZero())
 		_, err = client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-run-1", metav1.GetOptions{})
 		Expect(err).ShouldNot(HaveOccurred())
@@ -51,7 +54,7 @@ var _ = Describe("cleanupRun", func() {
 		store := cleanupTestStore()
 		client := cleanupTestClient("run-1", cleanup.ManagedByValue)
 
-		err := cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, nil)
+		err := cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, nil, io.Discard)
 		Expect(err).Should(MatchError(ContainSubstring("explicit confirmation")))
 		_, err = client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-run-1", metav1.GetOptions{})
 		Expect(err).ShouldNot(HaveOccurred())
@@ -62,7 +65,7 @@ var _ = Describe("cleanupRun", func() {
 		client := cleanupTestClient("run-1", cleanup.ManagedByValue)
 		prompt := &cleanupTestPrompt{}
 
-		Expect(cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt)).Should(Succeed())
+		Expect(cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt, io.Discard)).Should(Succeed())
 		_, err := client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-run-1", metav1.GetOptions{})
 		Expect(err).ShouldNot(HaveOccurred())
 	})
@@ -74,7 +77,7 @@ var _ = Describe("cleanupRun", func() {
 		request := cleanupTestRequest("run-1", store.Root)
 		request.ClusterServer = "https://other.example"
 
-		err := cleanupRun(context.Background(), request, store, cleanup.NamespaceService{Dynamic: client}, prompt)
+		err := cleanupRun(context.Background(), request, store, cleanup.NamespaceService{Dynamic: client}, prompt, io.Discard)
 		Expect(err).Should(MatchError(ContainSubstring("belongs to cluster")))
 		Expect(prompt.calls).Should(BeZero())
 	})
@@ -88,7 +91,7 @@ var _ = Describe("cleanupRun", func() {
 		client := cleanupTestClient("run-1", cleanup.ManagedByValue)
 		prompt := &cleanupTestPrompt{approved: true}
 
-		err = cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt)
+		err = cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt, io.Discard)
 		Expect(err).Should(MatchError(ContainSubstring("workload/pods.json")))
 		Expect(prompt.calls).Should(BeZero())
 		_, err = client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-run-1", metav1.GetOptions{})
@@ -114,7 +117,7 @@ var _ = Describe("cleanupRun", func() {
 		client := cleanupTestClient("run-1", cleanup.ManagedByValue)
 		prompt := &cleanupTestPrompt{approved: true}
 
-		err = cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt)
+		err = cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt, io.Discard)
 		Expect(err).Should(MatchError(ContainSubstring("workload/components.json")))
 		Expect(prompt.calls).Should(BeZero())
 		_, err = client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-run-1", metav1.GetOptions{})
@@ -130,7 +133,7 @@ var _ = Describe("cleanupRun", func() {
 		client := cleanupTestClient("run-1", cleanup.ManagedByValue)
 		prompt := &cleanupTestPrompt{approved: true}
 
-		err = cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt)
+		err = cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt, io.Discard)
 		Expect(err).Should(MatchError(ContainSubstring("workload/taskruns/tenant-run-1--build-task.yaml")))
 		Expect(prompt.calls).Should(BeZero())
 		_, err = client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-run-1", metav1.GetOptions{})
@@ -149,7 +152,7 @@ var _ = Describe("cleanupRun", func() {
 		client := cleanupTestClient("run-1", cleanup.ManagedByValue)
 		prompt := &cleanupTestPrompt{approved: true}
 
-		err = cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt)
+		err = cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt, io.Discard)
 		Expect(err).Should(MatchError(ContainSubstring("TaskRun snapshot")))
 		Expect(prompt.calls).Should(BeZero())
 		_, err = client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-run-1", metav1.GetOptions{})
@@ -172,7 +175,7 @@ var _ = Describe("cleanupRun", func() {
 		client := cleanupTestClient("run-1", cleanup.ManagedByValue)
 		prompt := &cleanupTestPrompt{approved: true}
 
-		Expect(cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt)).Should(Succeed())
+		Expect(cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt, io.Discard)).Should(Succeed())
 		Expect(prompt.calls).Should(Equal(1))
 	})
 
@@ -185,11 +188,170 @@ var _ = Describe("cleanupRun", func() {
 		client := cleanupTestClient("run-1", cleanup.ManagedByValue)
 		prompt := &cleanupTestPrompt{approved: true}
 
-		err = cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt)
+		err = cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt, io.Discard)
 		Expect(err).Should(MatchError(ContainSubstring("failed-builds/build.log")))
 		Expect(prompt.calls).Should(BeZero())
 		_, err = client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-run-1", metav1.GetOptions{})
 		Expect(err).ShouldNot(HaveOccurred())
+	})
+})
+
+var _ = Describe("cleanupRun retention notice", func() {
+	When("the confirmation is declined", func() {
+		It("should write the retention notice to the visible writer", func() {
+			store := cleanupTestStore()
+			client := cleanupTestClient("run-1", cleanup.ManagedByValue)
+			var notice bytes.Buffer
+
+			Expect(cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, &cleanupTestPrompt{}, &notice)).Should(Succeed())
+			Expect(notice.String()).Should(Equal("retained tenant namespace tenant-run-1\n"))
+		})
+	})
+
+	When("the confirmation is approved", func() {
+		It("should not write the retention notice", func() {
+			store := cleanupTestStore()
+			client := cleanupTestClient("run-1", cleanup.ManagedByValue)
+			var notice bytes.Buffer
+
+			Expect(cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, &cleanupTestPrompt{approved: true}, &notice)).Should(Succeed())
+			Expect(notice.Len()).Should(BeZero())
+			_, err := client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-run-1", metav1.GetOptions{})
+			Expect(apierrors.IsNotFound(err)).Should(BeTrue())
+		})
+	})
+})
+
+var _ = Describe("cleanupRun under the aggregate layout", func() {
+	When("the run lives in an aggregate directory", func() {
+		It("should locate the cluster root and verify its artifacts", func() {
+			source := cleanupTestStore()
+			stateDir := GinkgoT().TempDir()
+			aggregate := "multi-run-10:46_8.10.2026_run-agg"
+			clusterRoot := filepath.Join(stateDir, aggregate, "c1")
+			// Copy the whole source tree so the run lives at a real aggregate path.
+			Expect(filepath.WalkDir(source.Root, func(path string, entry os.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				relative, err := filepath.Rel(source.Root, path)
+				if err != nil {
+					return err
+				}
+				target := filepath.Join(clusterRoot, relative)
+				info, err := entry.Info()
+				if err != nil {
+					return err
+				}
+				if info.Mode()&fs.ModeSymlink != 0 {
+					// The store's latest alias is a symlink; recreate it rather than read through it.
+					linkTarget, err := os.Readlink(path)
+					if err != nil {
+						return err
+					}
+					return os.Symlink(linkTarget, target)
+				}
+				if entry.IsDir() {
+					return os.MkdirAll(target, 0o750)
+				}
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				return os.WriteFile(target, data, info.Mode().Perm())
+			})).Should(Succeed())
+
+			located, err := locateRunStateRoot(stateDir, "c1", "run-1")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(located).Should(Equal(clusterRoot))
+			client := cleanupTestClient("run-1", cleanup.ManagedByValue)
+			Expect(cleanupRun(context.Background(), cleanupTestRequest("run-1", located), evidence.NewManifestStore(located), cleanup.NamespaceService{Dynamic: client}, &cleanupTestPrompt{approved: true}, io.Discard)).Should(Succeed())
+		})
+	})
+})
+
+// writeRunManifest writes <stateDir>/<aggregate>/<cluster>/<providerRun>/manifest.json with the run ID.
+func writeRunManifest(stateDir, aggregate, cluster, providerRun, runID string) {
+	directory := filepath.Join(stateDir, aggregate, cluster, providerRun)
+	Expect(os.MkdirAll(directory, 0o750)).Should(Succeed())
+	Expect(os.WriteFile(filepath.Join(directory, "manifest.json"), []byte(`{"runID":"`+runID+`"}`), 0o640)).Should(Succeed())
+}
+
+var _ = Describe("locateRunStateRoot", func() {
+	When("exactly one run directory holds the run", func() {
+		It("should return the cluster state root", func() {
+			stateDir := GinkgoT().TempDir()
+			writeRunManifest(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c1", "github-run-x", "run-1")
+			writeRunManifest(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c2", "github-run-y", "run-9")
+
+			root, err := locateRunStateRoot(stateDir, "c1", "run-1")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(root).Should(Equal(filepath.Join(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c1")))
+		})
+	})
+
+	When("no run directory holds the run", func() {
+		It("should fail naming the run and cluster", func() {
+			stateDir := GinkgoT().TempDir()
+			writeRunManifest(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c1", "github-run-x", "run-2")
+
+			_, err := locateRunStateRoot(stateDir, "c1", "run-1")
+			Expect(err).Should(MatchError(ContainSubstring(`no run "run-1" for cluster "c1"`)))
+		})
+	})
+
+	When("two aggregate directories hold the run", func() {
+		It("should fail as ambiguous", func() {
+			stateDir := GinkgoT().TempDir()
+			writeRunManifest(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c1", "github-run-x", "run-1")
+			writeRunManifest(stateDir, "multi-run-11:02_8.10.2026_run-agg2", "c1", "github-run-x", "run-1")
+
+			_, err := locateRunStateRoot(stateDir, "c1", "run-1")
+			Expect(err).Should(MatchError(ContainSubstring("matches 2 run directories")))
+			Expect(err).Should(MatchError(ContainSubstring(stateDir)))
+		})
+	})
+
+	When("the newest pointer also references the run", func() {
+		It("should not double count the latest symlink", func() {
+			stateDir := GinkgoT().TempDir()
+			writeRunManifest(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c1", "github-run-x", "run-1")
+			Expect(os.Symlink("multi-run-10:46_8.10.2026_run-agg1", filepath.Join(stateDir, "latest"))).Should(Succeed())
+
+			root, err := locateRunStateRoot(stateDir, "c1", "run-1")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(root).Should(Equal(filepath.Join(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c1")))
+		})
+	})
+
+	When("a manifest is not valid JSON", func() {
+		It("should skip that run directory", func() {
+			stateDir := GinkgoT().TempDir()
+			writeRunManifest(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c1", "github-run-bad", "run-9")
+			Expect(os.WriteFile(filepath.Join(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c1", "github-run-bad", "manifest.json"), []byte("{"), 0o640)).Should(Succeed())
+			writeRunManifest(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c1", "github-run-good", "run-1")
+
+			root, err := locateRunStateRoot(stateDir, "c1", "run-1")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(root).Should(Equal(filepath.Join(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c1")))
+		})
+	})
+
+	When("a cluster directory is missing", func() {
+		It("should skip it", func() {
+			stateDir := GinkgoT().TempDir()
+			writeRunManifest(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c9", "github-run-x", "run-1")
+
+			_, err := locateRunStateRoot(stateDir, "c1", "run-1")
+			Expect(err).Should(MatchError(ContainSubstring(`no run "run-1" for cluster "c1"`)))
+		})
+	})
+
+	When("the state directory does not exist", func() {
+		It("should report the read failure", func() {
+			_, err := locateRunStateRoot(filepath.Join(GinkgoT().TempDir(), "absent"), "c1", "run-1")
+			Expect(err).Should(MatchError(ContainSubstring("read state directory")))
+		})
 	})
 })
 

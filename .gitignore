@@ -1,9 +1,10 @@
 # Local credentials.
-.konflux-test.env
-.konflux-test.env.example
+.lkmabt.env
+.lkmabt.env.example
+.lkmabt-clusters.yaml
 
 # Local run evidence.
-.konflux-test-runs/
+.lkmabt-runs/
 
 # Local build artifacts.
 /bin/

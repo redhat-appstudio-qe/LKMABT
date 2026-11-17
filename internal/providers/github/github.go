@@ -9,7 +9,7 @@ import (
 	"time"
 
 	gh "github.com/google/go-github/v66/github"
-	"github.com/redhat-appstudio/konflux-test/internal/providers"
+	"github.com/redhat-appstudio/lkmabt/internal/providers"
 )
 
 const (
@@ -49,7 +49,7 @@ func (c apiClient) GetFile(owner, name, path, branch string) (*gh.RepositoryCont
 
 // UpdateFile commits content to a GitHub repository using the supplied file SHA.
 func (c apiClient) UpdateFile(owner, name, path, content, branch, sha string) (*gh.RepositoryContentResponse, error) {
-	message := "konflux-test trigger"
+	message := "lkmabt trigger"
 	response, _, err := c.client.Repositories.UpdateFile(context.Background(), owner, name, path, &gh.RepositoryContentFileOptions{Message: &message, Content: []byte(content), Branch: &branch, SHA: &sha})
 	return response, err
 }
@@ -139,7 +139,7 @@ func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepos
 	if err != nil {
 		return providers.Commit{}, err
 	}
-	return providers.Commit{SHA: updated.Commit.GetSHA(), URL: updated.Commit.GetHTMLURL(), Message: "konflux-test trigger", CreatedAt: time.Now().UTC()}, nil
+	return providers.Commit{SHA: updated.Commit.GetSHA(), URL: updated.Commit.GetHTMLURL(), Message: "lkmabt trigger", CreatedAt: time.Now().UTC()}, nil
 }
 
 // isGitHub5xx reports whether err contains an HTTP 5xx GitHub response.

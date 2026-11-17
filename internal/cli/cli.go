@@ -3,15 +3,31 @@ package cli
 import (
 	"context"
 	"errors"
-	"fmt"
+	"sync"
 
 	"github.com/google/uuid"
-	"github.com/redhat-appstudio/konflux-test/internal/config"
+	"github.com/redhat-appstudio/lkmabt/internal/config"
+	"github.com/redhat-appstudio/lkmabt/internal/model"
 )
 
+type RunOutcome struct {
+	Provider          string
+	RunID             string
+	ArtifactDirectory string
+	Stage             model.Phase
+}
+
 type Runner interface {
-	// Run executes one configured provider workflow.
-	Run(context.Context, config.Request) error
+	// Run executes one configured provider workflow and writes its output to log.
+	Run(ctx context.Context, request config.Request, log RunLog) (RunOutcome, error)
+}
+
+type ProviderResult struct {
+	Provider          string
+	RunID             string
+	ArtifactDirectory string
+	Stage             model.Phase
+	Err               error
 }
 
 type CleanupRunner interface {
@@ -22,21 +38,18 @@ type CleanupRunner interface {
 type UnconfiguredRunner struct{}
 
 // Run reports that no workflow services are configured.
-func (UnconfiguredRunner) Run(context.Context, config.Request) error {
-	return errors.New("workflow services are not configured")
+func (UnconfiguredRunner) Run(context.Context, config.Request, RunLog) (RunOutcome, error) {
+	return RunOutcome{}, errors.New("workflow services are not configured")
 }
 
-// Execute dispatches a run or cleanup request to the configured runner.
-func Execute(ctx context.Context, req config.Request, runner Runner) error {
+// Execute dispatches a run or cleanup request.
+func Execute(ctx context.Context, req config.Request, runner Runner, console *Console) error {
 	if runner == nil {
 		runner = UnconfiguredRunner{}
 	}
 	switch req.Command {
 	case config.CommandRun:
-		if req.Provider == config.ProviderBoth {
-			return runBoth(ctx, req, runner)
-		}
-		return runner.Run(ctx, req)
+		return RunClusters(ctx, req, runner, console)
 	case config.CommandCleanup:
 		cleanupRunner, ok := runner.(CleanupRunner)
 		if !ok {
@@ -48,45 +61,65 @@ func Execute(ctx context.Context, req config.Request, runner Runner) error {
 	}
 }
 
-// runBoth runs the fixed GitHub and GitLab requests concurrently and joins their errors.
-func runBoth(ctx context.Context, request config.Request, runner Runner) error {
-	requests := []config.Request{requestForProvider(request, config.ProviderGitHub), requestForProvider(request, config.ProviderGitLab)}
-	type runResult struct {
-		provider string
-		err      error
+// providerNames lists the providers selected by a run request, in report order.
+func providerNames(provider string) []string {
+	if provider == config.ProviderBoth {
+		return []string{config.ProviderGitHub, config.ProviderGitLab}
 	}
-	results := make(chan runResult, len(requests))
-	for _, providerRequest := range requests {
-		go func(providerRequest config.Request) {
-			results <- runResult{provider: providerRequest.Provider, err: runner.Run(ctx, providerRequest)}
-		}(providerRequest)
+	return []string{provider}
+}
+
+// runProviders runs every selected provider concurrently and returns one result per provider in fixed order.
+func runProviders(ctx context.Context, request config.Request, runner Runner) []ProviderResult {
+	names := providerNames(request.Provider)
+	results := make([]ProviderResult, len(names))
+	var waitGroup sync.WaitGroup
+	for index, name := range names {
+		waitGroup.Add(1)
+		go func(index int, name string) {
+			defer waitGroup.Done()
+			log := newRunLog()
+			defer log.Close()
+			outcome, err := runner.Run(ctx, requestForProvider(request, name), log)
+			results[index] = providerResult(name, outcome, err)
+		}(index, name)
 	}
-	byProvider := make(map[string]error, len(requests))
-	for range requests {
-		result := <-results
-		byProvider[result.provider] = result.err
+	waitGroup.Wait()
+	return results
+}
+
+// providerResult converts one workflow outcome into a report-ready result.
+func providerResult(provider string, outcome RunOutcome, err error) ProviderResult {
+	stage := outcome.Stage
+	if stage == "" {
+		stage = model.PhasePreflight
 	}
-	errorsByProvider := make([]error, 0, len(requests))
-	for _, providerRequest := range requests {
-		if err := byProvider[providerRequest.Provider]; err != nil {
-			errorsByProvider = append(errorsByProvider, fmt.Errorf("%s run: %w", providerRequest.Provider, err))
-		}
-	}
-	return errors.Join(errorsByProvider...)
+	return ProviderResult{Provider: provider, RunID: outcome.RunID, ArtifactDirectory: outcome.ArtifactDirectory, Stage: stage, Err: err}
 }
 
 // requestForProvider creates a run request with the fixture and namespace for provider.
 func requestForProvider(request config.Request, provider string) config.Request {
+	// `both` splits one request into two, so each provider needs its fixed namespace;
+	// a single-provider request already carries the namespace the caller asked for.
+	both := request.Provider == config.ProviderBoth
 	request.Provider = provider
 	request.RunID = "run-" + uuid.NewString()
-	request.ResumeRunID = ""
 	switch provider {
 	case config.ProviderGitHub:
 		request.SourceRepository = config.DefaultGitHubRepo
-		request.TenantNamespace = config.DefaultGitHubTenantNamespace
 	case config.ProviderGitLab:
 		request.SourceRepository = config.DefaultGitLabRepo
-		request.TenantNamespace = config.DefaultGitLabTenantNamespace
+	}
+	if both {
+		request.TenantNamespace = defaultTenantNamespace(provider)
 	}
 	return request
+}
+
+// defaultTenantNamespace returns the fixed tenant namespace configured for provider.
+func defaultTenantNamespace(provider string) string {
+	if provider == config.ProviderGitLab {
+		return config.DefaultGitLabTenantNamespace
+	}
+	return config.DefaultGitHubTenantNamespace
 }

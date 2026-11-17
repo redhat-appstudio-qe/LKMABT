@@ -1,0 +1,9 @@
+# Copy to .lkmabt-clusters.yaml and edit locally. Never commit the copy.
+# name       required, unique, [A-Za-z0-9._-]+ ; also the kflux -c target and the report directory name
+# kubeconfig optional, defaults to ~/.kube/config-<name> ; "~" expands, relative paths resolve against this file
+# server     optional API server URL ; omitted means the kubeconfig's own server is used
+clusters:
+  - name: kflux-lw-p01
+  - name: kflux-rhel-p01
+    kubeconfig: ~/.kube/config-kflux-rhel-p01
+    server: https://api.kflux-rhel-p01.example.com:6443
