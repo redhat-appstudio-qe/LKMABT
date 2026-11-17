@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 type ConfirmationPrompt struct {
@@ -22,11 +24,12 @@ func NewConfirmationPrompt(in io.Reader, out io.Writer, interactive bool) Confir
 
 // NewInteractiveConfirmationPrompt creates a prompt backed by standard input and output.
 func NewInteractiveConfirmationPrompt() ConfirmationPrompt {
-	interactive := false
-	if info, err := os.Stdin.Stat(); err == nil {
-		interactive = info.Mode()&os.ModeCharDevice != 0
-	}
-	return NewConfirmationPrompt(os.Stdin, os.Stdout, interactive)
+	return NewConfirmationPrompt(os.Stdin, os.Stdout, stdinIsTerminal())
+}
+
+// stdinIsTerminal reports whether standard input is attached to a terminal.
+func stdinIsTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // Confirm requests approval and accepts only an explicit y or yes response.

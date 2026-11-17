@@ -2,11 +2,16 @@ package providers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"time"
 )
+
+// ErrUnverifiable marks a cluster integration check that cannot be proven with
+// the available credentials.
+var ErrUnverifiable = errors.New("cluster integration cannot be verified")
 
 type SourceRepository struct {
 	Owner string `json:"owner"`

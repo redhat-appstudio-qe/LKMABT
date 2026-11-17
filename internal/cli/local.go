@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/redhat-appstudio/lkmabt/internal/cleanup"
 	"github.com/redhat-appstudio/lkmabt/internal/cluster"
@@ -23,6 +24,8 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/providers/gitlab"
 	"github.com/redhat-appstudio/lkmabt/internal/workflow"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 )
 
 // LiveRunner executes provider workflows and cleanup against live cluster services.
@@ -228,13 +231,21 @@ type Lifecycle struct {
 	Log       io.Writer
 }
 
+// finalizationTimeout bounds cleanup work after the workflow context is done.
+const finalizationTimeout = 5 * time.Minute
+
 // Finalize collects and verifies run artifacts, then prompts before optionally deleting the owned namespace.
+// Inspection, credential deletion, and artifact collection use a fresh bounded context so a canceled
+// run still removes the ephemeral GitLab Secret. The prompt and namespace deletion keep the run context,
+// so a canceled run retains the namespace.
 func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, runErr error) error {
 	namespace := manifest.Fixture.TenantNamespace
 	if namespace == "" {
 		return nil
 	}
-	info, err := l.Namespace.Inspect(ctx, namespace)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+	defer cancel()
+	info, err := l.Namespace.Inspect(cleanupCtx, namespace)
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
@@ -247,47 +258,66 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 		}
 		return fmt.Errorf("tenant namespace %s is not owned by run %s", namespace, manifest.RunID)
 	}
+	var secretErr error
+	if manifest.Fixture.EphemeralGitLabAuth {
+		secretErr = deleteGitLabCredentialSecret(cleanupCtx, l.Namespace.Dynamic, namespace)
+	}
 	if runErr != nil {
 		sources := l.Sources
 		if sources == nil && l.Namespace.Dynamic != nil {
 			sources = collector.KubernetesSources(l.Namespace.Dynamic, namespace, manifest.RunID)
 		}
-		report, collectErr := l.Collector.CollectAndVerify(ctx, manifest.RunID, manifest, sources)
+		report, collectErr := l.Collector.CollectAndVerify(cleanupCtx, manifest.RunID, manifest, sources)
 		manifest.FailureArtifacts = &report
 		if l.Store.Root != "" {
 			if saveErr := l.Store.Save(&manifest); saveErr != nil {
-				return fmt.Errorf("save failure artifact report: %w", saveErr)
+				return errors.Join(secretErr, fmt.Errorf("save failure artifact report: %w", saveErr))
 			}
 		}
 		if collectErr != nil {
-			return collectErr
+			return errors.Join(secretErr, collectErr)
 		}
 	} else if l.Collector.StateDir != "" {
 		sources := l.Sources
 		if sources == nil && l.Namespace.Dynamic != nil {
 			sources = collector.KubernetesSources(l.Namespace.Dynamic, namespace, manifest.RunID)
 		}
-		if _, err := l.Collector.CollectAndVerify(ctx, manifest.RunID, manifest, sources); err != nil {
-			return err
+		if _, err := l.Collector.CollectAndVerify(cleanupCtx, manifest.RunID, manifest, sources); err != nil {
+			return errors.Join(secretErr, err)
 		}
 	} else if l.Prompt != nil {
-		return fmt.Errorf("state directory is required to verify saved artifacts before cleanup")
+		return errors.Join(secretErr, fmt.Errorf("state directory is required to verify saved artifacts before cleanup"))
 	}
 	if l.Prompt == nil {
-		return nil
+		return secretErr
 	}
 	approved, err := l.Prompt.Confirm(ctx, fmt.Sprintf("Delete owned tenant namespace %s from run %s", namespace, manifest.RunID))
 	if err != nil {
-		return err
+		return errors.Join(secretErr, err)
 	}
 	if !approved {
 		fmt.Fprintf(l.logWriter(), "retained tenant namespace %s\n", namespace)
-		return nil
+		return secretErr
 	}
 	if err := l.Namespace.Delete(ctx, namespace, manifest.RunID); err != nil {
-		return err
+		return errors.Join(secretErr, err)
 	}
-	return l.Namespace.WaitDeleted(ctx, namespace)
+	return errors.Join(secretErr, l.Namespace.WaitDeleted(ctx, namespace))
+}
+
+// deleteGitLabCredentialSecret removes the run-scoped GitLab SCM Secret.
+func deleteGitLabCredentialSecret(ctx context.Context, client dynamic.Interface, namespace string) error {
+	if client == nil {
+		return fmt.Errorf("dynamic client is required to delete the ephemeral GitLab SCM Secret")
+	}
+	err := client.Resource(cluster.SecretGVR).Namespace(namespace).Delete(ctx, cluster.GitLabCredentialSecretName, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("delete ephemeral GitLab SCM Secret: %w", err)
+	}
+	return nil
 }
 
 // logWriter returns the lifecycle log, or a discard writer when none is configured.

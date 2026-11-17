@@ -35,6 +35,9 @@ type Credentials struct {
 	GitHubToken  string
 	GitLabToken  string
 	GitLabAPIURL string
+	// GitLabTokenEphemeral marks a token acquired for this run only. Its SCM
+	// Secret is removed after the run.
+	GitLabTokenEphemeral bool
 }
 
 type Timeouts struct {
@@ -243,37 +246,8 @@ func (r Request) Validate() error {
 				return fmt.Errorf("%s timeout must be positive", timeout.name)
 			}
 		}
-		if err := validateProviderCredentials(r.Provider, r.Credentials); err != nil {
-			return err
-		}
 	default:
 		return fmt.Errorf("unsupported command %q", r.Command)
-	}
-	return nil
-}
-
-// validateProviderCredentials reports missing credentials required by provider.
-func validateProviderCredentials(provider string, credentials Credentials) error {
-	missing := []string{}
-	switch provider {
-	case ProviderGitHub:
-		if strings.TrimSpace(credentials.GitHubToken) == "" {
-			missing = append(missing, "GITHUB_TOKEN")
-		}
-	case ProviderGitLab:
-		if strings.TrimSpace(credentials.GitLabToken) == "" {
-			missing = append(missing, "GITLAB_BOT_TOKEN")
-		}
-	case ProviderBoth:
-		if strings.TrimSpace(credentials.GitHubToken) == "" {
-			missing = append(missing, "GITHUB_TOKEN")
-		}
-		if strings.TrimSpace(credentials.GitLabToken) == "" {
-			missing = append(missing, "GITLAB_BOT_TOKEN")
-		}
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("%s credentials missing: %s; set them in the environment or pass --env-file", provider, strings.Join(missing, ", "))
 	}
 	return nil
 }

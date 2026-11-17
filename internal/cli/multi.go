@@ -9,9 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/redhat-appstudio/lkmabt/internal/auth"
 	"github.com/redhat-appstudio/lkmabt/internal/cluster"
 	"github.com/redhat-appstudio/lkmabt/internal/clusterauth"
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
@@ -20,8 +20,13 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/report"
 )
 
-// MaxConcurrentClusters caps simultaneous cluster workflows.
-const MaxConcurrentClusters = 3
+// Credential acquisition and destruction are replaceable in tests.
+var (
+	authenticateGitHub = auth.GitHubToken
+	authenticateGitLab = auth.GitLabToken
+	refreshGitLabToken = auth.RefreshGitLabToken
+	destroyCredentials = (*auth.Store).Destroy
+)
 
 type clusterRun struct {
 	Entry   clusterfile.Entry
@@ -29,13 +34,53 @@ type clusterRun struct {
 	Results []ProviderResult
 }
 
-// RunClusters authenticates every listed cluster, rejects entries that resolve
-// to one API server, runs them with a fixed concurrency cap, and writes the
-// aggregate reports.
-func RunClusters(ctx context.Context, request config.Request, runner Runner, console *Console) error {
+// RunClusters authenticates every listed cluster, acquires provider credentials
+// when needed, rejects entries that resolve to one API server, runs the clusters
+// one at a time in clusters-file order, and writes the aggregate reports.
+func RunClusters(ctx context.Context, request config.Request, runner Runner, console *Console) (runErr error) {
 	entries, err := clusterfile.Load(request.ClustersFile)
 	if err != nil {
 		return err
+	}
+	githubTokenNeeded := providerNeedsGitHub(request.Provider) && strings.TrimSpace(request.Credentials.GitHubToken) == ""
+	gitlabTokenNeeded := providerNeedsGitLab(request.Provider) && strings.TrimSpace(request.Credentials.GitLabToken) == ""
+	var (
+		store           *auth.Store
+		gitlabEphemeral bool
+	)
+	if len(entries) > 0 && (githubTokenNeeded || gitlabTokenNeeded) {
+		store, err = auth.NewStore()
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if store != nil {
+				runErr = errors.Join(runErr, destroyCredentials(store))
+				store = nil
+			}
+		}()
+		if gitlabTokenNeeded {
+			if console.Interactive() {
+				console.Printf("gitlab: authentication required; choose Web in the glab login prompt")
+			}
+			token, err := authenticateGitLab(ctx, clusterauth.ExecRunner{}, store, console.Interactive(), request.Credentials.GitLabAPIURL)
+			if err != nil {
+				return err
+			}
+			request.Credentials.GitLabToken = token
+			request.Credentials.GitLabTokenEphemeral = true
+			gitlabEphemeral = true
+		}
+		if githubTokenNeeded {
+			if console.Interactive() {
+				console.Printf("github: authentication required; starting the gh browser login")
+			}
+			token, err := authenticateGitHub(ctx, clusterauth.ExecRunner{}, store, console.Interactive())
+			if err != nil {
+				return err
+			}
+			request.Credentials.GitHubToken = token
+		}
 	}
 	aggregate, err := newAggregateRun(request.StateDir)
 	if err != nil {
@@ -47,8 +92,34 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 	if err := rejectDuplicateServers(entries, authFailures); err != nil {
 		return err
 	}
-	runs := scheduleClusters(ctx, request, entries, authFailures, aggregate, runner, console)
-	return finishAggregateRun(aggregate, request, runs, console)
+	var refresh func(context.Context, *config.Request) error
+	if gitlabEphemeral {
+		refresh = func(ctx context.Context, request *config.Request) error {
+			token, err := refreshGitLabToken(ctx, clusterauth.ExecRunner{Log: aggregate.Log}, store, request.Credentials.GitLabAPIURL)
+			if err != nil {
+				return err
+			}
+			request.Credentials.GitLabToken = token
+			return nil
+		}
+	}
+	runs := scheduleClusters(ctx, request, entries, authFailures, aggregate, runner, console, refresh)
+	var credentialErr error
+	if store != nil {
+		credentialErr = destroyCredentials(store)
+		store = nil
+	}
+	return finishAggregateRun(aggregate, request, runs, console, credentialErr)
+}
+
+// providerNeedsGitHub reports whether the selected provider includes GitHub.
+func providerNeedsGitHub(provider string) bool {
+	return provider == config.ProviderGitHub || provider == config.ProviderBoth
+}
+
+// providerNeedsGitLab reports whether the selected provider includes GitLab.
+func providerNeedsGitLab(provider string) bool {
+	return provider == config.ProviderGitLab || provider == config.ProviderBoth
 }
 
 // serverIdentity returns a comparison key for an API server URL, so equivalent
@@ -118,29 +189,27 @@ func rejectDuplicateServers(entries []clusterfile.Entry, authFailures map[string
 	return nil
 }
 
-// scheduleClusters runs at most MaxConcurrentClusters clusters at a time and keeps clusters-file order.
-func scheduleClusters(ctx context.Context, request config.Request, entries []clusterfile.Entry, authFailures map[string]error, aggregate *aggregateRun, runner Runner, console *Console) []clusterRun {
+// scheduleClusters runs authenticated clusters one at a time in clusters-file order.
+func scheduleClusters(ctx context.Context, request config.Request, entries []clusterfile.Entry, authFailures map[string]error, aggregate *aggregateRun, runner Runner, console *Console, refresh func(context.Context, *config.Request) error) []clusterRun {
 	runs := make([]clusterRun, len(entries))
-	semaphore := make(chan struct{}, MaxConcurrentClusters)
-	var waitGroup sync.WaitGroup
 	for index, entry := range entries {
 		runs[index] = clusterRun{Entry: entry, AuthErr: authFailures[entry.Name]}
 		if runs[index].AuthErr != nil {
 			console.Printf("cluster %s: authentication failed: %v", entry.Name, runs[index].AuthErr)
 			continue
 		}
+		if refresh != nil {
+			if err := refresh(ctx, &request); err != nil {
+				runs[index].AuthErr = err
+				console.Printf("cluster %s: authentication failed: %v", entry.Name, err)
+				continue
+			}
+		}
 		console.Printf("cluster %s: authenticated", entry.Name)
-		waitGroup.Add(1)
-		go func(index int, entry clusterfile.Entry) {
-			defer waitGroup.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-			console.Printf("cluster %s: started", entry.Name)
-			runs[index].Results = runCluster(ctx, request, entry, aggregate.Directory, runner)
-			console.Printf("cluster %s: finished (%s)", entry.Name, resultSummary(runs[index].Results))
-		}(index, entry)
+		console.Printf("cluster %s: started", entry.Name)
+		runs[index].Results = runCluster(ctx, request, entry, aggregate.Directory, runner)
+		console.Printf("cluster %s: finished (%s)", entry.Name, resultSummary(runs[index].Results))
 	}
-	waitGroup.Wait()
 	return runs
 }
 
@@ -156,8 +225,11 @@ func resultSummary(results []ProviderResult) string {
 }
 
 // finishAggregateRun renders both reports, prints the summary, and reports the aggregate failure.
-func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []clusterRun, console *Console) error {
+func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []clusterRun, console *Console, credentialErr error) error {
 	rows := reportRows(aggregate.Directory, runs, providerNames(request.Provider))
+	if credentialErr != nil {
+		rows = append(rows, report.Row{Cluster: "credentials", Provider: "auth", Stage: report.StageCleanup, Error: credentialErr.Error(), Links: report.Links(aggregate.Directory, "", "")})
+	}
 	document := report.Document{RunID: aggregate.RunID, ClustersFile: request.ClustersFile, StartedAt: aggregate.StartedAt, EndedAt: time.Now().UTC(), Passed: allPassed(rows), Rows: rows}
 	writeErr := report.Write(aggregate.Directory, document)
 	for _, row := range rows {
@@ -166,7 +238,7 @@ func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []
 	markdownPath, htmlPath := aggregate.reportPaths()
 	console.Printf("report: %s", markdownPath)
 	console.Printf("report: %s", htmlPath)
-	return errors.Join(aggregateError(runs), writeErr)
+	return errors.Join(aggregateError(runs), credentialErr, writeErr)
 }
 
 // aggregateError joins every cluster and provider failure, preserving clusters-file order.

@@ -22,8 +22,10 @@ type fakeRunner struct {
 	lookPaths map[string]string // name -> path, absent means not found
 	runs      []CommandSpec
 	outputs   []CommandSpec
+	stdouts   []CommandSpec
 	onRun     func(CommandSpec) error           // optional side effects / failures
 	onOutput  func(CommandSpec) (string, error) // optional side effects / output
+	onStdout  func(CommandSpec) (string, error) // optional side effects / output
 }
 
 // LookPath resolves name against the fake PATH table.
@@ -48,6 +50,15 @@ func (r *fakeRunner) Output(_ context.Context, spec CommandSpec) (string, error)
 	r.outputs = append(r.outputs, spec)
 	if r.onOutput != nil {
 		return r.onOutput(spec)
+	}
+	return "", nil
+}
+
+// Stdout records the spec and applies the optional stdout hook.
+func (r *fakeRunner) Stdout(_ context.Context, spec CommandSpec) (string, error) {
+	r.stdouts = append(r.stdouts, spec)
+	if r.onStdout != nil {
+		return r.onStdout(spec)
 	}
 	return "", nil
 }
@@ -146,6 +157,40 @@ var _ = Describe("ExecRunner.Output", func() {
 			output, err := (ExecRunner{}).Output(ctx, CommandSpec{Name: "sh", Args: []string{"-c", "sleep 5"}})
 			Expect(err).Should(HaveOccurred())
 			Expect(output).Should(BeEmpty())
+		})
+	})
+})
+
+var _ = Describe("ExecRunner.Stdout", func() {
+	When("the command writes to both streams", func() {
+		It("should return only standard output", func() {
+			output, err := (ExecRunner{}).Stdout(context.Background(), CommandSpec{Name: "sh", Args: []string{"-c", "printf token; printf warning 1>&2"}})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(output).Should(Equal("token"))
+		})
+	})
+
+	When("the command fails", func() {
+		It("should include standard error in the error", func() {
+			_, err := (ExecRunner{}).Stdout(context.Background(), CommandSpec{Name: "sh", Args: []string{"-c", "printf denied 1>&2; exit 1"}})
+			Expect(err).Should(MatchError(ContainSubstring("denied")))
+		})
+	})
+})
+
+var _ = Describe("CommandSpec environment", func() {
+	When("the inherited value is cleared and overridden", func() {
+		It("should let the override win", func() {
+			GinkgoT().Setenv("LKMABT_RUNNER_TEST", "ambient")
+
+			output, err := (ExecRunner{}).Output(context.Background(), CommandSpec{
+				Name:     "sh",
+				Args:     []string{"-c", "printf %s \"$LKMABT_RUNNER_TEST\""},
+				ClearEnv: []string{"LKMABT_RUNNER_TEST"},
+				Env:      []string{"LKMABT_RUNNER_TEST=override"},
+			})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(output).Should(Equal("override"))
 		})
 	})
 })

@@ -2,7 +2,9 @@ package cluster
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"net/url"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -23,9 +25,11 @@ var (
 const (
 	componentPaCRequestAnnotation = "build.appstudio.openshift.io/request"
 	imageGenerationAnnotation     = "image.redhat.com/generate"
-	gitLabCredentialSecretName    = "gitlab-build-secret"
+	// GitLabCredentialSecretName is the harness-owned GitLab SCM Secret.
+	GitLabCredentialSecretName    = "gitlab-build-secret"
 	scmCredentialsLabel           = "appstudio.redhat.com/credentials"
 	scmHostnameLabel              = "appstudio.redhat.com/scm.host"
+	scmSecretRepositoryAnnotation = "appstudio.redhat.com/scm.repository"
 )
 
 type ComponentSpec struct {
@@ -37,12 +41,14 @@ type ComponentSpec struct {
 }
 
 type FixtureSpec struct {
-	Namespace   string
-	RunID       string
-	Application string
-	Provider    string
-	GitLabToken string
-	Components  []ComponentSpec
+	Namespace            string
+	RunID                string
+	Application          string
+	Provider             string
+	GitLabToken          string
+	GitLabTokenEphemeral bool
+	Repository           string
+	Components           []ComponentSpec
 }
 
 type FixtureResult struct {
@@ -73,7 +79,7 @@ func (s FixtureService) EnsureFixture(ctx context.Context, spec FixtureSpec) (Fi
 		return FixtureResult{}, fmt.Errorf("get namespace: %w", err)
 	}
 	if spec.Provider == "gitlab" {
-		if err := s.ensureGitLabCredentialSecret(ctx, spec.Namespace, spec.GitLabToken); err != nil {
+		if err := s.ensureGitLabCredentialSecret(ctx, spec.Namespace, spec.GitLabToken, spec.Repository, spec.GitLabTokenEphemeral); err != nil {
 			return FixtureResult{}, err
 		}
 	}
@@ -123,12 +129,24 @@ func (s FixtureService) EnsureFixture(ctx context.Context, spec FixtureSpec) (Fi
 }
 
 // ensureGitLabCredentialSecret reuses or creates a usable GitLab SCM basic-auth Secret.
-func (s FixtureService) ensureGitLabCredentialSecret(ctx context.Context, namespace, token string) error {
+// An ephemeral token updates every repository-scoped Secret for the fixture so
+// build-service cannot select a stale token, and the run deletes its own Secret
+// during finalization.
+func (s FixtureService) ensureGitLabCredentialSecret(ctx context.Context, namespace, token, repository string, ephemeral bool) error {
 	if strings.TrimSpace(token) == "" {
 		return fmt.Errorf("GitLab token is required to create a GitLab SCM Secret")
 	}
-
 	secrets := s.Dynamic.Resource(SecretGVR).Namespace(namespace)
+	if ephemeral {
+		repositoryPath, err := gitLabRepositoryPath(repository)
+		if err != nil {
+			return err
+		}
+		if err := s.refreshRepositoryScopedSecrets(ctx, secrets, repositoryPath, token); err != nil {
+			return err
+		}
+		return s.writeGitLabCredentialSecret(ctx, secrets, namespace, token, repositoryPath, true)
+	}
 	list, err := secrets.List(ctx, metav1.ListOptions{LabelSelector: scmCredentialsLabel + "=scm," + scmHostnameLabel + "=gitlab.com"})
 	if err != nil {
 		return fmt.Errorf("list GitLab SCM Secrets in namespace %s: %w", namespace, err)
@@ -138,26 +156,132 @@ func (s FixtureService) ensureGitLabCredentialSecret(ctx context.Context, namesp
 			return nil
 		}
 	}
+	return s.writeGitLabCredentialSecret(ctx, secrets, namespace, token, "", false)
+}
 
+// refreshRepositoryScopedSecrets replaces stale passwords in basic-auth Secrets
+// that build-service would prefer for the fixture repository.
+func (s FixtureService) refreshRepositoryScopedSecrets(ctx context.Context, secrets dynamic.ResourceInterface, repositoryPath, token string) error {
+	list, err := secrets.List(ctx, metav1.ListOptions{LabelSelector: scmCredentialsLabel + "=scm," + scmHostnameLabel + "=gitlab.com"})
+	if err != nil {
+		return fmt.Errorf("list GitLab SCM Secrets: %w", err)
+	}
+	for index := range list.Items {
+		secret := &list.Items[index]
+		if !directRepositoryMatch(secret, repositoryPath) || !basicAuthSecret(secret) {
+			continue
+		}
+		updateBasicAuthPassword(secret, token)
+		if _, err := secrets.Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update GitLab SCM Secret %q: %w", secret.GetName(), err)
+		}
+	}
+	return nil
+}
+
+// writeGitLabCredentialSecret creates or updates the harness-owned GitLab Secret.
+func (s FixtureService) writeGitLabCredentialSecret(ctx context.Context, secrets dynamic.ResourceInterface, namespace, token, repositoryPath string, update bool) error {
+	secret, err := secrets.Get(ctx, GitLabCredentialSecretName, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		if err := s.createGitLabCredentialSecret(ctx, secrets, namespace, token, repositoryPath); err != nil {
+			return err
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get GitLab SCM Secret %q: %w", GitLabCredentialSecretName, err)
+	}
+	if !update {
+		return fmt.Errorf("GitLab SCM Secret %q already exists but is not usable", GitLabCredentialSecretName)
+	}
+	updateBasicAuthPassword(secret, token)
+	if repositoryPath != "" {
+		annotations := secret.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[scmSecretRepositoryAnnotation] = repositoryPath
+		secret.SetAnnotations(annotations)
+	}
+	if _, err := secrets.Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update GitLab SCM Secret %q: %w", GitLabCredentialSecretName, err)
+	}
+	return nil
+}
+
+// gitLabRepositoryPath returns the owner/repo path build-service uses for matching.
+func gitLabRepositoryPath(repository string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(repository))
+	if err != nil || parsed.Path == "" {
+		return "", fmt.Errorf("invalid GitLab repository URL %q", repository)
+	}
+	repositoryPath := strings.TrimSuffix(strings.Trim(parsed.Path, "/"), ".git")
+	if repositoryPath == "" {
+		return "", fmt.Errorf("GitLab repository URL %q has no path", repository)
+	}
+	return repositoryPath, nil
+}
+
+// directRepositoryMatch reports whether a Secret directly names the repository.
+func directRepositoryMatch(secret *unstructured.Unstructured, repositoryPath string) bool {
+	for _, candidate := range strings.Split(secret.GetAnnotations()[scmSecretRepositoryAnnotation], ",") {
+		if strings.Trim(strings.TrimSpace(candidate), "/") == repositoryPath {
+			return true
+		}
+	}
+	return false
+}
+
+// basicAuthSecret reports whether a Secret is a basic-auth credential.
+func basicAuthSecret(secret *unstructured.Unstructured) bool {
+	secretType, found, err := unstructured.NestedString(secret.Object, "type")
+	return err == nil && found && secretType == string(corev1.SecretTypeBasicAuth)
+}
+
+// updateBasicAuthPassword writes the token without discarding other Secret data.
+func updateBasicAuthPassword(secret *unstructured.Unstructured, token string) {
+	data, _, _ := unstructured.NestedMap(secret.Object, "data")
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["password"] = base64.StdEncoding.EncodeToString([]byte(token))
+	secret.Object["type"] = string(corev1.SecretTypeBasicAuth)
+	secret.Object["data"] = data
+	delete(secret.Object, "stringData")
+	labels := secret.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[scmCredentialsLabel] = "scm"
+	labels[scmHostnameLabel] = "gitlab.com"
+	secret.SetLabels(labels)
+}
+
+// createGitLabCredentialSecret creates the harness-owned GitLab Secret.
+func (s FixtureService) createGitLabCredentialSecret(ctx context.Context, secrets dynamic.ResourceInterface, namespace, token, repositoryPath string) error {
+	metadata := map[string]any{
+		"name":      GitLabCredentialSecretName,
+		"namespace": namespace,
+		"labels": map[string]any{
+			scmCredentialsLabel: "scm",
+			scmHostnameLabel:    "gitlab.com",
+		},
+	}
+	if repositoryPath != "" {
+		metadata["annotations"] = map[string]any{scmSecretRepositoryAnnotation: repositoryPath}
+	}
 	secret := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
-		"metadata": map[string]any{
-			"name":      gitLabCredentialSecretName,
-			"namespace": namespace,
-			"labels": map[string]any{
-				scmCredentialsLabel: "scm",
-				scmHostnameLabel:    "gitlab.com",
-			},
-		},
-		"type": string(corev1.SecretTypeBasicAuth),
+		"metadata":   metadata,
+		"type":       string(corev1.SecretTypeBasicAuth),
 		"stringData": map[string]any{
 			"password": token,
 		},
 	}}
 	if _, err := secrets.Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 		if errors.IsAlreadyExists(err) {
-			return fmt.Errorf("GitLab SCM Secret %q already exists but is not usable", gitLabCredentialSecretName)
+			return fmt.Errorf("GitLab SCM Secret %q already exists but is not usable", GitLabCredentialSecretName)
 		}
 		return fmt.Errorf("create GitLab SCM Secret: %w", err)
 	}

@@ -90,16 +90,6 @@ var _ = Describe("Parse", func() {
 			err = req.Validate()
 			Expect(err).Should(MatchError(ContainSubstring("trigger timeout")))
 		})
-
-		It("requires provider tokens", func() {
-			for _, provider := range []string{ProviderGitHub, ProviderGitLab} {
-				req := Defaults()
-				req.Command = CommandRun
-				req.Provider = provider
-				err := req.Validate()
-				Expect(err).Should(HaveOccurred(), provider)
-			}
-		})
 	})
 
 	When("the cleanup command is used", func() {
@@ -120,11 +110,15 @@ var _ = Describe("Parse", func() {
 	})
 
 	When("credentials are loaded", func() {
-		It("requires credentials for both providers", func() {
-			GinkgoT().Setenv("GITHUB_TOKEN", "github-token")
+		It("defers both provider credentials to run time", func() {
+			GinkgoT().Setenv("GITHUB_TOKEN", "")
 			GinkgoT().Setenv("GITLAB_BOT_TOKEN", "")
-			_, err := Parse([]string{"run", "both"})
-			Expect(err).Should(MatchError(ContainSubstring("GITLAB_BOT_TOKEN")))
+			for _, provider := range []string{ProviderGitHub, ProviderGitLab, ProviderBoth} {
+				got, err := Parse([]string{"run", provider})
+				Expect(err).ShouldNot(HaveOccurred(), provider)
+				Expect(got.Credentials.GitHubToken).Should(BeEmpty(), provider)
+				Expect(got.Credentials.GitLabToken).Should(BeEmpty(), provider)
+			}
 		})
 
 		It("loads credentials from env file", func() {
@@ -136,12 +130,6 @@ var _ = Describe("Parse", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(got.Credentials.GitLabToken).Should(Equal("file-token"))
 			Expect(got.Credentials.GitLabAPIURL).Should(Equal("https://gitlab.example/api/v4"))
-		})
-
-		It("should fail before any cluster selection", func() {
-			GinkgoT().Setenv("GITHUB_TOKEN", "")
-			_, err := Parse([]string{"run", "github", "--clusters-file", "/nonexistent.yaml"})
-			Expect(err).Should(MatchError(ContainSubstring("GITHUB_TOKEN")))
 		})
 	})
 

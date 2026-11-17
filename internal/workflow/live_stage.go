@@ -8,7 +8,6 @@ import (
 	"io"
 	"path"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/redhat-appstudio/lkmabt/internal/cleanup"
@@ -21,11 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
-
-// fixtureUpdateMutex serializes fixture read-and-commit pairs across concurrent clusters.
-// All clusters update the same fixture branch, so unserialized pairs leave one cluster's
-// expected SHA stale and fail its trigger.
-var fixtureUpdateMutex sync.Mutex
 
 var PipelineRunGVR = schema.GroupVersionResource{Group: "tekton.dev", Version: "v1", Resource: "pipelineruns"}
 
@@ -82,10 +76,36 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 	if err != nil {
 		return err
 	}
+	if s.Request.Provider == config.ProviderGitHub {
+		if err := s.verifyGitHubApp(ctx); err != nil {
+			return err
+		}
+	}
 	if err := s.ensureTenantNamespaceAvailable(ctx, manifest); err != nil {
 		return err
 	}
 	manifest.TargetClusterServer = s.Request.ClusterServer
+	return nil
+}
+
+// verifyGitHubApp rejects clusters whose published GitHub App cannot onboard the fixture repository.
+func (s *LiveStage) verifyGitHubApp(ctx context.Context) error {
+	if s.Clients == nil {
+		return fmt.Errorf("cluster clients are not initialized")
+	}
+	checker, ok := s.Provider.(cluster.GitHubAppChecker)
+	if !ok {
+		return fmt.Errorf("github provider does not support GitHub App verification")
+	}
+	slug, err := cluster.VerifyGitHubAppOnboarding(ctx, s.Clients.Kubernetes, checker)
+	if err != nil {
+		if errors.Is(err, providers.ErrUnverifiable) {
+			fmt.Fprintf(s.Log, "warning: %v\n", err)
+			return nil
+		}
+		return err
+	}
+	fmt.Fprintf(s.Log, "GitHub App %s installation verified\n", slug)
 	return nil
 }
 
@@ -114,13 +134,17 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 	if application == "" {
 		application = s.Request.ApplicationName
 	}
+	manifest.Fixture.TenantNamespace = namespace
+	manifest.Fixture.EphemeralGitLabAuth = s.Request.Credentials.GitLabTokenEphemeral
 	result, err := (cluster.FixtureService{Dynamic: s.Clients.Dynamic}).EnsureFixture(ctx, cluster.FixtureSpec{
-		Namespace:   namespace,
-		RunID:       manifest.RunID,
-		Application: application,
-		Provider:    s.Request.Provider,
-		GitLabToken: s.Request.Credentials.GitLabToken,
-		Components:  components,
+		Namespace:            namespace,
+		RunID:                manifest.RunID,
+		Application:          application,
+		Provider:             s.Request.Provider,
+		GitLabToken:          s.Request.Credentials.GitLabToken,
+		GitLabTokenEphemeral: s.Request.Credentials.GitLabTokenEphemeral,
+		Repository:           fixture.URL,
+		Components:           components,
 	})
 	if err != nil {
 		return err
@@ -133,6 +157,8 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 		RepositoryName:  fixture.Name,
 		Repository:      fixture.URL,
 		Branch:          s.Request.SourceBranch,
+
+		EphemeralGitLabAuth: s.Request.Credentials.GitLabTokenEphemeral,
 	}
 	return nil
 }
@@ -229,12 +255,8 @@ func (s *LiveStage) TriggerComponents(ctx context.Context, manifest *model.RunMa
 	return nil
 }
 
-// triggerComponent commits one Dockerfile comment while holding the shared fixture lock.
+// triggerComponent commits one Dockerfile comment with the SHA read immediately before it.
 func (s *LiveStage) triggerComponent(ctx context.Context, manifest *model.RunManifest, component, path string) (providers.Commit, error) {
-	// Hold the shared lock across the read and the commit so a concurrent cluster cannot
-	// invalidate the SHA the update must present.
-	fixtureUpdateMutex.Lock()
-	defer fixtureUpdateMutex.Unlock()
 	file, err := s.Provider.ReadFile(ctx, s.Fixture, path, s.Request.SourceBranch)
 	if err != nil {
 		return providers.Commit{}, fmt.Errorf("read %s: %w", path, err)

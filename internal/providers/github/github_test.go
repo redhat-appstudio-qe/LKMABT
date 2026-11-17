@@ -14,11 +14,17 @@ import (
 )
 
 type fakeClient struct {
-	repository          *gh.Repository
-	getRepositoryErrors []error
-	updateErrors        []error
-	getCalls            int
-	updateCalls         int
+	repository            *gh.Repository
+	getRepositoryErrors   []error
+	updateErrors          []error
+	installations         []*gh.Installation
+	installationErr       error
+	installationRepos     []*gh.Repository
+	installationRepoErr   error
+	getCalls              int
+	updateCalls           int
+	installationCalls     int
+	installationRepoCalls []int64
 }
 
 // GetRepository returns the configured fake repository or the next queued error.
@@ -49,6 +55,18 @@ func (f *fakeClient) UpdateFile(string, string, string, string, string, string) 
 		return nil, err
 	}
 	return &gh.RepositoryContentResponse{Commit: gh.Commit{SHA: gh.String("commit-1")}}, nil
+}
+
+// ListOrganizationInstallations returns the configured fake installations or error.
+func (f *fakeClient) ListOrganizationInstallations(context.Context, string) ([]*gh.Installation, error) {
+	f.installationCalls++
+	return f.installations, f.installationErr
+}
+
+// ListUserInstallationRepositories returns the configured fake installation repositories or error.
+func (f *fakeClient) ListUserInstallationRepositories(_ context.Context, id int64) ([]*gh.Repository, error) {
+	f.installationRepoCalls = append(f.installationRepoCalls, id)
+	return f.installationRepos, f.installationRepoErr
 }
 
 var _ = Describe("GitHub provider", func() {
@@ -105,5 +123,85 @@ var _ = Describe("GitHub provider", func() {
 		_, err := adapter.UpdateFile(context.Background(), fixture, "web-server/Dockerfile", "main", "content", "sha-1")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(client.updateCalls).To(Equal(2))
+	})
+})
+
+var _ = Describe("VerifyGitHubAppInstallation", func() {
+	When("the cluster app is installed for all repositories", func() {
+		It("should pass", func() {
+			client := &fakeClient{installations: []*gh.Installation{{AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("all")}}}
+
+			Expect(New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")).Should(Succeed())
+		})
+	})
+
+	When("the cluster app is not installed in the fixture organization", func() {
+		It("should name the app and its installation URL", func() {
+			client := &fakeClient{installations: []*gh.Installation{{AppSlug: gh.String("other-app"), RepositorySelection: gh.String("all")}}}
+
+			err := New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")
+			Expect(err).Should(MatchError(ContainSubstring("GitHub App cluster-app is not installed for organization redhat-appstudio-qe")))
+			Expect(err.Error()).Should(ContainSubstring("https://github.com/apps/cluster-app/installations/new"))
+		})
+	})
+
+	When("the app is installed for selected repositories", func() {
+		It("should pass when the fixture repository is selected", func() {
+			client := &fakeClient{
+				installations:     []*gh.Installation{{ID: gh.Int64(7), AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("selected")}},
+				installationRepos: []*gh.Repository{{Owner: &gh.User{Login: gh.String("redhat-appstudio-qe")}, Name: gh.String("dr_test_mathwizz")}},
+			}
+
+			Expect(New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")).Should(Succeed())
+			Expect(client.installationRepoCalls).Should(Equal([]int64{7}))
+		})
+
+		It("should fail when the fixture repository is not selected", func() {
+			client := &fakeClient{
+				installations:     []*gh.Installation{{ID: gh.Int64(7), AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("selected")}},
+				installationRepos: []*gh.Repository{{Owner: &gh.User{Login: gh.String("redhat-appstudio-qe")}, Name: gh.String("other")}},
+			}
+
+			err := New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")
+			Expect(err).Should(MatchError(ContainSubstring("not for redhat-appstudio-qe/dr_test_mathwizz")))
+		})
+
+		It("should fail when the selected repositories cannot be listed", func() {
+			client := &fakeClient{
+				installations:       []*gh.Installation{{ID: gh.Int64(7), AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("selected")}},
+				installationRepoErr: &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusForbidden}},
+			}
+
+			err := New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")
+			Expect(err).Should(MatchError(ContainSubstring("cannot be verified")))
+			Expect(errors.Is(err, providers.ErrUnverifiable)).Should(BeTrue())
+		})
+	})
+
+	When("the installation is suspended", func() {
+		It("should fail", func() {
+			client := &fakeClient{installations: []*gh.Installation{{AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("all"), SuspendedAt: &gh.Timestamp{}}}}
+
+			err := New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")
+			Expect(err).Should(MatchError(ContainSubstring("is suspended")))
+		})
+	})
+
+	When("the organization installations cannot be listed", func() {
+		It("should return the API error with the token requirement", func() {
+			client := &fakeClient{installationErr: &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusForbidden}}}
+
+			err := New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")
+			Expect(err).Should(MatchError(ContainSubstring("needs the read:org scope")))
+		})
+	})
+
+	When("the app slug is empty", func() {
+		It("should fail without calling the API", func() {
+			client := &fakeClient{}
+
+			Expect(New(client).VerifyGitHubAppInstallation(context.Background(), " ")).Should(MatchError("GitHub App slug is required"))
+			Expect(client.installationCalls).Should(Equal(0))
+		})
 	})
 })

@@ -88,8 +88,8 @@ func (l Ladder) runOCLogin(ctx context.Context, entry clusterfile.Entry) {
 
 ## Performance and Memory
 
-The harness polls clusters and provider APIs while up to three clusters run
-concurrently — these patterns matter.
+The harness polls clusters and provider APIs while a cluster's provider
+workflows run concurrently — these patterns matter.
 
 | Guideline | Detail |
 |-----------|--------|

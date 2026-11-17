@@ -11,6 +11,7 @@ require (
 	github.com/onsi/gomega v1.44.0
 	github.com/xanzy/go-gitlab v0.114.0
 	golang.org/x/sys v0.46.0
+	golang.org/x/term v0.44.0
 	k8s.io/api v0.35.2
 	k8s.io/apimachinery v0.35.2
 	k8s.io/client-go v11.0.0+incompatible
@@ -60,7 +61,6 @@ require (
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/term v0.44.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.45.0 // indirect

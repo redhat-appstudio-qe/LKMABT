@@ -62,6 +62,10 @@ type FixtureIdentity struct {
 	RepositoryName  string   `json:"repositoryName"`
 	Repository      string   `json:"repository"`
 	Branch          string   `json:"branch"`
+	// EphemeralGitLabAuth marks a run-scoped GitLab token whose SCM Secret is
+	// removed during finalization. The name avoids the evidence redactor's
+	// credential-key fragments, which would replace a boolean with a string.
+	EphemeralGitLabAuth bool `json:"ephemeralGitLabAuth,omitempty"`
 }
 
 type PipelineRunIdentity struct {
