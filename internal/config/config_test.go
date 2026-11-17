@@ -91,14 +91,11 @@ var _ = Describe("Parse", func() {
 			Expect(err).Should(MatchError(ContainSubstring("trigger timeout")))
 		})
 
-		It("requires provider tokens", func() {
-			for _, provider := range []string{ProviderGitHub, ProviderGitLab} {
-				req := Defaults()
-				req.Command = CommandRun
-				req.Provider = provider
-				err := req.Validate()
-				Expect(err).Should(HaveOccurred(), provider)
-			}
+		It("requires GitLab tokens and defers GitHub tokens", func() {
+			Expect(validateProviderCredentials(ProviderGitHub, Credentials{})).Should(Succeed())
+			Expect(validateProviderCredentials(ProviderGitLab, Credentials{})).Should(MatchError(ContainSubstring("GITLAB_BOT_TOKEN")))
+			Expect(validateProviderCredentials(ProviderBoth, Credentials{GitLabToken: "token"})).Should(Succeed())
+			Expect(validateProviderCredentials(ProviderBoth, Credentials{})).Should(MatchError(ContainSubstring("GITLAB_BOT_TOKEN")))
 		})
 	})
 
@@ -138,10 +135,11 @@ var _ = Describe("Parse", func() {
 			Expect(got.Credentials.GitLabAPIURL).Should(Equal("https://gitlab.example/api/v4"))
 		})
 
-		It("should fail before any cluster selection", func() {
+		It("should defer GitHub credentials to run time", func() {
 			GinkgoT().Setenv("GITHUB_TOKEN", "")
-			_, err := Parse([]string{"run", "github", "--clusters-file", "/nonexistent.yaml"})
-			Expect(err).Should(MatchError(ContainSubstring("GITHUB_TOKEN")))
+			got, err := Parse([]string{"run", "github"})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(got.Credentials.GitHubToken).Should(BeEmpty())
 		})
 	})
 

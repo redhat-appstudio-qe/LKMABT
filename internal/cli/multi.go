@@ -9,19 +9,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/redhat-appstudio/lkmabt/internal/cluster"
 	"github.com/redhat-appstudio/lkmabt/internal/clusterauth"
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
+	"github.com/redhat-appstudio/lkmabt/internal/githubauth"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
 )
 
-// MaxConcurrentClusters caps simultaneous cluster workflows.
-const MaxConcurrentClusters = 3
+// authenticateGitHub acquires interactive GitHub credentials; tests replace it.
+var authenticateGitHub = githubauth.Authenticate
 
 type clusterRun struct {
 	Entry   clusterfile.Entry
@@ -29,10 +29,10 @@ type clusterRun struct {
 	Results []ProviderResult
 }
 
-// RunClusters authenticates every listed cluster, rejects entries that resolve
-// to one API server, runs them with a fixed concurrency cap, and writes the
-// aggregate reports.
-func RunClusters(ctx context.Context, request config.Request, runner Runner, console *Console) error {
+// RunClusters authenticates every listed cluster, acquires GitHub credentials
+// when needed, rejects entries that resolve to one API server, runs the clusters
+// one at a time in clusters-file order, and writes the aggregate reports.
+func RunClusters(ctx context.Context, request config.Request, runner Runner, console *Console) (runErr error) {
 	entries, err := clusterfile.Load(request.ClustersFile)
 	if err != nil {
 		return err
@@ -42,6 +42,21 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 		return err
 	}
 	defer aggregate.Log.Close()
+	if len(entries) > 0 && providerNeedsGitHub(request.Provider) && strings.TrimSpace(request.Credentials.GitHubToken) == "" {
+		if console.Interactive() {
+			console.Printf("github: authentication required; starting the gh browser login")
+		}
+		token, cleanup, err := authenticateGitHub(ctx, clusterauth.ExecRunner{Log: aggregate.Log}, console.Interactive())
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if cleanupErr := cleanup(); cleanupErr != nil {
+				runErr = errors.Join(runErr, cleanupErr)
+			}
+		}()
+		request.Credentials.GitHubToken = token
+	}
 	ladder := clusterauth.Ladder{Runner: clusterauth.ExecRunner{Log: aggregate.Log}, Log: aggregate.Log}
 	authFailures := ladder.Authenticate(ctx, entries)
 	if err := rejectDuplicateServers(entries, authFailures); err != nil {
@@ -49,6 +64,11 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 	}
 	runs := scheduleClusters(ctx, request, entries, authFailures, aggregate, runner, console)
 	return finishAggregateRun(aggregate, request, runs, console)
+}
+
+// providerNeedsGitHub reports whether the selected provider includes GitHub.
+func providerNeedsGitHub(provider string) bool {
+	return provider == config.ProviderGitHub || provider == config.ProviderBoth
 }
 
 // serverIdentity returns a comparison key for an API server URL, so equivalent
@@ -118,11 +138,9 @@ func rejectDuplicateServers(entries []clusterfile.Entry, authFailures map[string
 	return nil
 }
 
-// scheduleClusters runs at most MaxConcurrentClusters clusters at a time and keeps clusters-file order.
+// scheduleClusters runs authenticated clusters one at a time in clusters-file order.
 func scheduleClusters(ctx context.Context, request config.Request, entries []clusterfile.Entry, authFailures map[string]error, aggregate *aggregateRun, runner Runner, console *Console) []clusterRun {
 	runs := make([]clusterRun, len(entries))
-	semaphore := make(chan struct{}, MaxConcurrentClusters)
-	var waitGroup sync.WaitGroup
 	for index, entry := range entries {
 		runs[index] = clusterRun{Entry: entry, AuthErr: authFailures[entry.Name]}
 		if runs[index].AuthErr != nil {
@@ -130,17 +148,10 @@ func scheduleClusters(ctx context.Context, request config.Request, entries []clu
 			continue
 		}
 		console.Printf("cluster %s: authenticated", entry.Name)
-		waitGroup.Add(1)
-		go func(index int, entry clusterfile.Entry) {
-			defer waitGroup.Done()
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
-			console.Printf("cluster %s: started", entry.Name)
-			runs[index].Results = runCluster(ctx, request, entry, aggregate.Directory, runner)
-			console.Printf("cluster %s: finished (%s)", entry.Name, resultSummary(runs[index].Results))
-		}(index, entry)
+		console.Printf("cluster %s: started", entry.Name)
+		runs[index].Results = runCluster(ctx, request, entry, aggregate.Directory, runner)
+		console.Printf("cluster %s: finished (%s)", entry.Name, resultSummary(runs[index].Results))
 	}
-	waitGroup.Wait()
 	return runs
 }
 

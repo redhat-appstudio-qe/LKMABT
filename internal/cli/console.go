@@ -10,16 +10,23 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/workflow"
 )
 
-// Console serializes status output and interactive prompts across concurrent cluster runs.
+// Console serializes status output and interactive prompts across concurrent provider runs.
 type Console struct {
-	mu     sync.Mutex
-	Out    io.Writer
-	Prompt workflow.Confirmation
+	mu          sync.Mutex
+	Out         io.Writer
+	Prompt      workflow.Confirmation
+	interactive bool
 }
 
 // NewConsole returns a console bound to standard output and the interactive confirmation prompt.
 func NewConsole() *Console {
-	return &Console{Out: os.Stdout, Prompt: NewInteractiveConfirmationPrompt()}
+	prompt := NewInteractiveConfirmationPrompt()
+	return &Console{Out: os.Stdout, Prompt: prompt, interactive: prompt.Interactive}
+}
+
+// Interactive reports whether prompts and browser logins can be presented.
+func (c *Console) Interactive() bool {
+	return c != nil && c.interactive
 }
 
 // Printf writes one serialized status line.

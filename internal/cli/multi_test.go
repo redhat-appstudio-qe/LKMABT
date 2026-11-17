@@ -15,6 +15,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/redhat-appstudio/lkmabt/internal/clusterauth"
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
@@ -96,6 +97,32 @@ func (r *gatedRunner) Run(ctx context.Context, req config.Request, log RunLog) (
 	return RunOutcome{Provider: req.Provider, RunID: req.RunID, Stage: model.PhaseCompleted}, nil
 }
 
+type githubAuthStub struct {
+	token      string
+	err        error
+	cleanupErr error
+	calls      int
+	cleanups   int
+}
+
+// authenticate records the call and returns the configured token and cleanup.
+func (s *githubAuthStub) authenticate(_ context.Context, _ clusterauth.CommandRunner, _ bool) (string, func() error, error) {
+	s.calls++
+	return s.token, func() error {
+		s.cleanups++
+		return s.cleanupErr
+	}, s.err
+}
+
+var defaultGitHubAuth *githubAuthStub
+
+var _ = BeforeEach(func() {
+	defaultGitHubAuth = &githubAuthStub{token: "test-github-token"}
+	original := authenticateGitHub
+	authenticateGitHub = defaultGitHubAuth.authenticate
+	DeferCleanup(func() { authenticateGitHub = original })
+})
+
 // writeClustersFile writes a clusters file with entries and returns its path.
 func writeClustersFile(dir string, entries ...clusterfile.Entry) string {
 	path := filepath.Join(dir, "clusters.yaml")
@@ -164,10 +191,8 @@ var _ = Describe("runCluster", func() {
 })
 
 var _ = Describe("scheduleClusters", func() {
-	When("more clusters than the cap are listed", func() {
-		It("should keep at most three in flight and preserve order", func() {
-			Expect(MaxConcurrentClusters).Should(Equal(3))
-
+	When("multiple clusters are listed", func() {
+		It("should run them one at a time and preserve order", func() {
 			entries := []clusterfile.Entry{
 				{Name: "c1", Server: "https://api.c1.example"},
 				{Name: "c2", Server: "https://api.c2.example"},
@@ -187,14 +212,13 @@ var _ = Describe("scheduleClusters", func() {
 				runs = scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
 			}()
 
-			for range 3 {
-				Eventually(runner.started, 1*time.Second).Should(Receive())
-			}
+			Eventually(runner.started, time.Second).Should(Receive())
 			Consistently(runner.started, 250*time.Millisecond).ShouldNot(Receive())
 			close(release)
 			Eventually(done, 5*time.Second).Should(BeClosed())
 
-			Expect(runner.maxActive).Should(Equal(3))
+			Expect(runner.maxActive).Should(Equal(1))
+			Expect(runner.calls).Should(Equal(4))
 			Expect(runs).Should(HaveLen(4))
 			for index, run := range runs {
 				Expect(run.Entry.Name).Should(Equal("c" + string(rune('1'+index))))
@@ -600,6 +624,105 @@ var _ = Describe("RunClusters under the aggregate layout", func() {
 		})
 	})
 })
+
+var _ = Describe("RunClusters GitHub authentication", func() {
+	When("no GitHub token is configured", func() {
+		It("should authenticate once, reuse the token, and delete the credentials", func() {
+			request, runner := runClustersFixture(2)
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
+
+			Expect(defaultGitHubAuth.calls).Should(Equal(1))
+			Expect(defaultGitHubAuth.cleanups).Should(Equal(1))
+			Expect(runner.requests).Should(HaveLen(2))
+			for _, runRequest := range runner.requests {
+				Expect(runRequest.Credentials.GitHubToken).Should(Equal("test-github-token"))
+			}
+		})
+	})
+
+	When("a GitHub token is configured", func() {
+		It("should not authenticate interactively", func() {
+			request, runner := runClustersFixture(1)
+			request.Credentials.GitHubToken = "configured-token"
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
+
+			Expect(defaultGitHubAuth.calls).Should(Equal(0))
+			Expect(runner.requests).Should(HaveLen(1))
+			Expect(runner.requests[0].Credentials.GitHubToken).Should(Equal("configured-token"))
+		})
+	})
+
+	When("the provider is GitLab", func() {
+		It("should not authenticate to GitHub", func() {
+			request, runner := runClustersFixture(1)
+			request.Provider = config.ProviderGitLab
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
+
+			Expect(defaultGitHubAuth.calls).Should(Equal(0))
+		})
+	})
+
+	When("both providers are selected", func() {
+		It("should authenticate once and reuse the token for both", func() {
+			request, runner := runClustersFixture(1)
+			request.Provider = config.ProviderBoth
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
+
+			Expect(defaultGitHubAuth.calls).Should(Equal(1))
+			Expect(defaultGitHubAuth.cleanups).Should(Equal(1))
+			Expect(runner.requests).Should(HaveLen(2))
+			for _, runRequest := range runner.requests {
+				Expect(runRequest.Credentials.GitHubToken).Should(Equal("test-github-token"))
+			}
+		})
+	})
+
+	When("authentication fails", func() {
+		It("should stop before running any cluster", func() {
+			request, runner := runClustersFixture(1)
+			defaultGitHubAuth.err = errors.New("browser login denied")
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
+			Expect(err).Should(MatchError(ContainSubstring("browser login denied")))
+			Expect(runner.requests).Should(BeEmpty())
+		})
+	})
+
+	When("deleting the credentials fails", func() {
+		It("should fail the run even when every cluster passes", func() {
+			request, runner := runClustersFixture(1)
+			defaultGitHubAuth.cleanupErr = errors.New("temporary credentials are still present")
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
+			Expect(err).Should(MatchError(ContainSubstring("temporary credentials are still present")))
+			Expect(runner.requests).Should(HaveLen(1))
+		})
+	})
+})
+
+// runClustersFixture builds a GitHub run over clusterCount stubbed clusters.
+func runClustersFixture(clusterCount int) (config.Request, *artifactWritingRunner) {
+	dir := GinkgoT().TempDir()
+	GinkgoT().Setenv("HOME", GinkgoT().TempDir())
+	stubOC()
+	entries := make([]clusterfile.Entry, 0, clusterCount)
+	for index := 1; index <= clusterCount; index++ {
+		name := fmt.Sprintf("c%d", index)
+		entries = append(entries, clusterfile.Entry{Name: name, Kubeconfig: writeKubeconfig(dir, name), Server: "https://api." + name + ".example"})
+	}
+	request := config.Request{
+		Command:      config.CommandRun,
+		Provider:     config.ProviderGitHub,
+		StateDir:     GinkgoT().TempDir(),
+		ClustersFile: writeClustersFile(dir, entries...),
+		Timeouts:     config.Defaults().Timeouts,
+	}
+	return request, &artifactWritingRunner{}
+}
 
 // singleAggregateDirectory returns the one non-latest directory under stateDir.
 func singleAggregateDirectory(stateDir string) string {

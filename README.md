@@ -64,11 +64,15 @@ resources.
   `konflux-info/konflux-public-info` and that app must be installed for the
   fixture organization. GitHub runs verify the installation at `preflight`,
   before any cluster mutation, and fail that cluster with the app's
-  installation URL when it is missing. `GITHUB_TOKEN` needs the `read:org`
-  scope and an owner who administers the fixture organization. An app
-  installed for selected repositories must include the fixture repository;
-  when the token cannot list installation repositories, preflight cannot
-  verify the selection and fails instead of proceeding blind.
+  installation URL when it is missing. An app installed for selected
+  repositories must include the fixture repository; when the token cannot list
+  installation repositories, preflight cannot verify the selection and fails
+  instead of proceeding blind.
+- GitHub credentials come from `GITHUB_TOKEN` when it is set, or from an
+  interactive `gh auth login` browser flow when it is empty. The interactive
+  flow needs the GitHub CLI on `PATH` and requests the `repo`, `read:org`, and
+  `read:user` scopes. When `GITHUB_TOKEN` is set, it needs the `read:org` scope
+  and an owner who administers the fixture organization.
 - PaC onboarding must be complete for all three components, with current
   `.tekton` configuration available on each fixture's default branch. The
   harness waits for PaC readiness before writing trigger comments and does not
@@ -87,7 +91,7 @@ cd /path/to/konflux-test
 ./bin/lkmabt cleanup --cluster <name> --run-id <run-id> --env-file .lkmabt.env
 ```
 
-At most three clusters run concurrently (fixed cap). `both` runs GitHub and
+Clusters run one at a time in clusters-file order. `both` runs GitHub and
 GitLab concurrently inside every cluster. The `--cluster-server` and
 `--resume` flags no longer exist.
 
@@ -113,10 +117,12 @@ After failure, it saves and verifies required artifacts before prompting.
 ## Environment configuration
 
 Copy `.lkmabt.env.example` to `.lkmabt.env`. Keep the copy local.
-Set `GITHUB_TOKEN` for GitHub runs and `GITLAB_BOT_TOKEN` for GitLab runs. Both
-tokens are required for `run both`. Set `GITLAB_API_URL` when needed. Cluster
-selection lives in `.lkmabt-clusters.yaml` (schema in
-`.lkmabt-clusters.yaml.example`).
+Set `GITLAB_BOT_TOKEN` for GitLab runs. GitHub runs use `GITHUB_TOKEN` when it
+is set; leave it empty to authenticate through the `gh` browser flow. The
+interactive token is written to a private file in a temporary directory, reused
+for every cluster, and deleted when the last cluster finishes, including on
+failure. Set `GITLAB_API_URL` when needed. Cluster selection lives in
+`.lkmabt-clusters.yaml` (schema in `.lkmabt-clusters.yaml.example`).
 
 The parser reads `KEY=VALUE` lines. It does not execute the environment file.
 

@@ -58,7 +58,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/cli/`** — Command execution
 - `Runner` interface defines the execution contract
 - `Execute()` drives the full workflow lifecycle
-- Owns the aggregate run directory, the fixed cap of three concurrent clusters, and the per-cluster/per-provider run logs
+- Owns the aggregate run directory, the sequential cluster runner, and the per-cluster/per-provider run logs
 
 **`internal/clusterfile/`** — Clusters-file schema
 - Strict parsing of `name`, `type`, `kflux`, `ibmcloud`, `ibmcloud-endpoint`, `kubeconfig`, and `server` per entry
@@ -71,12 +71,17 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 - ROKS: `ibmcloud target` probes for an active session, `ibmcloud login --sso` runs when absent, `ibmcloud ks cluster config --cluster <ibmcloud> --endpoint <ibmcloud-endpoint>` writes the entry's kubeconfig through `KUBECONFIG`, and a second `oc whoami` verifies the result
 - Non-interactive checks are bounded (`oc whoami` 60s, `ibmcloud target`/`ks cluster config` 2m) so one stalled credential plugin fails that cluster instead of blocking the run; only `ibmcloud login --sso` stays interactive
 
+**`internal/githubauth/`** — GitHub credential acquisition
+- Runs `gh auth login --web` with an isolated `GH_CONFIG_DIR` and `--insecure-storage`
+- Keeps only a 0600 token file in a temporary directory; `RunClusters` deletes the directory after the last cluster
+- Non-interactive runs must provide `GITHUB_TOKEN` instead
+
 **`internal/report/`** — Aggregate reports
 - Renders Markdown and HTML reports for a multi-cluster run
 
 **`internal/config/`** — Configuration parsing
 - Parses environment files and command-line arguments
-- Validates required credentials and cluster context
+- Validates GitLab credentials and cluster context; GitHub credentials are acquired at run time
 
 **`internal/workflow/`** — Core orchestration logic
 - `LiveStage` coordinates the full test workflow
@@ -145,7 +150,9 @@ definitions via import when the same GVR is needed across packages.
 5. **Build Outputs Verified** — Confirm Buildah TaskRuns contain node evidence for `linux/amd64` and `linux/arm64`
 6. **Completed** — Prompt for namespace cleanup
 
-On failure, transition to **Failed** phase and collect artifacts.
+On failure, transition to **Failed** phase and collect artifacts. Clusters run
+sequentially in clusters-file order; each completes or fails before the next
+starts.
 
 ## Testing Structure
 
@@ -192,17 +199,31 @@ Each Konflux cluster onboards repositories through its own GitHub App. The
 harness reads that app from `konflux-info/konflux-public-info` and verifies
 during `preflight` that the app is installed for the fixture organization, so a
 cluster that cannot onboard the fixture fails before the run creates a tenant
-namespace or touches the fixture. The check needs a `GITHUB_TOKEN` with
-`read:org` owned by an organization administrator; installations limited to
-selected repositories must include the fixture or the check fails as
-unverifiable.
+namespace or touches the fixture. Installations limited to selected
+repositories must include the fixture or the check fails as unverifiable.
+
+### GitHub Credential Lifecycle
+When `GITHUB_TOKEN` is empty, GitHub runs call `gh auth login --web` with a
+private `GH_CONFIG_DIR` and `--insecure-storage`, read the token with
+`gh auth token`, and keep only a 0600 token file inside a temporary directory.
+The token is reused for every cluster; the temporary directory is removed when
+the run ends, including after failures and cancellations, and a removal failure
+fails the run. The login requires an interactive terminal; non-interactive runs
+must provide `GITHUB_TOKEN`, which needs the `read:org` scope and an owner who
+administers the fixture organization.
+
+### Sequential Cluster Execution
+Clusters run one at a time in clusters-file order so one GitHub login is reused
+and only one cluster is mutated at a time. `run both` still runs GitHub and
+GitLab concurrently inside a cluster.
 
 ## Design Decisions
 
 ### Fixed Fixtures Pattern
 The tool uses **persistent fixtures** rather than creating/deleting test resources on every run:
 - One persistent tenant namespace per provider (GitHub, GitLab); `run both`
-  starts them concurrently with distinct run IDs and artifact directories
+  starts both providers concurrently inside the cluster with distinct run IDs
+  and artifact directories; clusters themselves run sequentially
 - One Application with three Components (`mathwizz-web-server`, `mathwizz-history-worker`, `mathwizz-frontend`)
 - Persistent provider forks (never deleted by the tool)
 

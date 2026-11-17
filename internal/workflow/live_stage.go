@@ -8,7 +8,6 @@ import (
 	"io"
 	"path"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/redhat-appstudio/lkmabt/internal/cleanup"
@@ -21,11 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
-
-// fixtureUpdateMutex serializes fixture read-and-commit pairs across concurrent clusters.
-// All clusters update the same fixture branch, so unserialized pairs leave one cluster's
-// expected SHA stale and fail its trigger.
-var fixtureUpdateMutex sync.Mutex
 
 var PipelineRunGVR = schema.GroupVersionResource{Group: "tekton.dev", Version: "v1", Resource: "pipelineruns"}
 
@@ -251,12 +245,8 @@ func (s *LiveStage) TriggerComponents(ctx context.Context, manifest *model.RunMa
 	return nil
 }
 
-// triggerComponent commits one Dockerfile comment while holding the shared fixture lock.
+// triggerComponent commits one Dockerfile comment with the SHA read immediately before it.
 func (s *LiveStage) triggerComponent(ctx context.Context, manifest *model.RunManifest, component, path string) (providers.Commit, error) {
-	// Hold the shared lock across the read and the commit so a concurrent cluster cannot
-	// invalidate the SHA the update must present.
-	fixtureUpdateMutex.Lock()
-	defer fixtureUpdateMutex.Unlock()
 	file, err := s.Provider.ReadFile(ctx, s.Fixture, path, s.Request.SourceBranch)
 	if err != nil {
 		return providers.Commit{}, fmt.Errorf("read %s: %w", path, err)

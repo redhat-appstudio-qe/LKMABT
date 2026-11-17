@@ -156,7 +156,7 @@ func (a *Adapter) VerifyGitHubAppInstallation(ctx context.Context, appSlug strin
 	}
 	installations, err := a.client.ListOrganizationInstallations(ctx, canonicalOwner)
 	if err != nil {
-		return fmt.Errorf("list GitHub App installations for %s: %w (GITHUB_TOKEN needs the read:org scope and an owner who administers the organization)", canonicalOwner, err)
+		return fmt.Errorf("list GitHub App installations for %s: %w (the GitHub token needs the read:org scope and an owner who administers the organization)", canonicalOwner, err)
 	}
 	for _, installation := range installations {
 		if installation.GetAppSlug() == appSlug {

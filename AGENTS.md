@@ -24,10 +24,11 @@ resolve against the working directory.
 ## Project Layout
 
 - `cmd/lkmabt/` — CLI entry point, argument parsing, signal handling
-- `internal/cli/` — command execution, aggregate run directory, three-cluster concurrency cap, run logs
+- `internal/cli/` — command execution, aggregate run directory, sequential cluster execution, run logs
 - `internal/config/` — env-file and flag parsing
 - `internal/clusterfile/` — clusters-file schema (`name`, `type`, `kflux`, `ibmcloud`, `ibmcloud-endpoint`, `kubeconfig`, `server`)
 - `internal/clusterauth/` — authentication ladder (verify with `oc whoami` → ROKS: `ibmcloud` → else: `kflux cluster login` → `oc login`)
+- `internal/githubauth/` — interactive `gh auth login` with an isolated config directory and guaranteed credential deletion
 - `internal/workflow/` — orchestration and phase state machine
 - `internal/cluster/` — client-go wrapper, preflight checks, build-output verification
 - `internal/providers/`, `internal/providers/github/`, `internal/providers/gitlab/` — provider abstraction and implementations
@@ -52,7 +53,8 @@ resolve against the working directory.
 
 - **Build output verification** reads TaskRun YAML artifacts and expects one `linux/amd64` and one `linux/arm64` node label per component; a missing label fails as pipeline misconfiguration, not harness error (see `skills/developer-guide.md`)
 - **Cluster names are not kflux catalog names** — `name` is the report and `--cluster` identity, `kflux` is the catalog name; host `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is catalog cluster `ocp-p01`, and a wrong value surfaces kflux's `unknown cluster` error
-- **GitHub App installation is per cluster** — `preflight` reads the app slug from `konflux-info/konflux-public-info` and verifies that app is installed for the fixture organization. `GITHUB_TOKEN` needs the `read:org` scope and must belong to an organization administrator; an app limited to selected repositories must include the fixture, or preflight fails before any cluster mutation
+- **GitHub App installation is per cluster** — `preflight` reads the app slug from `konflux-info/konflux-public-info` and verifies that app is installed for the fixture organization. An app limited to selected repositories must include the fixture, or preflight fails before any cluster mutation
+- **GitHub credentials are per run** — `GITHUB_TOKEN` is used when set; otherwise the harness runs `gh auth login --web` with an isolated `GH_CONFIG_DIR` and `--insecure-storage`. The token lives only in a 0600 file under a temporary directory that is deleted when the last cluster finishes, including on failure; a deletion failure fails the run. Clusters run one at a time so the credential is acquired once and reused
 - **PipelineRun overshoot** for one component/commit fails the run; it is a regression alarm for STONEINTG-1732
 - **Every kubeconfig is verified** with `oc whoami` before cluster work; a readable file with an expired token is not authenticated. A rejected `ocp` kubeconfig is refreshed through kflux (default path) or `oc login`, and otherwise fails at `authentication`, never at `preflight`
 - **ROKS login is opt-in** with `type: roks`; those entries never use kflux or `oc login`. `ibmcloud ks cluster config` merges into the kubeconfig named by `KUBECONFIG`, and the ladder verifies the file with `oc whoami` on every run (a rejected file stays readable), so a developer who never opened the cluster's web console fails at `authentication` with instructions instead of at `preflight`

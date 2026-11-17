@@ -252,28 +252,14 @@ func (r Request) Validate() error {
 	return nil
 }
 
-// validateProviderCredentials reports missing credentials required by provider.
+// validateProviderCredentials reports missing credentials that cannot be acquired interactively.
+// GitHub credentials may come from the gh browser login at run time; GitLab has no such flow.
 func validateProviderCredentials(provider string, credentials Credentials) error {
-	missing := []string{}
-	switch provider {
-	case ProviderGitHub:
-		if strings.TrimSpace(credentials.GitHubToken) == "" {
-			missing = append(missing, "GITHUB_TOKEN")
-		}
-	case ProviderGitLab:
-		if strings.TrimSpace(credentials.GitLabToken) == "" {
-			missing = append(missing, "GITLAB_BOT_TOKEN")
-		}
-	case ProviderBoth:
-		if strings.TrimSpace(credentials.GitHubToken) == "" {
-			missing = append(missing, "GITHUB_TOKEN")
-		}
-		if strings.TrimSpace(credentials.GitLabToken) == "" {
-			missing = append(missing, "GITLAB_BOT_TOKEN")
-		}
+	if provider != ProviderGitLab && provider != ProviderBoth {
+		return nil
 	}
-	if len(missing) > 0 {
-		return fmt.Errorf("%s credentials missing: %s; set them in the environment or pass --env-file", provider, strings.Join(missing, ", "))
+	if strings.TrimSpace(credentials.GitLabToken) == "" {
+		return fmt.Errorf("%s credentials missing: GITLAB_BOT_TOKEN; set it in the environment or pass --env-file", provider)
 	}
 	return nil
 }

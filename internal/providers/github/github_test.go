@@ -191,7 +191,7 @@ var _ = Describe("VerifyGitHubAppInstallation", func() {
 			client := &fakeClient{installationErr: &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusForbidden}}}
 
 			err := New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")
-			Expect(err).Should(MatchError(ContainSubstring("GITHUB_TOKEN needs the read:org scope")))
+			Expect(err).Should(MatchError(ContainSubstring("needs the read:org scope")))
 		})
 	})
 
