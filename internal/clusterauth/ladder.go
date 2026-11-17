@@ -11,7 +11,8 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 )
 
-// Ladder authenticates clusters whose kubeconfig is missing, via kflux then oc.
+// Ladder authenticates clusters whose kubeconfig is missing, via the IBM Cloud CLI
+// for ROKS entries and kflux then oc for the rest.
 type Ladder struct {
 	Runner CommandRunner
 	Home   string    // empty means os.UserHomeDir()
@@ -58,7 +59,7 @@ func readableFile(path string) bool {
 	return true
 }
 
-// Authenticate ensures every entry has a readable kubeconfig and returns one error per
+// Authenticate ensures every entry has a usable kubeconfig and returns one error per
 // cluster that remains unauthenticated.
 func (l Ladder) Authenticate(ctx context.Context, entries []clusterfile.Entry) map[string]error {
 	failures := map[string]error{}
@@ -71,6 +72,31 @@ func (l Ladder) Authenticate(ctx context.Context, entries []clusterfile.Entry) m
 	if len(missing) == 0 {
 		return failures
 	}
+	// ROKS clusters authenticate only through the IBM Cloud CLI; kflux and oc login
+	// cannot satisfy IBMid authentication.
+	roks := make([]clusterfile.Entry, 0, len(missing))
+	legacy := make([]clusterfile.Entry, 0, len(missing))
+	for _, entry := range missing {
+		if entry.IsROKS() {
+			roks = append(roks, entry)
+		} else {
+			legacy = append(legacy, entry)
+		}
+	}
+	for name, failure := range l.authenticateROKS(ctx, roks) {
+		failures[name] = failure
+	}
+	l.authenticateLegacy(ctx, legacy)
+	for _, entry := range legacy {
+		if !readableFile(entry.Kubeconfig) {
+			failures[entry.Name] = fmt.Errorf("authentication failed: no readable kubeconfig at %s after kflux and oc login", entry.Kubeconfig)
+		}
+	}
+	return failures
+}
+
+// authenticateLegacy logs in to default-path clusters with kflux, then runs oc login for the rest.
+func (l Ladder) authenticateLegacy(ctx context.Context, missing []clusterfile.Entry) {
 	// kflux can only write kubeconfigs at its default per-cluster paths.
 	kfluxTargets := make([]clusterfile.Entry, 0, len(missing))
 	for _, entry := range missing {
@@ -81,21 +107,11 @@ func (l Ladder) Authenticate(ctx context.Context, entries []clusterfile.Entry) m
 	if len(kfluxTargets) > 0 {
 		l.runKfluxLogin(ctx, kfluxTargets)
 	}
-	remaining := make([]clusterfile.Entry, 0, len(missing))
 	for _, entry := range missing {
 		if !readableFile(entry.Kubeconfig) {
-			remaining = append(remaining, entry)
+			l.runOCLogin(ctx, entry)
 		}
 	}
-	for _, entry := range remaining {
-		l.runOCLogin(ctx, entry)
-	}
-	for _, entry := range remaining {
-		if !readableFile(entry.Kubeconfig) {
-			failures[entry.Name] = fmt.Errorf("authentication failed: no readable kubeconfig at %s after kflux and oc login", entry.Kubeconfig)
-		}
-	}
-	return failures
 }
 
 // runKfluxLogin installs kflux when needed and runs one catalog login for the default-path clusters.

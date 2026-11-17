@@ -24,6 +24,19 @@ type CommandRunner interface {
 	LookPath(name string) (string, error)
 	// Run executes spec with the console attached and returns its failure.
 	Run(ctx context.Context, spec CommandSpec) error
+	// Output executes spec without the console and returns its combined output.
+	Output(ctx context.Context, spec CommandSpec) (string, error)
+}
+
+// command builds the exec.Cmd for spec with its working directory and extra environment.
+func (spec CommandSpec) command(ctx context.Context) *exec.Cmd {
+	command := exec.CommandContext(ctx, spec.Name, spec.Args...)
+	command.Dir = spec.Dir
+	// Extra environment entries ride on top of the process environment.
+	if len(spec.Env) > 0 {
+		command.Env = append(os.Environ(), spec.Env...)
+	}
+	return command
 }
 
 // lockedWriter serializes concurrent writes from a command's stdout and stderr copies.
@@ -51,12 +64,7 @@ func (r ExecRunner) LookPath(name string) (string, error) {
 
 // Run executes spec with inherited stdin and stdout/stderr optionally tee'd to the log.
 func (r ExecRunner) Run(ctx context.Context, spec CommandSpec) error {
-	command := exec.CommandContext(ctx, spec.Name, spec.Args...)
-	command.Dir = spec.Dir
-	// Extra environment entries ride on top of the process environment.
-	if len(spec.Env) > 0 {
-		command.Env = append(os.Environ(), spec.Env...)
-	}
+	command := spec.command(ctx)
 	out, errOut := io.Writer(os.Stdout), io.Writer(os.Stderr)
 	// Tee the console streams into the log so login failures are captured for the report.
 	// os/exec copies stdout and stderr from two goroutines, so both wrap one locked sink.
@@ -70,4 +78,13 @@ func (r ExecRunner) Run(ctx context.Context, spec CommandSpec) error {
 		return fmt.Errorf("%s %s: %w", spec.Name, strings.Join(spec.Args, " "), err)
 	}
 	return nil
+}
+
+// Output executes spec without the console and returns its combined stdout and stderr.
+func (r ExecRunner) Output(ctx context.Context, spec CommandSpec) (string, error) {
+	output, err := spec.command(ctx).CombinedOutput()
+	if err != nil {
+		return string(output), fmt.Errorf("%s %s: %w", spec.Name, strings.Join(spec.Args, " "), err)
+	}
+	return string(output), nil
 }

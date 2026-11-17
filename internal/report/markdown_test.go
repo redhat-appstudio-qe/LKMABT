@@ -18,7 +18,7 @@ func twoRowDocument() Document {
 		Rows: []Row{
 			{Cluster: "c1", Provider: "github", Passed: true, Stage: "completed", Links: []Link{{Label: "aggregate run.log", Target: "./run.log"}}},
 			{Cluster: "c2", Provider: "gitlab", Passed: false, Stage: "authentication",
-				Error: "authentication failed: no readable kubeconfig at /home/u/.kube/config-c2 after kflux and oc login"},
+				Error: "authentication failed: no usable kubeconfig at /home/u/.kube/config-c2 after ibmcloud login"},
 		},
 	}
 }
@@ -46,7 +46,7 @@ var _ = Describe("RenderMarkdown", func() {
 
 		It("should render a failed row with stage and error text", func() {
 			rendered := RenderMarkdown(twoRowDocument())
-			Expect(rendered).Should(ContainSubstring("| c2 | gitlab | failed | authentication | authentication failed: no readable kubeconfig at /home/u/.kube/config-c2 after kflux and oc login | none |"))
+			Expect(rendered).Should(ContainSubstring("| c2 | gitlab | failed | authentication | authentication failed: no usable kubeconfig at /home/u/.kube/config-c2 after ibmcloud login | none |"))
 		})
 	})
 

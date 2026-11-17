@@ -140,6 +140,54 @@ var _ = Describe("Load", func() {
 		})
 	})
 
+	When("an entry declares a cluster type", func() {
+		It("should default to ocp", func() {
+			dir := GinkgoT().TempDir()
+			testHome()
+			entries, err := clusterfile.Load(writeClustersFile(dir, "clusters.yaml", "clusters:\n  - name: c1\n"))
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(entries[0].Type).Should(Equal(clusterfile.TypeOCP))
+			Expect(entries[0].IsROKS()).Should(BeFalse())
+			Expect(entries[0].IBMCloud).Should(BeEmpty())
+			Expect(entries[0].IBMCloudEndpoint).Should(BeEmpty())
+		})
+
+		It("should default the ROKS IBM Cloud cluster to the entry name and the endpoint to vpe", func() {
+			dir := GinkgoT().TempDir()
+			testHome()
+			entries, err := clusterfile.Load(writeClustersFile(dir, "clusters.yaml", "clusters:\n  - name: kflux-roks-p01\n    type: roks\n"))
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(entries[0].IsROKS()).Should(BeTrue())
+			Expect(entries[0].IBMCloud).Should(Equal("kflux-roks-p01"))
+			Expect(entries[0].IBMCloudEndpoint).Should(Equal(clusterfile.DefaultIBMCloudEndpoint))
+		})
+
+		It("should keep explicit IBM Cloud values and the expected server", func() {
+			dir := GinkgoT().TempDir()
+			testHome()
+			yaml := "clusters:\n  - name: c1\n    type: roks\n    ibmcloud: cluster-id\n    ibmcloud-endpoint: private\n    server: https://c1.vpe.private.example:31533/\n"
+			entries, err := clusterfile.Load(writeClustersFile(dir, "clusters.yaml", yaml))
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(entries[0].IBMCloud).Should(Equal("cluster-id"))
+			Expect(entries[0].IBMCloudEndpoint).Should(Equal("private"))
+			Expect(entries[0].Server).Should(Equal("https://c1.vpe.private.example:31533"))
+		})
+
+		DescribeTable("should reject an unusable IBM Cloud configuration",
+			func(yaml, wantSubstring string) {
+				dir := GinkgoT().TempDir()
+				testHome()
+
+				_, err := clusterfile.Load(writeClustersFile(dir, "clusters.yaml", yaml))
+				Expect(err).Should(MatchError(ContainSubstring(wantSubstring)))
+			},
+			Entry("unknown type", "clusters:\n  - name: c1\n    type: rosa\n", `type "rosa" must be ocp or roks`),
+			Entry("ibmcloud on ocp", "clusters:\n  - name: c1\n    ibmcloud: cluster-id\n", `sets ibmcloud fields but type is "ocp"; set type: roks`),
+			Entry("endpoint on ocp", "clusters:\n  - name: c1\n    ibmcloud-endpoint: vpe\n", `sets ibmcloud fields but type is "ocp"; set type: roks`),
+			Entry("unknown endpoint", "clusters:\n  - name: c1\n    type: roks\n    ibmcloud-endpoint: public\n", `ibmcloud-endpoint "public" must be vpe, private, or link`),
+		)
+	})
+
 	When("the file is missing", func() {
 		It("should name the flag and the default path", func() {
 			dir := GinkgoT().TempDir()
