@@ -66,12 +66,13 @@ resources.
    before any cluster mutation. In an interactive session, a missing
    installation opens the app's installation page, prints the URL, and waits
    for an organization administrator to approve it, rechecking every 10
-   seconds until the preflight timeout. Non-interactive runs fail that cluster
-   with the installation URL. An app installed for selected repositories must
-   include the fixture repository; the error names the installation settings
-   URL. When the token cannot list installation repositories, preflight logs a
-   warning and continues; the trigger-stage PaC wait remains the backstop for
-   a missing selection.
+   seconds. Failed checks are reported and retried; when the preflight timeout
+   expires, the run asks whether to keep waiting. Declining, or a
+   non-interactive run, fails that cluster with the installation URL. An app
+   installed for selected repositories must include the fixture repository;
+   the error names the installation settings URL. When the token cannot list
+   installation repositories, preflight logs a warning and continues; the
+   trigger-stage PaC wait remains the backstop for a missing selection.
 8. Provider credentials come from `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` when
    set. Leave either empty to authenticate at run time: GitHub uses
    `gh auth login` (browser; requests `repo`, `read:org`, and `read:user`) and

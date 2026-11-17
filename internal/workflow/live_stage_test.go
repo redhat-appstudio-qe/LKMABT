@@ -30,15 +30,19 @@ import (
 )
 
 type confirmationStub struct {
-	approved bool
-	calls    int
-	messages []string
+	approved  bool
+	calls     int
+	messages  []string
+	onConfirm func()
 }
 
 // Confirm records the prompt message and returns the stub's configured approval.
 func (s *confirmationStub) Confirm(_ context.Context, message string) (bool, error) {
 	s.calls++
 	s.messages = append(s.messages, message)
+	if s.onConfirm != nil {
+		s.onConfirm()
+	}
 	return s.approved, nil
 }
 
@@ -55,6 +59,7 @@ type githubAppProviderStub struct {
 	slug    string
 	err     error
 	errs    []error
+	verify  func(call int) error
 	calls   int
 	fixture providers.FixtureRepository
 }
@@ -76,6 +81,9 @@ func (p *githubAppProviderStub) UpdateFile(context.Context, providers.FixtureRep
 func (p *githubAppProviderStub) VerifyGitHubAppInstallation(_ context.Context, slug string) error {
 	p.slug = slug
 	p.calls++
+	if p.verify != nil {
+		return p.verify(p.calls)
+	}
 	if len(p.errs) > 0 {
 		err := p.errs[0]
 		p.errs = p.errs[1:]
@@ -425,7 +433,7 @@ var _ = Describe("LiveStage", func() {
 			})
 		})
 
-		When("the installation does not arrive before the deadline", func() {
+		When("the installation does not arrive before the deadline without an interactive prompt", func() {
 			It("should fail when the preflight context expires", func() {
 				required := appInstallationRequired()
 				provider := &githubAppProviderStub{err: required}
@@ -446,6 +454,92 @@ var _ = Describe("LiveStage", func() {
 				err := stage.verifyGitHubApp(ctx)
 				Expect(errors.Is(err, context.DeadlineExceeded)).Should(BeTrue())
 				Expect(err).Should(MatchError(ContainSubstring("waiting for GitHub App cluster-app installation")))
+			})
+		})
+
+		When("an installation check fails transiently", func() {
+			It("should report and retry the check", func() {
+				required := appInstallationRequired()
+				provider := &githubAppProviderStub{errs: []error{required, errors.New("502 Bad Gateway")}}
+				out := &bytes.Buffer{}
+				stage := &LiveStage{
+					Provider:    provider,
+					Clients:     &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
+					Interactive: true,
+					Out:         out,
+					OpenURL:     func(string) error { return nil },
+					Log:         &bytes.Buffer{},
+				}
+				previous := githubAppPollInterval
+				githubAppPollInterval = time.Millisecond
+				defer func() { githubAppPollInterval = previous }()
+
+				Expect(stage.verifyGitHubApp(context.Background())).Should(Succeed())
+				Expect(provider.calls).Should(Equal(3))
+				Expect(out.String()).Should(ContainSubstring("installation check failed: 502 Bad Gateway; retrying"))
+			})
+		})
+
+		When("the installation appears after the preflight deadline", func() {
+			It("should keep waiting when approved", func() {
+				required := appInstallationRequired()
+				installed := false
+				provider := &githubAppProviderStub{verify: func(int) error {
+					if installed {
+						return nil
+					}
+					return required
+				}}
+				prompt := &confirmationStub{approved: true, onConfirm: func() { installed = true }}
+				out := &bytes.Buffer{}
+				stage := &LiveStage{
+					Provider:      provider,
+					Clients:       &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
+					Interactive:   true,
+					Prompt:        prompt,
+					ParentContext: context.Background(),
+					Out:           out,
+					OpenURL:       func(string) error { return nil },
+					Log:           &bytes.Buffer{},
+				}
+				previous := githubAppPollInterval
+				githubAppPollInterval = time.Millisecond
+				defer func() { githubAppPollInterval = previous }()
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+
+				Expect(stage.verifyGitHubApp(ctx)).Should(Succeed())
+				Expect(prompt.calls).Should(Equal(1))
+				Expect(prompt.messages[0]).Should(ContainSubstring("GitHub App cluster-app is still not installed. Keep waiting?"))
+				Expect(out.String()).Should(ContainSubstring("continuing to wait for GitHub App cluster-app installation"))
+				Expect(out.String()).Should(ContainSubstring("GitHub App cluster-app installation verified"))
+			})
+		})
+
+		When("the installation appears after the preflight deadline but the wait is declined", func() {
+			It("should fail with the deadline error", func() {
+				required := appInstallationRequired()
+				provider := &githubAppProviderStub{err: required}
+				prompt := &confirmationStub{}
+				stage := &LiveStage{
+					Provider:      provider,
+					Clients:       &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
+					Interactive:   true,
+					Prompt:        prompt,
+					ParentContext: context.Background(),
+					Out:           &bytes.Buffer{},
+					OpenURL:       func(string) error { return nil },
+					Log:           &bytes.Buffer{},
+				}
+				previous := githubAppPollInterval
+				githubAppPollInterval = time.Millisecond
+				defer func() { githubAppPollInterval = previous }()
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+
+				err := stage.verifyGitHubApp(ctx)
+				Expect(errors.Is(err, context.DeadlineExceeded)).Should(BeTrue())
+				Expect(prompt.calls).Should(Equal(1))
 			})
 		})
 	})

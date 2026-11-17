@@ -144,7 +144,7 @@ definitions via import when the same GVR is needed across packages.
 
 ## Workflow Execution Flow
 
-1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries, and the cluster's GitHub App installation (GitHub runs; interactive runs wait for a missing installation)
+1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries, and the cluster's GitHub App installation (GitHub runs; interactive runs wait for and can extend a missing installation wait)
 2. **Fixture Ready** — Validate test repositories are accessible, read current Dockerfile SHAs
 3. **Triggered** — Append trigger comments to Dockerfiles, commit changes
 4. **Builds Verified** — Wait for PipelineRuns to succeed (timeout configurable)
@@ -202,11 +202,14 @@ during `preflight` that the app is installed for the fixture organization, so a
 cluster that cannot onboard the fixture fails before the run creates a tenant
 namespace or touches the fixture. In an interactive session, a missing
 installation opens `https://github.com/apps/<slug>/installations/new`, prints
-the URL, and rechecks the installation every 10 seconds until it appears or
-the preflight timeout expires; non-interactive runs fail with the installation
-URL. Installations limited to selected repositories must include the fixture,
-and the error names the installation settings URL; when the token cannot list
-selections, preflight logs a warning and continues.
+the URL, and rechecks the installation every 10 seconds. Failed checks are
+reported and retried; when the preflight timeout expires, an interactive run
+asks whether to keep waiting and, if approved, polls on the run context until
+the installation appears or the run is canceled. Declining, or a
+non-interactive run, fails with the installation URL. Installations limited to
+selected repositories must include the fixture, and the error names the
+installation settings URL; when the token cannot list selections, preflight
+logs a warning and continues.
 
 ### Provider Credential Lifecycle
 When `GITHUB_TOKEN` is empty, GitHub runs call `gh auth login --web` with a

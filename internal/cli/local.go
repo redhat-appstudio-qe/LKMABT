@@ -59,6 +59,7 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	stage.Prompt = runner.Prompt
 	stage.Interactive = runner.Interactive
 	stage.Out = runner.Out
+	stage.ParentContext = ctx
 	stage.Log = log
 	store := evidence.NewManifestStore(request.StateDir)
 	var logAttachErr error

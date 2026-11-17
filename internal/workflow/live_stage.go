@@ -41,7 +41,10 @@ type LiveStage struct {
 	Interactive          bool
 	Out                  io.Writer
 	OpenURL              func(string) error
-	Log                  io.Writer
+	// ParentContext is the run context without the preflight deadline. An
+	// interactive installation wait uses it to continue after that deadline.
+	ParentContext context.Context
+	Log           io.Writer
 }
 
 // NewLiveStage parses the source repository and wires clients for the live workflow stages.
@@ -138,11 +141,39 @@ func (s *LiveStage) waitForGitHubAppInstallation(ctx context.Context, checker cl
 		s.notice("could not open a browser: %v; install the app at %s", err, required.InstallURL)
 	}
 	s.notice("waiting for GitHub App %s installation (checking every %s)", required.AppSlug, githubAppPollInterval)
+	err := s.pollGitHubAppInstallation(ctx, checker, required)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) || !s.Interactive || s.Prompt == nil {
+		return err
+	}
+	// The preflight deadline belongs to the step context; keep waiting on the
+	// run context so Ctrl-C still ends the wait.
+	waitContext := s.ParentContext
+	if waitContext == nil || waitContext.Err() != nil {
+		return err
+	}
+	keepWaiting, promptErr := s.Prompt.Confirm(waitContext, fmt.Sprintf("GitHub App %s is still not installed. Keep waiting?", required.AppSlug))
+	if promptErr != nil {
+		return errors.Join(err, fmt.Errorf("confirm keeping the installation wait: %w", promptErr))
+	}
+	if !keepWaiting {
+		return err
+	}
+	s.notice("continuing to wait for GitHub App %s installation; press Ctrl-C to cancel", required.AppSlug)
+	return s.pollGitHubAppInstallation(waitContext, checker, required)
+}
+
+// pollGitHubAppInstallation checks the installation every interval and retries
+// check failures until the context ends.
+func (s *LiveStage) pollGitHubAppInstallation(ctx context.Context, checker cluster.GitHubAppChecker, required *providers.AppInstallationRequiredError) error {
 	ticker := time.NewTicker(githubAppPollInterval)
 	defer ticker.Stop()
+	var lastCheckError string
 	for {
 		select {
 		case <-ctx.Done():
+			if lastCheckError != "" {
+				return fmt.Errorf("waiting for GitHub App %s installation in %s: %w (last check: %s)", required.AppSlug, required.Owner, ctx.Err(), lastCheckError)
+			}
 			return fmt.Errorf("waiting for GitHub App %s installation in %s: %w", required.AppSlug, required.Owner, ctx.Err())
 		case <-ticker.C:
 			err := checker.VerifyGitHubAppInstallation(ctx, required.AppSlug)
@@ -154,8 +185,13 @@ func (s *LiveStage) waitForGitHubAppInstallation(ctx context.Context, checker cl
 				return nil
 			}
 			var pending *providers.AppInstallationRequiredError
-			if !errors.As(err, &pending) {
-				return err
+			if errors.As(err, &pending) {
+				lastCheckError = ""
+				continue
+			}
+			if message := err.Error(); message != lastCheckError {
+				s.notice("GitHub App %s installation check failed: %v; retrying", required.AppSlug, err)
+				lastCheckError = message
 			}
 		}
 	}
