@@ -42,8 +42,8 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 - Resolves kubeconfig paths (`~` expansion, relative-to-file); the default is `~/.kube/config-<kflux>`, kflux's own per-cluster path
 
 **`internal/clusterauth/`** — Authentication ladder
-- Existing readable kubeconfig wins; otherwise `type: roks` entries use the IBM Cloud CLI and every other entry uses `kflux cluster login` → `oc login`
-- ROKS: `ibmcloud target` probes for an active session, `ibmcloud login --sso` runs when absent, `ibmcloud ks cluster config --cluster <ibmcloud> --endpoint <ibmcloud-endpoint>` writes the entry's kubeconfig through `KUBECONFIG`, and `oc whoami` verifies it
+- `ocp` entries win with an existing readable kubeconfig; `type: roks` entries are verified with `oc whoami` on every run and refreshed through the IBM Cloud CLI when the API server rejects the kubeconfig
+- ROKS: `ibmcloud target` probes for an active session, `ibmcloud login --sso` runs when absent, `ibmcloud ks cluster config --cluster <ibmcloud> --endpoint <ibmcloud-endpoint>` writes the entry's kubeconfig through `KUBECONFIG`, and a second `oc whoami` verifies the result
 
 **`internal/report/`** — Aggregate reports
 - Renders Markdown and HTML reports for a multi-cluster run

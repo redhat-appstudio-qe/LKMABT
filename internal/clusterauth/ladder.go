@@ -63,25 +63,20 @@ func readableFile(path string) bool {
 // cluster that remains unauthenticated.
 func (l Ladder) Authenticate(ctx context.Context, entries []clusterfile.Entry) map[string]error {
 	failures := map[string]error{}
-	missing := make([]clusterfile.Entry, 0, len(entries))
+	// ROKS kubeconfigs are verified on every run: a rejected file stays readable,
+	// so readability alone cannot prove the cluster is usable.
+	roks := make([]clusterfile.Entry, 0, len(entries))
+	legacy := make([]clusterfile.Entry, 0, len(entries))
 	for _, entry := range entries {
-		if !readableFile(entry.Kubeconfig) {
-			missing = append(missing, entry)
-		}
-	}
-	if len(missing) == 0 {
-		return failures
-	}
-	// ROKS clusters authenticate only through the IBM Cloud CLI; kflux and oc login
-	// cannot satisfy IBMid authentication.
-	roks := make([]clusterfile.Entry, 0, len(missing))
-	legacy := make([]clusterfile.Entry, 0, len(missing))
-	for _, entry := range missing {
-		if entry.IsROKS() {
+		switch {
+		case entry.IsROKS():
 			roks = append(roks, entry)
-		} else {
+		case !readableFile(entry.Kubeconfig):
 			legacy = append(legacy, entry)
 		}
+	}
+	if len(roks) == 0 && len(legacy) == 0 {
+		return failures
 	}
 	for name, failure := range l.authenticateROKS(ctx, roks) {
 		failures[name] = failure

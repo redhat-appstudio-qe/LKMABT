@@ -22,32 +22,56 @@ var ibmcloudRejections = []string{
 	"the server has asked for the client to provide credentials",
 }
 
-// authenticateROKS writes and verifies one kubeconfig per ROKS entry, returning
+// authenticateROKS verifies or writes one kubeconfig per ROKS entry, returning
 // one error per cluster that remains unusable.
 func (l Ladder) authenticateROKS(ctx context.Context, targets []clusterfile.Entry) map[string]error {
 	failures := make(map[string]error, len(targets))
 	if len(targets) == 0 {
 		return failures
 	}
-	binary, err := l.Runner.LookPath(ibmcloudBinaryName)
-	if err != nil {
-		for _, target := range targets {
-			failures[target.Name] = fmt.Errorf("authentication failed: cluster %s is type %s but the ibmcloud CLI is not on PATH; install it from https://cloud.ibm.com/docs/cli", target.Name, clusterfile.TypeROKS)
-		}
-		return failures
-	}
-	if err := l.ensureIBMCloudSession(ctx, binary); err != nil {
-		for _, target := range targets {
-			failures[target.Name] = fmt.Errorf("authentication failed: cluster %s: ibmcloud login --sso did not complete: %w", target.Name, err)
-		}
-		return failures
-	}
+	binary, lookErr := l.Runner.LookPath(ibmcloudBinaryName)
+	var sessionErr error
+	sessionChecked := false
 	for _, target := range targets {
+		rejected := false
+		// A readable kubeconfig still needs proof: oc whoami can reject it while the
+		// file stays on disk, and a rerun would otherwise trust that file.
+		if readableFile(target.Kubeconfig) {
+			output, err := l.verifyROKSCluster(ctx, target)
+			if err == nil {
+				continue
+			}
+			if !isROKSRejection(strings.TrimSpace(output)) {
+				failures[target.Name] = roksVerificationFailure(target, output, err)
+				continue
+			}
+			rejected = true
+		}
+		if lookErr != nil {
+			failures[target.Name] = ibmcloudMissingFailure(target, rejected)
+			continue
+		}
+		if !sessionChecked {
+			sessionErr = l.ensureIBMCloudSession(ctx, binary)
+			sessionChecked = true
+		}
+		if sessionErr != nil {
+			failures[target.Name] = fmt.Errorf("authentication failed: cluster %s: ibmcloud login --sso did not complete: %w", target.Name, sessionErr)
+			continue
+		}
 		if err := l.loginROKSCluster(ctx, binary, target); err != nil {
 			failures[target.Name] = err
 		}
 	}
 	return failures
+}
+
+// ibmcloudMissingFailure explains a ROKS entry that needs the IBM Cloud CLI but cannot find it.
+func ibmcloudMissingFailure(entry clusterfile.Entry, rejected bool) error {
+	if rejected {
+		return fmt.Errorf("authentication failed: cluster %s is type %s: the existing kubeconfig was rejected and the ibmcloud CLI is not on PATH to refresh it; install it from https://cloud.ibm.com/docs/cli. If you have never opened this cluster's OpenShift web console, complete that first-time login once from the IBM Cloud console", entry.Name, clusterfile.TypeROKS)
+	}
+	return fmt.Errorf("authentication failed: cluster %s is type %s but the ibmcloud CLI is not on PATH; install it from https://cloud.ibm.com/docs/cli", entry.Name, clusterfile.TypeROKS)
 }
 
 // ensureIBMCloudSession reuses an active ibmcloud session and runs the interactive
@@ -73,15 +97,24 @@ func (l Ladder) loginROKSCluster(ctx context.Context, binary string, entry clust
 	if err := l.Runner.Run(ctx, CommandSpec{Name: binary, Args: args, Env: env}); err != nil {
 		return fmt.Errorf("authentication failed: cluster %s: ibmcloud ks cluster config: %w", entry.Name, err)
 	}
-	output, err := l.Runner.Output(ctx, CommandSpec{Name: "oc", Args: []string{"whoami", "--request-timeout=30s"}, Env: env})
+	output, err := l.verifyROKSCluster(ctx, entry)
+	if err != nil {
+		return roksVerificationFailure(entry, output, err)
+	}
+	return nil
+}
+
+// verifyROKSCluster proves a ROKS kubeconfig works and returns oc whoami's output.
+func (l Ladder) verifyROKSCluster(ctx context.Context, entry clusterfile.Entry) (string, error) {
+	output, err := l.Runner.Output(ctx, CommandSpec{Name: "oc", Args: []string{"whoami", "--request-timeout=30s"}, Env: []string{"KUBECONFIG=" + entry.Kubeconfig}})
 	if err != nil {
 		if detail := strings.TrimSpace(output); detail != "" {
 			l.logf("cluster %s: oc whoami said: %s", entry.Name, detail)
 		}
-		return roksVerificationFailure(entry, output, err)
+		return output, err
 	}
 	l.logf("cluster %s authenticated as %s", entry.Name, strings.TrimSpace(output))
-	return nil
+	return output, nil
 }
 
 // roksVerificationFailure explains why a written ROKS kubeconfig is unusable.

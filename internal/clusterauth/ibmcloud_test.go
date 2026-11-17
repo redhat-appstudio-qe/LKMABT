@@ -39,16 +39,87 @@ func whoamiSpec(entry clusterfile.Entry) CommandSpec {
 
 var _ = Describe("Authenticate ROKS", func() {
 	When("the kubeconfig already exists", func() {
-		It("should skip the IBM Cloud login", func() {
+		It("should verify it without the IBM Cloud login", func() {
 			home := GinkgoT().TempDir()
 			entry := roksEntry("c1", home)
 			writeFile(entry.Kubeconfig)
 			fake := &fakeRunner{lookPaths: map[string]string{}}
+			fake.onOutput = func(CommandSpec) (string, error) {
+				return "IAM#user@redhat.com\n", nil
+			}
 
 			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(BeEmpty())
-			Expect(fake.outputs).Should(BeEmpty())
+			Expect(fake.outputs).Should(Equal([]CommandSpec{whoamiSpec(entry)}))
+		})
+	})
+
+	When("the existing kubeconfig is rejected", func() {
+		It("should refresh it through the IBM Cloud CLI and verify again", func() {
+			home := GinkgoT().TempDir()
+			entry := roksEntry("c1", home)
+			writeFile(entry.Kubeconfig)
+			fake := &fakeRunner{lookPaths: map[string]string{"ibmcloud": "/usr/local/bin/ibmcloud"}}
+			fake.onRun = func(spec CommandSpec) error {
+				writeFile(entry.Kubeconfig)
+				return nil
+			}
+			whoamiCalls := 0
+			fake.onOutput = func(spec CommandSpec) (string, error) {
+				if spec.Name == "oc" {
+					whoamiCalls++
+					if whoamiCalls == 1 {
+						return "error: You must be logged in to the server (Unauthorized)\n", errors.New("exit status 1")
+					}
+					return "IAM#user@redhat.com\n", nil
+				}
+				return "", nil
+			}
+
+			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			Expect(failures).Should(BeEmpty())
+			Expect(fake.runs).Should(Equal([]CommandSpec{ksConfigSpec("/usr/local/bin/ibmcloud", entry)}))
+			Expect(fake.outputs).Should(Equal([]CommandSpec{
+				whoamiSpec(entry),
+				{Name: "/usr/local/bin/ibmcloud", Args: []string{"target", "-q"}},
+				whoamiSpec(entry),
+			}))
+		})
+
+		It("should name the missing refresh path when ibmcloud is unavailable", func() {
+			home := GinkgoT().TempDir()
+			entry := roksEntry("c1", home)
+			writeFile(entry.Kubeconfig)
+			fake := &fakeRunner{lookPaths: map[string]string{}}
+			fake.onOutput = func(CommandSpec) (string, error) {
+				return "error: You must be logged in to the server (Unauthorized)\n", errors.New("exit status 1")
+			}
+
+			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			Expect(failures).Should(HaveKey("c1"))
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("existing kubeconfig was rejected")))
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("ibmcloud CLI is not on PATH")))
+			Expect(fake.runs).Should(BeEmpty())
+			Expect(fake.outputs).Should(Equal([]CommandSpec{whoamiSpec(entry)}))
+		})
+	})
+
+	When("the existing kubeconfig fails for another reason", func() {
+		It("should fail without refreshing credentials", func() {
+			home := GinkgoT().TempDir()
+			entry := roksEntry("c1", home)
+			writeFile(entry.Kubeconfig)
+			fake := &fakeRunner{lookPaths: map[string]string{"ibmcloud": "/usr/local/bin/ibmcloud"}}
+			fake.onOutput = func(CommandSpec) (string, error) {
+				return "Unable to connect to the server: dial tcp 10.0.0.1:31533: i/o timeout\n", errors.New("exit status 1")
+			}
+
+			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			Expect(failures).Should(HaveKey("c1"))
+			Expect(failures["c1"]).Should(MatchError(ContainSubstring("dial tcp 10.0.0.1:31533")))
+			Expect(fake.runs).Should(BeEmpty())
+			Expect(fake.outputs).Should(Equal([]CommandSpec{whoamiSpec(entry)}))
 		})
 	})
 
