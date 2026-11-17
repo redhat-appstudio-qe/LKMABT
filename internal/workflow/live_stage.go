@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"path"
+	"runtime"
 	"strings"
 	"time"
 
@@ -23,6 +25,9 @@ import (
 
 var PipelineRunGVR = schema.GroupVersionResource{Group: "tekton.dev", Version: "v1", Resource: "pipelineruns"}
 
+// githubAppPollInterval bounds how often an interactive preflight rechecks a pending App installation.
+var githubAppPollInterval = 10 * time.Second
+
 type LiveStage struct {
 	Request              config.Request
 	Clients              *cluster.ClientSet
@@ -33,6 +38,9 @@ type LiveStage struct {
 	Prompt               Confirmation
 	Namespace            cleanup.NamespaceService
 	FailedBuildCollector *collector.FailedBuildCollector
+	Interactive          bool
+	Out                  io.Writer
+	OpenURL              func(string) error
 	Log                  io.Writer
 }
 
@@ -54,6 +62,7 @@ func NewLiveStage(request config.Request, clients *cluster.ClientSet, provider p
 		Fixture:              providers.FixtureRepository{Owner: source.Owner, Name: source.Name, URL: source.URL},
 		Namespace:            cleanup.NamespaceService{Dynamic: clients.Dynamic, NameLister: cleanup.OCNamespaceNameLister{Kubeconfig: request.Kubeconfig}},
 		FailedBuildCollector: &collector.FailedBuildCollector{Dynamic: clients.Dynamic, Kubernetes: clients.Kubernetes},
+		OpenURL:              openBrowser,
 		Log:                  io.Discard,
 	}
 	return stage, nil
@@ -89,6 +98,7 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 }
 
 // verifyGitHubApp rejects clusters whose published GitHub App cannot onboard the fixture repository.
+// An interactive run opens the installation page and waits for an organization administrator to approve it.
 func (s *LiveStage) verifyGitHubApp(ctx context.Context) error {
 	if s.Clients == nil {
 		return fmt.Errorf("cluster clients are not initialized")
@@ -99,14 +109,76 @@ func (s *LiveStage) verifyGitHubApp(ctx context.Context) error {
 	}
 	slug, err := cluster.VerifyGitHubAppOnboarding(ctx, s.Clients.Kubernetes, checker)
 	if err != nil {
-		if errors.Is(err, providers.ErrUnverifiable) {
-			fmt.Fprintf(s.Log, "warning: %v\n", err)
+		var required *providers.AppInstallationRequiredError
+		switch {
+		case s.Interactive && errors.As(err, &required):
+			if err := s.waitForGitHubAppInstallation(ctx, checker, required); err != nil {
+				return err
+			}
+			slug = required.AppSlug
+		case errors.Is(err, providers.ErrUnverifiable):
+			s.notice("warning: %v", err)
 			return nil
+		default:
+			return err
 		}
-		return err
 	}
-	fmt.Fprintf(s.Log, "GitHub App %s installation verified\n", slug)
+	s.notice("GitHub App %s installation verified", slug)
 	return nil
+}
+
+// waitForGitHubAppInstallation opens the App installation page and polls until an administrator installs it.
+func (s *LiveStage) waitForGitHubAppInstallation(ctx context.Context, checker cluster.GitHubAppChecker, required *providers.AppInstallationRequiredError) error {
+	open := s.OpenURL
+	if open == nil {
+		open = openBrowser
+	}
+	s.notice("GitHub App %s is not installed for organization %s; opening %s", required.AppSlug, required.Owner, required.InstallURL)
+	if err := open(required.InstallURL); err != nil {
+		s.notice("could not open a browser: %v; install the app at %s", err, required.InstallURL)
+	}
+	s.notice("waiting for GitHub App %s installation (checking every %s)", required.AppSlug, githubAppPollInterval)
+	ticker := time.NewTicker(githubAppPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for GitHub App %s installation in %s: %w", required.AppSlug, required.Owner, ctx.Err())
+		case <-ticker.C:
+			err := checker.VerifyGitHubAppInstallation(ctx, required.AppSlug)
+			if err == nil {
+				return nil
+			}
+			if errors.Is(err, providers.ErrUnverifiable) {
+				s.notice("warning: %v", err)
+				return nil
+			}
+			var pending *providers.AppInstallationRequiredError
+			if !errors.As(err, &pending) {
+				return err
+			}
+		}
+	}
+}
+
+// notice writes one human-facing progress line to the console and the run log.
+func (s *LiveStage) notice(format string, args ...any) {
+	line := fmt.Sprintf(format, args...)
+	if s.Out != nil {
+		fmt.Fprintln(s.Out, line)
+	}
+	if s.Log != nil {
+		fmt.Fprintln(s.Log, line)
+	}
+}
+
+// openBrowser opens rawURL with the platform's default browser.
+func openBrowser(rawURL string) error {
+	name := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		name = "open"
+	}
+	return exec.Command(name, rawURL).Run()
 }
 
 // EnsureFixture validates the provider fixture and records its tenant resources in the manifest.

@@ -86,6 +86,18 @@ func (l *failingAttachLog) Attach(path string) error {
 	return fmt.Errorf("flush run log %s: disk full", path)
 }
 
+var _ = Describe("NewLiveRunner", func() {
+	When("an interactive session is requested", func() {
+		It("should carry the output and interactivity into the runner", func() {
+			out := &bytes.Buffer{}
+			runner := NewLiveRunner(nil, out, true).(LiveRunner)
+
+			Expect(runner.Out).Should(BeIdenticalTo(out))
+			Expect(runner.Interactive).Should(BeTrue())
+		})
+	})
+})
+
 var _ = Describe("LiveRunner.Run", func() {
 	When("the provider run log cannot be attached", func() {
 		It("should report the attachment failure in the run error", func() {

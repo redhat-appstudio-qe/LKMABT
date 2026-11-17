@@ -155,12 +155,17 @@ var _ = Describe("VerifyGitHubAppInstallation", func() {
 	})
 
 	When("the cluster app is not installed in the fixture organization", func() {
-		It("should name the app and its installation URL", func() {
+		It("should return the typed installation error", func() {
 			client := &fakeClient{installations: []*gh.Installation{{AppSlug: gh.String("other-app"), RepositorySelection: gh.String("all")}}}
 
 			err := New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")
 			Expect(err).Should(MatchError(ContainSubstring("GitHub App cluster-app is not installed for organization redhat-appstudio-qe")))
-			Expect(err.Error()).Should(ContainSubstring("https://github.com/apps/cluster-app/installations/new"))
+			var required *providers.AppInstallationRequiredError
+			Expect(errors.As(err, &required)).Should(BeTrue())
+			Expect(required.AppSlug).Should(Equal("cluster-app"))
+			Expect(required.Owner).Should(Equal("redhat-appstudio-qe"))
+			Expect(required.Repository).Should(Equal("redhat-appstudio-qe/dr_test_mathwizz"))
+			Expect(required.InstallURL).Should(Equal("https://github.com/apps/cluster-app/installations/new"))
 		})
 	})
 
@@ -183,6 +188,7 @@ var _ = Describe("VerifyGitHubAppInstallation", func() {
 
 			err := New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")
 			Expect(err).Should(MatchError(ContainSubstring("not for redhat-appstudio-qe/dr_test_mathwizz")))
+			Expect(err.Error()).Should(ContainSubstring("https://github.com/organizations/redhat-appstudio-qe/settings/installations/7"))
 		})
 
 		It("should fail when the selected repositories cannot be listed", func() {

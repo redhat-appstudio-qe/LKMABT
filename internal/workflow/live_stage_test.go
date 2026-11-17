@@ -54,6 +54,8 @@ func (l testNameLister) List(context.Context) ([]string, error) {
 type githubAppProviderStub struct {
 	slug    string
 	err     error
+	errs    []error
+	calls   int
 	fixture providers.FixtureRepository
 }
 
@@ -69,10 +71,27 @@ func (p *githubAppProviderStub) UpdateFile(context.Context, providers.FixtureRep
 	return providers.Commit{}, nil
 }
 
-// VerifyGitHubAppInstallation records the slug and returns the configured error.
+// VerifyGitHubAppInstallation records the slug and returns the next queued
+// error, then the configured error.
 func (p *githubAppProviderStub) VerifyGitHubAppInstallation(_ context.Context, slug string) error {
 	p.slug = slug
+	p.calls++
+	if len(p.errs) > 0 {
+		err := p.errs[0]
+		p.errs = p.errs[1:]
+		return err
+	}
 	return p.err
+}
+
+// appInstallationRequired builds the provider error for an uninstalled cluster App.
+func appInstallationRequired() *providers.AppInstallationRequiredError {
+	return &providers.AppInstallationRequiredError{
+		AppSlug:    "cluster-app",
+		Owner:      "redhat-appstudio-qe",
+		Repository: "redhat-appstudio-qe/dr_test_mathwizz",
+		InstallURL: "https://github.com/apps/cluster-app/installations/new",
+	}
 }
 
 // konfluxInfoObject builds the ConfigMap that publishes the cluster's GitHub App URL.
@@ -350,6 +369,83 @@ var _ = Describe("LiveStage", func() {
 				stage := &LiveStage{Provider: &githubAppProviderStub{}, Log: &bytes.Buffer{}}
 
 				Expect(stage.verifyGitHubApp(context.Background())).Should(MatchError("cluster clients are not initialized"))
+			})
+		})
+
+		When("the app is not installed in an interactive session", func() {
+			It("should open the installation page and wait for the installation", func() {
+				required := appInstallationRequired()
+				provider := &githubAppProviderStub{errs: []error{required, required}}
+				out := &bytes.Buffer{}
+				var opened []string
+				stage := &LiveStage{
+					Provider:    provider,
+					Clients:     &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
+					Interactive: true,
+					Out:         out,
+					OpenURL: func(rawURL string) error {
+						opened = append(opened, rawURL)
+						return nil
+					},
+					Log: &bytes.Buffer{},
+				}
+				previous := githubAppPollInterval
+				githubAppPollInterval = time.Millisecond
+				defer func() { githubAppPollInterval = previous }()
+
+				Expect(stage.verifyGitHubApp(context.Background())).Should(Succeed())
+				Expect(opened).Should(Equal([]string{required.InstallURL}))
+				Expect(provider.calls).Should(Equal(3))
+				Expect(out.String()).Should(ContainSubstring(required.InstallURL))
+				Expect(out.String()).Should(ContainSubstring("waiting for GitHub App cluster-app installation"))
+				Expect(out.String()).Should(ContainSubstring("GitHub App cluster-app installation verified"))
+			})
+		})
+
+		When("the app is not installed in a non-interactive session", func() {
+			It("should fail with the typed installation error without opening a browser", func() {
+				required := appInstallationRequired()
+				provider := &githubAppProviderStub{err: required}
+				opened := false
+				stage := &LiveStage{
+					Provider: provider,
+					Clients:  &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
+					OpenURL: func(string) error {
+						opened = true
+						return nil
+					},
+					Log: &bytes.Buffer{},
+				}
+
+				err := stage.verifyGitHubApp(context.Background())
+				Expect(errors.As(err, &required)).Should(BeTrue())
+				Expect(err).Should(MatchError(ContainSubstring("GitHub App cluster-app is not installed for organization redhat-appstudio-qe")))
+				Expect(opened).Should(BeFalse())
+				Expect(provider.calls).Should(Equal(1))
+			})
+		})
+
+		When("the installation does not arrive before the deadline", func() {
+			It("should fail when the preflight context expires", func() {
+				required := appInstallationRequired()
+				provider := &githubAppProviderStub{err: required}
+				stage := &LiveStage{
+					Provider:    provider,
+					Clients:     &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
+					Interactive: true,
+					Out:         &bytes.Buffer{},
+					OpenURL:     func(string) error { return nil },
+					Log:         &bytes.Buffer{},
+				}
+				previous := githubAppPollInterval
+				githubAppPollInterval = time.Millisecond
+				defer func() { githubAppPollInterval = previous }()
+				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+				defer cancel()
+
+				err := stage.verifyGitHubApp(ctx)
+				Expect(errors.Is(err, context.DeadlineExceeded)).Should(BeTrue())
+				Expect(err).Should(MatchError(ContainSubstring("waiting for GitHub App cluster-app installation")))
 			})
 		})
 	})

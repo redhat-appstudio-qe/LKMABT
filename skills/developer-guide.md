@@ -92,7 +92,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/cluster/`** — Kubernetes interactions
 - `RealCluster` wraps k8s client-go operations
 - Preflight checks validate cluster prerequisites (multi-platform-controller deployment, host-config entries)
-- GitHub preflight reads the cluster's app slug from `konflux-info/konflux-public-info` and confirms that app is installed for the fixture organization
+- GitHub preflight reads the cluster's app slug from `konflux-info/konflux-public-info` and confirms that app is installed for the fixture organization; interactive runs open the installation page and wait until the installation appears
 - Build output verification confirms node evidence (Buildah outputs) match expected architectures
 
 **`internal/providers/`** — Git forge abstraction
@@ -144,7 +144,7 @@ definitions via import when the same GVR is needed across packages.
 
 ## Workflow Execution Flow
 
-1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries, and the cluster's GitHub App installation (GitHub runs)
+1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries, and the cluster's GitHub App installation (GitHub runs; interactive runs wait for a missing installation)
 2. **Fixture Ready** — Validate test repositories are accessible, read current Dockerfile SHAs
 3. **Triggered** — Append trigger comments to Dockerfiles, commit changes
 4. **Builds Verified** — Wait for PipelineRuns to succeed (timeout configurable)
@@ -200,9 +200,13 @@ Each Konflux cluster onboards repositories through its own GitHub App. The
 harness reads that app from `konflux-info/konflux-public-info` and verifies
 during `preflight` that the app is installed for the fixture organization, so a
 cluster that cannot onboard the fixture fails before the run creates a tenant
-namespace or touches the fixture. Installations limited to selected
-repositories must include the fixture; when the token cannot list selections,
-preflight logs a warning and continues.
+namespace or touches the fixture. In an interactive session, a missing
+installation opens `https://github.com/apps/<slug>/installations/new`, prints
+the URL, and rechecks the installation every 10 seconds until it appears or
+the preflight timeout expires; non-interactive runs fail with the installation
+URL. Installations limited to selected repositories must include the fixture,
+and the error names the installation settings URL; when the token cannot list
+selections, preflight logs a warning and continues.
 
 ### Provider Credential Lifecycle
 When `GITHUB_TOKEN` is empty, GitHub runs call `gh auth login --web` with a

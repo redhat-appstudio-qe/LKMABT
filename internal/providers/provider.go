@@ -13,6 +13,20 @@ import (
 // the available credentials.
 var ErrUnverifiable = errors.New("cluster integration cannot be verified")
 
+// AppInstallationRequiredError reports a cluster GitHub App that is not
+// installed for the fixture organization.
+type AppInstallationRequiredError struct {
+	AppSlug    string
+	Owner      string
+	Repository string
+	InstallURL string
+}
+
+// Error names the missing installation and the page that grants it.
+func (e *AppInstallationRequiredError) Error() string {
+	return fmt.Sprintf("GitHub App %s is not installed for organization %s; install it from %s so it can access %s", e.AppSlug, e.Owner, e.InstallURL, e.Repository)
+}
+
 type SourceRepository struct {
 	Owner string `json:"owner"`
 	Name  string `json:"name"`

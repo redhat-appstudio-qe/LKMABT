@@ -63,11 +63,15 @@ resources.
 7. Every GitHub cluster must publish its Konflux GitHub App URL in
    `konflux-info/konflux-public-info` and that app must be installed for the
    fixture organization. GitHub runs verify the installation at `preflight`,
-   before any cluster mutation, and fail that cluster with the app's
-   installation URL when it is missing. An app installed for selected
-   repositories must include the fixture repository. When the token cannot
-   list installation repositories, preflight logs a warning and continues; the
-   trigger-stage PaC wait remains the backstop for a missing selection.
+   before any cluster mutation. In an interactive session, a missing
+   installation opens the app's installation page, prints the URL, and waits
+   for an organization administrator to approve it, rechecking every 10
+   seconds until the preflight timeout. Non-interactive runs fail that cluster
+   with the installation URL. An app installed for selected repositories must
+   include the fixture repository; the error names the installation settings
+   URL. When the token cannot list installation repositories, preflight logs a
+   warning and continues; the trigger-stage PaC wait remains the backstop for
+   a missing selection.
 8. Provider credentials come from `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` when
    set. Leave either empty to authenticate at run time: GitHub uses
    `gh auth login` (browser; requests `repo`, `read:org`, and `read:user`) and

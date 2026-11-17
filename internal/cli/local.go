@@ -30,14 +30,16 @@ import (
 
 // LiveRunner executes provider workflows and cleanup against live cluster services.
 type LiveRunner struct {
-	Prompt workflow.Confirmation
-	Out    io.Writer
+	Prompt      workflow.Confirmation
+	Out         io.Writer
+	Interactive bool
 }
 
 // NewLiveRunner returns a runner wired to live services, the supplied
-// confirmation prompt, and the writer for human-facing notices.
-func NewLiveRunner(prompt workflow.Confirmation, out io.Writer) Runner {
-	return LiveRunner{Prompt: prompt, Out: out}
+// confirmation prompt, the writer for human-facing notices, and whether the
+// run may prompt for input or open a browser.
+func NewLiveRunner(prompt workflow.Confirmation, out io.Writer, interactive bool) Runner {
+	return LiveRunner{Prompt: prompt, Out: out, Interactive: interactive}
 }
 
 // Run executes a provider workflow against the request's cluster, writing its output to log.
@@ -55,6 +57,8 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 		return RunOutcome{Provider: request.Provider}, err
 	}
 	stage.Prompt = runner.Prompt
+	stage.Interactive = runner.Interactive
+	stage.Out = runner.Out
 	stage.Log = log
 	store := evidence.NewManifestStore(request.StateDir)
 	var logAttachErr error

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -174,7 +175,17 @@ func (a *Adapter) VerifyGitHubAppInstallation(ctx context.Context, appSlug strin
 			return verifyGitHubAppRepositories(ctx, a.client, installation, appSlug)
 		}
 	}
-	return fmt.Errorf("GitHub App %s is not installed for organization %s; install it from https://github.com/apps/%s/installations/new or omit this cluster from GitHub runs", appSlug, canonicalOwner, appSlug)
+	return &providers.AppInstallationRequiredError{
+		AppSlug:    appSlug,
+		Owner:      canonicalOwner,
+		Repository: canonicalOwner + "/" + canonicalName,
+		InstallURL: fmt.Sprintf("https://github.com/apps/%s/installations/new", url.PathEscape(appSlug)),
+	}
+}
+
+// installationSettingsURL returns the organization page that manages an installation's repositories.
+func installationSettingsURL(installation *gh.Installation) string {
+	return fmt.Sprintf("https://github.com/organizations/%s/settings/installations/%d", canonicalOwner, installation.GetID())
 }
 
 // verifyGitHubAppRepositories rejects installations that cannot reach the fixture repository.
@@ -195,7 +206,7 @@ func verifyGitHubAppRepositories(ctx context.Context, client client, installatio
 				return nil
 			}
 		}
-		return fmt.Errorf("GitHub App %s is installed for selected repositories in %s but not for %s/%s; add the repository to the installation or select all repositories", appSlug, canonicalOwner, canonicalOwner, canonicalName)
+		return fmt.Errorf("GitHub App %s is installed for selected repositories in %s but not for %s/%s; add the repository from %s or select all repositories", appSlug, canonicalOwner, canonicalOwner, canonicalName, installationSettingsURL(installation))
 	default:
 		return fmt.Errorf("GitHub App %s installation in %s reports unknown repository selection %q", appSlug, canonicalOwner, installation.GetRepositorySelection())
 	}
