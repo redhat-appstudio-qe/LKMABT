@@ -118,7 +118,7 @@ type gitlabAuthStub struct {
 }
 
 // authenticate records the call and returns the configured token or error.
-func (s *gitlabAuthStub) authenticate(_ *auth.Store, _ bool, apiURL string, _ io.Writer) (string, error) {
+func (s *gitlabAuthStub) authenticate(_ context.Context, _ clusterauth.CommandRunner, _ *auth.Store, _ bool, apiURL string) (string, error) {
 	s.calls++
 	s.apiURL = apiURL
 	return s.token, s.err

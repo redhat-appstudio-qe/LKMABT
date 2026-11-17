@@ -60,9 +60,9 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 		}()
 		if gitlabTokenNeeded {
 			if console.Interactive() {
-				console.Printf("gitlab: authentication required")
+				console.Printf("gitlab: authentication required; choose Web in the glab login prompt")
 			}
-			token, err := authenticateGitLab(store, console.Interactive(), request.Credentials.GitLabAPIURL, console.Out)
+			token, err := authenticateGitLab(ctx, clusterauth.ExecRunner{Log: aggregate.Log}, store, console.Interactive(), request.Credentials.GitLabAPIURL)
 			if err != nil {
 				return err
 			}

@@ -74,7 +74,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/auth/`** — Provider credential acquisition
 - Creates one run-scoped `lkmabt-auth-*` directory with 0700 credentials written as 0600 files
 - GitHub: runs `gh auth login --web` with an isolated `GH_CONFIG_DIR` and `--insecure-storage`
-- GitLab: prompts without echo for a token with `api` scope
+- GitLab: runs `glab auth login` (choose Web) with an isolated `GLAB_CONFIG_DIR`
 - `RunClusters` deletes the directory after the last cluster; non-interactive runs must provide the provider tokens
 
 **`internal/report/`** — Aggregate reports
@@ -206,9 +206,10 @@ repositories must include the fixture or the check fails as unverifiable.
 ### Provider Credential Lifecycle
 When `GITHUB_TOKEN` is empty, GitHub runs call `gh auth login --web` with a
 private `GH_CONFIG_DIR` and `--insecure-storage`, then read the token with
-`gh auth token`. When `GITLAB_BOT_TOKEN` is empty, GitLab prompts without echo
-for a token with `api` scope. Each acquired token is kept in a 0600 file inside one run-scoped
-`lkmabt-auth-*` temporary directory and reused for every cluster.
+`gh auth token`. When `GITLAB_BOT_TOKEN` is empty, GitLab runs `glab auth login`
+(choose Web) with a private `GLAB_CONFIG_DIR`, then reads the token with
+`glab config get token --host`. Each acquired token is kept in a 0600 file
+inside one run-scoped `lkmabt-auth-*` temporary directory and reused for every cluster.
 The directory is removed when the run ends, including after failures and
 cancellations, and a removal failure fails the run. Authentication requires an
 interactive terminal; non-interactive runs must provide the tokens. A
