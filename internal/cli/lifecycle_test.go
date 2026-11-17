@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 type fakePrompt struct {
@@ -122,6 +123,42 @@ var _ = Describe("Lifecycle", func() {
 		_, err := client.Resource(cluster.SecretGVR).Namespace("tenant").Get(context.Background(), cluster.GitLabCredentialSecretName, metav1.GetOptions{})
 		Expect(apierrors.IsNotFound(err)).Should(BeTrue())
 		Expect(prompt.calls).Should(Equal(1))
+	})
+
+	It("deletes the ephemeral GitLab SCM Secret when the run context is canceled", func() {
+		stateDir := GinkgoT().TempDir()
+		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), gitLabSecretObject("tenant"))
+		prompt := &fakePrompt{approved: false}
+		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseFailed, Fixture: model.FixtureIdentity{TenantNamespace: "tenant", EphemeralGitLabAuth: true}}
+		store := evidence.NewManifestStore(stateDir)
+		Expect(store.Create(&manifest)).Should(Succeed())
+		lifecycle := Lifecycle{Store: store, Namespace: cleanup.NamespaceService{Dynamic: client}, Collector: collector.Collector{StateDir: stateDir}, Prompt: prompt, Sources: lifecycleTestSources()}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_ = lifecycle.Finalize(ctx, manifest, errors.New("interrupted"))
+		_, err := client.Resource(cluster.SecretGVR).Namespace("tenant").Get(context.Background(), cluster.GitLabCredentialSecretName, metav1.GetOptions{})
+		Expect(apierrors.IsNotFound(err)).Should(BeTrue())
+	})
+
+	It("keeps failure evidence when the ephemeral GitLab SCM Secret cannot be deleted", func() {
+		stateDir := GinkgoT().TempDir()
+		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), gitLabSecretObject("tenant"))
+		client.PrependReactor("delete", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("delete denied")
+		})
+		prompt := &fakePrompt{approved: false}
+		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseFailed, Fixture: model.FixtureIdentity{TenantNamespace: "tenant", EphemeralGitLabAuth: true}}
+		store := evidence.NewManifestStore(stateDir)
+		Expect(store.Create(&manifest)).Should(Succeed())
+		lifecycle := Lifecycle{Store: store, Namespace: cleanup.NamespaceService{Dynamic: client}, Collector: collector.Collector{StateDir: stateDir}, Prompt: prompt, Sources: lifecycleTestSources()}
+
+		err := lifecycle.Finalize(context.Background(), manifest, errors.New("build failed"))
+		Expect(err).Should(MatchError(ContainSubstring("delete ephemeral GitLab SCM Secret")))
+		Expect(prompt.calls).Should(Equal(1))
+		loaded, loadErr := store.Load("run-1")
+		Expect(loadErr).ShouldNot(HaveOccurred())
+		Expect(loaded.FailureArtifacts).ShouldNot(BeNil())
 	})
 
 	It("retains the GitLab SCM Secret for a configured token", func() {

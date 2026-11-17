@@ -23,6 +23,7 @@ func testFixtureSpec(provider, token string) FixtureSpec {
 		Application: "app",
 		Provider:    provider,
 		GitLabToken: token,
+		Repository:  "https://gitlab.com/o/r",
 		Components: []ComponentSpec{
 			{Name: "one", Repository: "https://gitlab.com/o/r", Branch: "main"},
 			{Name: "two", Repository: "https://gitlab.com/o/r", Branch: "main"},
@@ -120,8 +121,21 @@ var _ = Describe("FixtureService", func() {
 			}},
 			&unstructured.Unstructured{Object: map[string]any{
 				"apiVersion": "v1", "kind": "Secret",
-				"metadata": map[string]any{"name": GitLabCredentialSecretName, "namespace": "tenant", "labels": map[string]any{scmCredentialsLabel: "scm", scmHostnameLabel: "gitlab.com"}},
-				"type":     "kubernetes.io/basic-auth", "data": map[string]any{"password": "old-token"},
+				"metadata": map[string]any{
+					"name": GitLabCredentialSecretName, "namespace": "tenant",
+					"labels":      map[string]any{scmCredentialsLabel: "scm", scmHostnameLabel: "gitlab.com"},
+					"annotations": map[string]any{scmSecretRepositoryAnnotation: "o/r"},
+				},
+				"type": "kubernetes.io/basic-auth", "data": map[string]any{"password": "old-token"},
+			}},
+			&unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "v1", "kind": "Secret",
+				"metadata": map[string]any{
+					"name": "repo-gitlab-secret", "namespace": "tenant",
+					"labels":      map[string]any{scmCredentialsLabel: "scm", scmHostnameLabel: "gitlab.com"},
+					"annotations": map[string]any{scmSecretRepositoryAnnotation: "o/r"},
+				},
+				"type": "kubernetes.io/basic-auth", "data": map[string]any{"password": "stale-token"},
 			}},
 		)
 		spec := testFixtureSpec("gitlab", "new-token")
@@ -142,6 +156,14 @@ var _ = Describe("FixtureService", func() {
 		Expect(found).To(BeTrue())
 		Expect(password).To(Equal(base64.StdEncoding.EncodeToString([]byte("new-token"))))
 		Expect(secret.GetLabels()).To(SatisfyAll(HaveKeyWithValue(scmCredentialsLabel, "scm"), HaveKeyWithValue(scmHostnameLabel, "gitlab.com")))
+		Expect(secret.GetAnnotations()).To(HaveKeyWithValue(scmSecretRepositoryAnnotation, "o/r"))
+
+		repositoryScoped, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), "repo-gitlab-secret", metav1.GetOptions{})
+		if err != nil {
+			Expect(err).NotTo(HaveOccurred())
+		}
+		repositoryPassword, _, _ := unstructured.NestedString(repositoryScoped.Object, "data", "password")
+		Expect(repositoryPassword).To(Equal(base64.StdEncoding.EncodeToString([]byte("new-token"))))
 
 		other, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), "existing-gitlab-secret", metav1.GetOptions{})
 		if err != nil {

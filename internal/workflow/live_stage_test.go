@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -51,12 +52,13 @@ func (l testNameLister) List(context.Context) ([]string, error) {
 }
 
 type githubAppProviderStub struct {
-	slug string
-	err  error
+	slug    string
+	err     error
+	fixture providers.FixtureRepository
 }
 
 func (p *githubAppProviderStub) ValidateFixture(context.Context, providers.FixtureRepository) (providers.FixtureRepository, error) {
-	return providers.FixtureRepository{}, nil
+	return p.fixture, nil
 }
 
 func (p *githubAppProviderStub) ReadFile(context.Context, providers.FixtureRepository, string, string) (providers.FileVersion, error) {
@@ -350,6 +352,45 @@ var _ = Describe("LiveStage", func() {
 				Expect(stage.verifyGitHubApp(context.Background())).Should(MatchError("cluster clients are not initialized"))
 			})
 		})
+	})
+
+	It("persists the tenant namespace and ephemeral flag when fixture setup fails", func() {
+		listKinds := map[schema.GroupVersionResource]string{
+			cluster.NamespaceGVR:   "NamespaceList",
+			cluster.ApplicationGVR: "ApplicationList",
+			cluster.ComponentGVR:   "ComponentList",
+			cluster.SecretGVR:      "SecretList",
+		}
+		wrongComponent := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "appstudio.redhat.com/v1alpha1", "kind": "Component",
+			"metadata": map[string]any{"name": "mathwizz-web-server", "namespace": "tenant"},
+			"spec": map[string]any{"application": "app", "source": map[string]any{"git": map[string]any{
+				"url": "https://gitlab.com/other/repo", "revision": "main", "context": "web-server", "dockerfileUrl": "Dockerfile",
+			}}},
+		}}
+		dynamic := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, wrongComponent)
+		fixture := providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl", URL: "https://gitlab.com/konflux-qe/dr_test_mathwizz_gl"}
+		stage := &LiveStage{
+			Request: config.Request{
+				Provider: "gitlab", TenantNamespace: "tenant", ApplicationName: "app",
+				SourceBranch: "main", ComponentPaths: config.DefaultComponentPaths,
+				Credentials: config.Credentials{GitLabToken: "token", GitLabTokenEphemeral: true},
+			},
+			Clients:  &cluster.ClientSet{Dynamic: dynamic},
+			Provider: &githubAppProviderStub{fixture: fixture},
+			Fixture:  fixture,
+			Log:      io.Discard,
+		}
+		manifest := &model.RunManifest{RunID: "run-1"}
+
+		err := stage.EnsureFixture(context.Background(), manifest)
+		Expect(err).Should(HaveOccurred())
+		Expect(manifest.Fixture.TenantNamespace).Should(Equal("tenant"))
+		Expect(manifest.Fixture.EphemeralGitLabAuth).Should(BeTrue())
+
+		secret, getErr := dynamic.Resource(cluster.SecretGVR).Namespace("tenant").Get(context.Background(), cluster.GitLabCredentialSecretName, metav1.GetOptions{})
+		Expect(getErr).ShouldNot(HaveOccurred())
+		Expect(secret.GetAnnotations()).Should(HaveKeyWithValue("appstudio.redhat.com/scm.repository", "konflux-qe/dr_test_mathwizz_gl"))
 	})
 
 	It("restores recorded canonical repository from manifest", func() {

@@ -134,6 +134,7 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 	if application == "" {
 		application = s.Request.ApplicationName
 	}
+	manifest.Fixture.TenantNamespace = namespace
 	manifest.Fixture.EphemeralGitLabAuth = s.Request.Credentials.GitLabTokenEphemeral
 	result, err := (cluster.FixtureService{Dynamic: s.Clients.Dynamic}).EnsureFixture(ctx, cluster.FixtureSpec{
 		Namespace:            namespace,
@@ -142,6 +143,7 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 		Provider:             s.Request.Provider,
 		GitLabToken:          s.Request.Credentials.GitLabToken,
 		GitLabTokenEphemeral: s.Request.Credentials.GitLabTokenEphemeral,
+		Repository:           fixture.URL,
 		Components:           components,
 	})
 	if err != nil {
