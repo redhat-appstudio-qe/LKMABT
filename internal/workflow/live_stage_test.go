@@ -860,7 +860,7 @@ var _ = Describe("LiveStage", func() {
 		GinkgoT().Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 		start := time.Now()
-		Expect(openBrowser("https://github.com/apps/cluster-app/installations/new")).Should(Succeed())
+		Expect(OpenBrowser("https://github.com/apps/cluster-app/installations/new")).Should(Succeed())
 		Expect(time.Since(start)).Should(BeNumerically("<", time.Second))
 	})
 

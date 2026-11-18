@@ -125,6 +125,19 @@ func (s *gitlabAuthStub) authenticate(_ context.Context, _ clusterauth.CommandRu
 	return s.token, s.err
 }
 
+type tokenPageStub struct {
+	url   string
+	err   error
+	calls int
+}
+
+// open records the URL and returns the configured error.
+func (s *tokenPageStub) open(rawURL string) error {
+	s.calls++
+	s.url = rawURL
+	return s.err
+}
+
 type gitlabRevokeStub struct {
 	err   error
 	calls int
@@ -153,6 +166,7 @@ var (
 	defaultGitLabAuth   *gitlabAuthStub
 	defaultGitLabToken  *gitlabRefreshStub
 	defaultGitLabRevoke *gitlabRevokeStub
+	defaultTokenPage    *tokenPageStub
 )
 
 var _ = BeforeEach(func() {
@@ -160,12 +174,14 @@ var _ = BeforeEach(func() {
 	defaultGitLabAuth = &gitlabAuthStub{token: "test-gitlab-token"}
 	defaultGitLabToken = &gitlabRefreshStub{token: "test-gitlab-token"}
 	defaultGitLabRevoke = &gitlabRevokeStub{}
-	originalGitHub, originalGitLab, originalRefresh, originalRevoke, originalDestroy, originalCheck := authenticateGitHub, authenticateGitLab, refreshGitLabToken, revokeGitLabToken, destroyCredentials, checkGitHubAccess
+	defaultTokenPage = &tokenPageStub{}
+	originalGitHub, originalGitLab, originalRefresh, originalRevoke, originalPage, originalDestroy, originalCheck := authenticateGitHub, authenticateGitLab, refreshGitLabToken, revokeGitLabToken, openGitLabTokenPage, destroyCredentials, checkGitHubAccess
 	originalRead := readExistingGitHubToken
 	authenticateGitHub = defaultGitHubAuth.authenticate
 	authenticateGitLab = defaultGitLabAuth.authenticate
 	refreshGitLabToken = defaultGitLabToken.refresh
 	revokeGitLabToken = defaultGitLabRevoke.revoke
+	openGitLabTokenPage = defaultTokenPage.open
 	readExistingGitHubToken = func(context.Context, clusterauth.CommandRunner) (string, error) {
 		return "", errors.New("no existing gh login")
 	}
@@ -175,6 +191,7 @@ var _ = BeforeEach(func() {
 		authenticateGitLab = originalGitLab
 		refreshGitLabToken = originalRefresh
 		revokeGitLabToken = originalRevoke
+		openGitLabTokenPage = originalPage
 		readExistingGitHubToken = originalRead
 		destroyCredentials = originalDestroy
 		checkGitHubAccess = originalCheck
@@ -918,7 +935,7 @@ var _ = Describe("RunClusters credential authentication", func() {
 	})
 
 	When("the provider is GitLab without a token", func() {
-		It("should explain the Token and Web choices before the glab prompt", func() {
+		It("should open the prefilled token page and explain the one-day PAT", func() {
 			request, runner := runClustersFixture(1)
 			request.Provider = config.ProviderGitLab
 			_ = credentialTempRoot()
@@ -926,9 +943,26 @@ var _ = Describe("RunClusters credential authentication", func() {
 
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: out, interactive: true})).Should(Succeed())
 
-			Expect(out.String()).Should(ContainSubstring("In the glab prompt, choose:"))
-			Expect(out.String()).Should(ContainSubstring("Token: paste a personal access token"))
-			Expect(out.String()).Should(ContainSubstring("Web: signs in with an OAuth token that PaC cannot use"))
+			Expect(defaultTokenPage.calls).Should(Equal(1))
+			Expect(defaultTokenPage.url).Should(Equal(GitLabTokenURL))
+			Expect(defaultTokenPage.url).Should(ContainSubstring("personal_access_tokens/legacy/new"))
+			Expect(defaultTokenPage.url).Should(ContainSubstring("scopes=api%2Cwrite_repository"))
+			Expect(out.String()).Should(ContainSubstring("expiration to 1 day"))
+			Expect(out.String()).Should(ContainSubstring("choose Token"))
+			Expect(out.String()).Should(ContainSubstring("Do not choose Web"))
+		})
+
+		It("should print the token page URL when the browser cannot open", func() {
+			defaultTokenPage.err = errors.New("no browser")
+			request, runner := runClustersFixture(1)
+			request.Provider = config.ProviderGitLab
+			_ = credentialTempRoot()
+			out := &bytes.Buffer{}
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: out, interactive: true})).Should(Succeed())
+
+			Expect(out.String()).Should(ContainSubstring("could not open the token page: no browser"))
+			Expect(out.String()).Should(ContainSubstring(GitLabTokenURL))
 		})
 
 		It("should revoke the acquired token once after every cluster", func() {

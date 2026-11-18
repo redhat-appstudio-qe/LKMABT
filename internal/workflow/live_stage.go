@@ -72,7 +72,7 @@ func NewLiveStage(request config.Request, clients *cluster.ClientSet, provider p
 		Fixture:              providers.FixtureRepository{Owner: source.Owner, Name: source.Name, URL: source.URL},
 		Namespace:            cleanup.NamespaceService{Dynamic: clients.Dynamic, NameLister: cleanup.OCNamespaceNameLister{Kubeconfig: request.Kubeconfig}},
 		FailedBuildCollector: &collector.FailedBuildCollector{Dynamic: clients.Dynamic, Kubernetes: clients.Kubernetes},
-		OpenURL:              openBrowser,
+		OpenURL:              OpenBrowser,
 		Log:                  io.Discard,
 	}
 	return stage, nil
@@ -180,7 +180,7 @@ func (s *LiveStage) waitForGitHubAppInstallation(ctx context.Context, checker cl
 	s.notice("  4. Return to this terminal; LKMABT checks every %s and continues automatically.", githubAppPollInterval)
 	open := s.OpenURL
 	if open == nil {
-		open = openBrowser
+		open = OpenBrowser
 	}
 	if err := open(required.InstallURL); err != nil {
 		s.notice("Could not open a browser: %v", err)
@@ -295,9 +295,9 @@ func (s *LiveStage) notice(format string, args ...any) {
 	}
 }
 
-// openBrowser starts the platform's default browser opener and returns without
+// OpenBrowser starts the platform's default browser opener and returns without
 // waiting for it to exit; xdg-open can live as long as the opened application.
-func openBrowser(rawURL string) error {
+func OpenBrowser(rawURL string) error {
 	name := "xdg-open"
 	if runtime.GOOS == "darwin" {
 		name = "open"

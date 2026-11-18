@@ -207,9 +207,10 @@ terminal, the run fails with:
 GitHub authentication is required: set GITHUB_TOKEN or run in a terminal to use the gh browser login
 ```
 
-**GitLab.** LKMABT prints the Token and Web choices and runs
-`glab auth login --hostname gitlab.com --use-keyring=false`. Choose **Token**
-and paste a personal access token with `api` and `write_repository`. PaC cannot
+**GitLab.** LKMABT opens the prefilled personal access token page (scopes
+`api` and `write_repository`), asks you to set the expiration to 1 day, and runs
+`glab auth login --hostname gitlab.com --use-keyring=false`. Create the token,
+then choose **Token** in the glab prompt and paste it. PaC cannot
 use the OAuth token from **Web**; LKMABT rejects it at login, before any cluster
 work. The registry-domain prompt defaults to
 `gitlab.com,gitlab.com:443,registry.gitlab.com` (glab's own default) and can be

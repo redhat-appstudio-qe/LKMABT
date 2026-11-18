@@ -20,6 +20,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	"github.com/redhat-appstudio/lkmabt/internal/providers/github"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
+	"github.com/redhat-appstudio/lkmabt/internal/workflow"
 )
 
 // Credential acquisition and destruction are replaceable in tests.
@@ -91,6 +92,12 @@ func checkGitHubToken(ctx context.Context, request *config.Request, console *Con
 	return true, nil
 }
 
+// GitLabTokenURL is the prefilled personal access token page for a GitLab run.
+const GitLabTokenURL = "https://gitlab.com/-/user_settings/personal_access_tokens/legacy/new?scopes=api%2Cwrite_repository&name=lkmabt-live-run"
+
+// openGitLabTokenPage opens the token page; tests replace it.
+var openGitLabTokenPage = workflow.OpenBrowser
+
 type clusterRun struct {
 	Entry   clusterfile.Entry
 	AuthErr error
@@ -134,7 +141,10 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 		}()
 		if gitlabTokenNeeded {
 			if console.Interactive() {
-				console.Printf("gitlab: authentication required\nIn the glab prompt, choose:\n  - Token: paste a personal access token with api and write_repository (required for PaC)\n  - Web: signs in with an OAuth token that PaC cannot use, so the run will fail")
+				console.Printf("gitlab: authentication required\nA browser window is opening at GitLab's personal access token page.\nSet the expiration to 1 day, keep the api and write_repository scopes, and create the token.\nThen choose Token in the glab prompt and paste the token. Do not choose Web: PaC cannot use its OAuth token.")
+				if err := openGitLabTokenPage(GitLabTokenURL); err != nil {
+					console.Printf("could not open the token page: %v\nOpen it manually: %s", err, GitLabTokenURL)
+				}
 			}
 			token, err := authenticateGitLab(ctx, clusterauth.ExecRunner{}, store, console.Interactive(), request.Credentials.GitLabAPIURL)
 			if err != nil {

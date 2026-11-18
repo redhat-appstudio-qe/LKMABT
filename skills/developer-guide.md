@@ -74,7 +74,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/auth/`** — Provider credential acquisition
 - Creates one run-scoped `lkmabt-auth-*` directory with 0700 credentials written as 0600 files
 - GitHub: runs `gh auth login --web` with an isolated `GH_CONFIG_DIR` and `--insecure-storage`
-- GitLab: runs `glab auth login` (choose Token and paste a PAT with `api` and `write_repository`) with an isolated `GLAB_CONFIG_DIR`, keeps that directory for token re-reads, and deletes the ephemeral SCM Secret during finalization
+- GitLab: opens a prefilled PAT page (1-day expiration, `api` and `write_repository`), runs `glab auth login` (choose Token and paste the PAT) with an isolated `GLAB_CONFIG_DIR`, keeps that directory for token re-reads, and deletes the ephemeral SCM Secret during finalization
 - `RunClusters` deletes the directory after the last cluster; non-interactive runs must provide the provider tokens
 
 **`internal/report/`** — Aggregate reports
@@ -257,9 +257,9 @@ token (`gho_`) for that endpoint even with the scope, so the acquisition check
 skips it and preflight keeps the warning path. The acquisition check does not
 require the fixture in every installation because the cluster app slug is
 unknown there; a listing that remains unverifiable after the browser login still
-only produces the preflight warning. When `GITLAB_BOT_TOKEN` is empty, GitLab runs
-`glab auth login` (choose Token and paste a PAT with `api` and `write_repository`)
-with a private `GLAB_CONFIG_DIR`; the registry-domain and git-protocol prompts are
+only produces the preflight warning. When `GITLAB_BOT_TOKEN` is empty, GitLab opens the prefilled PAT page (1-day
+expiration, `api` and `write_repository`) and runs `glab auth login` (choose
+Token and paste the PAT) with a private `GLAB_CONFIG_DIR`; the registry-domain and git-protocol prompts are
 glab defaults and do not affect LKMABT. It then reads the token with
 `glab config get token --host`; the glab directory stays in the store so
 `glab api user` can validate the stored token before each cluster. An OAuth
