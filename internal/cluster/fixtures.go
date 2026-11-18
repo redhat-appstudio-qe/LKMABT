@@ -235,14 +235,16 @@ func (s FixtureService) writeGitLabCredentialSecret(ctx context.Context, secrets
 	return nil
 }
 
-// managedByLKMABT reports whether the Secret carries the harness ownership label.
+// managedByLKMABT reports whether the Secret carries both harness ownership labels.
+// A Secret created by any LKMABT run is adoptable; one missing either label is foreign.
 func managedByLKMABT(secret *unstructured.Unstructured) bool {
-	return secret.GetLabels()[cleanup.ManagedByLabel] == cleanup.ManagedByValue
+	labels := secret.GetLabels()
+	return labels[cleanup.ManagedByLabel] == cleanup.ManagedByValue && strings.TrimSpace(labels[cleanup.RunIDLabel]) != ""
 }
 
 // unmanagedGitLabSecretError explains how to clear a name collision the harness must not touch.
 func unmanagedGitLabSecretError(namespace string) error {
-	return fmt.Errorf("GitLab SCM Secret %q in namespace %s exists but is not managed by lkmabt: delete it or use a namespace where it is absent", GitLabCredentialSecretName, namespace)
+	return fmt.Errorf("GitLab SCM Secret %q in namespace %s exists but is not owned by lkmabt (it needs %s=%s and a non-empty %s): delete it or use a namespace where it is absent", GitLabCredentialSecretName, namespace, cleanup.ManagedByLabel, cleanup.ManagedByValue, cleanup.RunIDLabel)
 }
 
 // applyGitLabSecretOwnership marks a Secret as managed by this harness run.

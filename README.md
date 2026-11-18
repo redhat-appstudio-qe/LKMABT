@@ -91,16 +91,15 @@ resources.
    namespace administrator, for example:
    `oc adm policy add-role-to-user edit <user> -n mathwizz-test-gitlab`.
    The Secret is labeled `app.konflux-ci.org/managed-by=lkmabt` and
-   `app.konflux.org/run-id=<run-id>`. The managed-by label marks harness
-   ownership: a Secret carrying it may be updated and adopted by the current
-   run, which refreshes the run ID. Deletion additionally requires the run-ID
-   label to match. A pre-existing `gitlab-build-secret` without the managed-by
-   label is never modified or deleted: the run fails after inspecting its
-   labels with an actionable error naming the Secret, and a legacy unowned
-   Secret must be deleted once after access is granted before the next GitLab
-   run. An ephemeral token's Secret is
-   removed during finalization; a configured `GITLAB_BOT_TOKEN` keeps the
-   managed Secret for reuse.
+   `app.konflux.org/run-id=<run-id>`. Both labels mark harness ownership: a
+   Secret carrying them may be updated and adopted by the current run, which
+   refreshes the run ID. Deletion additionally requires the run ID to equal the
+   current run. A pre-existing `gitlab-build-secret` missing either label is
+   never modified or deleted: the run fails after inspecting its labels with an
+   actionable error naming the Secret, and a legacy unowned Secret must be
+   deleted once after access is granted before the next GitLab run. An ephemeral
+   token's Secret is removed during finalization; a configured
+   `GITLAB_BOT_TOKEN` keeps the managed Secret for reuse.
 9. Provider credentials come from `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` when
    set. Leave either empty to authenticate at run time: GitHub uses
    `gh auth login` (browser; requests `repo`, `read:org`, and `read:user`) and

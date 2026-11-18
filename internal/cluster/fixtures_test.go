@@ -368,7 +368,7 @@ var _ = Describe("GitLab Secret management", func() {
 
 			_, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token"))
 
-			Expect(err).Should(MatchError(ContainSubstring("is not managed by lkmabt")))
+			Expect(err).Should(MatchError(ContainSubstring("is not owned by lkmabt")))
 			Expect(err.Error()).Should(ContainSubstring(GitLabCredentialSecretName))
 			Expect(err.Error()).Should(ContainSubstring("tenant"))
 			secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})
@@ -376,6 +376,28 @@ var _ = Describe("GitLab Secret management", func() {
 			password, _, _ := unstructured.NestedString(secret.Object, "data", "password")
 			Expect(password).Should(Equal("foreign-token"))
 			Expect(secret.GetLabels()).ShouldNot(HaveKey(cleanup.ManagedByLabel))
+		})
+	})
+
+	When("a same-name Secret has the managed-by label but no run ID", func() {
+		It("should fail without touching it", func() {
+			client := fixtureTestClient(&unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "v1", "kind": "Secret",
+				"metadata": map[string]any{
+					"name": GitLabCredentialSecretName, "namespace": "tenant",
+					"labels": map[string]any{scmCredentialsLabel: "scm", scmHostnameLabel: "gitlab.com", cleanup.ManagedByLabel: cleanup.ManagedByValue},
+				},
+				"type": "kubernetes.io/basic-auth", "data": map[string]any{"password": "partial-token"},
+			}})
+
+			_, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token"))
+
+			Expect(err).Should(MatchError(ContainSubstring("is not owned by lkmabt")))
+			secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})
+			Expect(err).ShouldNot(HaveOccurred())
+			password, _, _ := unstructured.NestedString(secret.Object, "data", "password")
+			Expect(password).Should(Equal("partial-token"))
+			Expect(secret.GetLabels()).ShouldNot(HaveKey(cleanup.RunIDLabel))
 		})
 	})
 
