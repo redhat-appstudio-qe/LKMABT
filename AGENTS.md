@@ -70,4 +70,5 @@ resolve against the working directory.
 - Before writing or reviewing Go code, read `skills/go-coding-standards.md`
 - Before writing or reviewing tests, read `skills/testing-standards.md`
 - Before opening a PR or working through review feedback, read `skills/pr-workflow.md`
+- Only when `README.md` requires a documentation update, read `skills/update-readme.md`; it defines the user-facing structure and parallel-edit rules and is not needed otherwise
 - When understanding the architecture, workflow phases, or artifact layout, read `skills/developer-guide.md`
