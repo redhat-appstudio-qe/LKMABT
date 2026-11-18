@@ -39,6 +39,16 @@ func (c *Console) Printf(format string, args ...any) {
 	fmt.Fprintf(c.Out, format+"\n", args...)
 }
 
+// Write serializes progress output from concurrent provider stages.
+func (c *Console) Write(p []byte) (int, error) {
+	if c == nil || c.Out == nil {
+		return len(p), nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Out.Write(p)
+}
+
 // Confirm serializes an interactive approval against status output and other clusters.
 func (c *Console) Confirm(ctx context.Context, message string) (bool, error) {
 	if c == nil || c.Prompt == nil {

@@ -61,6 +61,13 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	stage.Out = runner.Out
 	stage.ParentContext = ctx
 	stage.Log = log
+	// Reserve the tenant namespace across processes before any artifact exists,
+	// so a concurrent run cannot delete resources this run owns.
+	releaseNamespace, err := acquireTenantNamespaceLock(tenantLockServer(request.ClusterServer, clients), request.TenantNamespace, tenantLockHolder(request.RunID, time.Now()))
+	if err != nil {
+		return RunOutcome{Provider: request.Provider}, err
+	}
+	defer releaseNamespace()
 	store := evidence.NewManifestStore(request.StateDir)
 	var logAttachErr error
 	manifest, runErr := (workflow.Runner{Store: store, Stage: stage}).Run(ctx, workflow.Options{
@@ -200,6 +207,12 @@ func cleanupRun(ctx context.Context, request config.Request, store evidence.Mani
 	if info.Name != namespace || info.Labels[cleanup.ManagedByLabel] != cleanup.ManagedByValue || info.RunID != request.RunID {
 		return fmt.Errorf("refusing to clean namespace %s without exact LKMABT ownership for run %s", namespace, request.RunID)
 	}
+	// A live run holding this namespace is using the resources cleanup would delete.
+	releaseNamespace, err := acquireTenantNamespaceLock(request.ClusterServer, namespace, tenantLockHolder(request.RunID, time.Now()))
+	if err != nil {
+		return err
+	}
+	defer releaseNamespace()
 	if prompt == nil {
 		return fmt.Errorf("cleanup requires explicit confirmation")
 	}

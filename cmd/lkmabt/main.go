@@ -28,5 +28,5 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	console := cli.NewConsole()
-	return cli.Execute(ctx, req, cli.NewLiveRunner(console, console.Out, console.Interactive()), console)
+	return cli.Execute(ctx, req, cli.NewLiveRunner(console, console, console.Interactive()), console)
 }

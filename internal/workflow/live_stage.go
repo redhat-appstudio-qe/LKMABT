@@ -31,6 +31,9 @@ var githubAppPollInterval = 10 * time.Second
 // githubAppStatusInterval bounds how often the wait reports progress to the user.
 var githubAppStatusInterval = 5 * time.Minute
 
+// buildStatusInterval bounds how often a build wait reports progress to the user.
+var buildStatusInterval = time.Minute
+
 type LiveStage struct {
 	Request              config.Request
 	Clients              *cluster.ClientSet
@@ -381,9 +384,9 @@ func (s *LiveStage) ensureTenantNamespaceAvailable(ctx context.Context, manifest
 	return nil
 }
 
-// deleteOwnedNamespace removes a stale LKMABT namespace without prompting and logs the removal.
+// deleteOwnedNamespace removes a stale LKMABT namespace without prompting and reports the removal.
 func (s *LiveStage) deleteOwnedNamespace(ctx context.Context, info cleanup.NamespaceInfo) error {
-	fmt.Fprintf(s.Log, "deleting stale owned tenant namespace %s from run %s\n", info.Name, info.RunID)
+	s.notice("deleting stale owned tenant namespace %s from run %s", info.Name, info.RunID)
 	if err := s.Namespace.Delete(ctx, info.Name, info.RunID); err != nil {
 		return err
 	}
@@ -436,7 +439,7 @@ func (s *LiveStage) TriggerComponents(ctx context.Context, manifest *model.RunMa
 			}
 		}
 		return list.Items, nil
-	}); err != nil {
+	}, s.notice); err != nil {
 		return fmt.Errorf("wait for PaC onboarding: %w", err)
 	}
 	for index, component := range components {
@@ -479,6 +482,8 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 	if namespace == "" {
 		return fmt.Errorf("run manifest does not contain a tenant namespace")
 	}
+	inspector := cluster.PacAuthInspector{Kubernetes: s.Clients.Kubernetes}
+	inspectionWarned := false
 	identities, err := waitForBuildTaskRuns(ctx, s.Request.Timeouts.Trigger, s.Request.Timeouts.Build, 10*time.Second, namespace, manifest.TriggerCommits, func(ctx context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error) {
 		components, err := s.Clients.Dynamic.Resource(cluster.ComponentGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
@@ -493,12 +498,23 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 		if err != nil {
 			return nil, nil, err
 		}
+		// Fail fast when PaC already removed the Secret a pending build needs; a
+		// transient read failure only warns, because the build wait still works.
+		missing, inspectErr := inspector.Missing(ctx, namespace, candidatePipelineRunsForCommits(pipelineRuns.Items, manifest.TriggerCommits))
+		if inspectErr != nil {
+			if !inspectionWarned {
+				inspectionWarned = true
+				s.notice("warning: cannot inspect PaC git authentication Secrets: %v", inspectErr)
+			}
+		} else if missing != nil {
+			return nil, nil, missing
+		}
 		taskRuns, err := s.Clients.Dynamic.Resource(cluster.TaskRunGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, nil, err
 		}
 		return pipelineRuns.Items, taskRuns.Items, nil
-	})
+	}, s.notice)
 	if err != nil {
 		var pipelineRunError *PipelineRunFailedError
 		if errors.As(err, &pipelineRunError) && s.FailedBuildCollector != nil && manifest.ArtifactDirectory != "" {
@@ -539,7 +555,7 @@ func paCStatusError(object *unstructured.Unstructured) error {
 }
 
 // waitForPaCEnabled polls components until each named component reports enabled PaC status.
-func waitForPaCEnabled(ctx context.Context, timeout, interval time.Duration, names []string, list func(context.Context) ([]unstructured.Unstructured, error)) error {
+func waitForPaCEnabled(ctx context.Context, timeout, interval time.Duration, names []string, list func(context.Context) ([]unstructured.Unstructured, error), notice func(string, ...any)) error {
 	if timeout <= 0 {
 		return fmt.Errorf("PaC timeout must be positive")
 	}
@@ -548,6 +564,9 @@ func waitForPaCEnabled(ctx context.Context, timeout, interval time.Duration, nam
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	heartbeat := time.NewTicker(buildStatusInterval)
+	defer heartbeat.Stop()
+	notify(notice, "waiting for PaC onboarding of %d components", len(names))
 	for {
 		objects, err := list(waitCtx)
 		if err != nil {
@@ -559,30 +578,15 @@ func waitForPaCEnabled(ctx context.Context, timeout, interval time.Duration, nam
 		}
 		pending := false
 		for _, name := range names {
-			object, found := byName[name]
-			if !found {
-				pending = true
-				continue
-			}
-			status := object.GetAnnotations()["build.appstudio.openshift.io/status"]
-			var annotation struct {
-				PaC struct {
-					State string `json:"state"`
-				} `json:"pac"`
-			}
-			if err := json.Unmarshal([]byte(status), &annotation); err != nil || annotation.PaC.State != "enabled" {
+			if componentPaCState(byName[name]) != "enabled" {
 				pending = true
 			}
 		}
 		if !pending {
 			return nil
 		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-waitCtx.Done():
-			timer.Stop()
+		if !awaitPoll(waitCtx, interval, heartbeat, func() { notify(notice, "%s", paCWaitStatus(names, objects)) }) {
 			return fmt.Errorf("timed out waiting for PaC onboarding: %w", waitCtx.Err())
-		case <-timer.C:
 		}
 	}
 }
@@ -660,7 +664,7 @@ func waitForBuildMatches(ctx context.Context, triggerTimeout, buildTimeout, inte
 }
 
 // waitForBuildTaskRuns polls for matching PipelineRuns and successful Buildah TaskRuns.
-func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, interval time.Duration, namespace string, commits []model.TriggerCommit, list func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error)) ([]model.PipelineRunIdentity, error) {
+func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, interval time.Duration, namespace string, commits []model.TriggerCommit, list func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error), notice func(string, ...any)) ([]model.PipelineRunIdentity, error) {
 	if triggerTimeout <= 0 {
 		return nil, fmt.Errorf("trigger timeout must be positive")
 	}
@@ -670,8 +674,11 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 	if interval <= 0 {
 		return nil, fmt.Errorf("build polling interval must be positive")
 	}
+	notify(notice, "waiting for PipelineRuns for %d triggered components", len(commits))
 	triggerCtx, cancelTrigger := context.WithTimeout(ctx, triggerTimeout)
 	defer cancelTrigger()
+	triggerHeartbeat := time.NewTicker(buildStatusInterval)
+	defer triggerHeartbeat.Stop()
 	for {
 		pipelineRuns, taskRuns, err := list(triggerCtx)
 		if err != nil {
@@ -687,17 +694,18 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 		if allBuildsAppeared(pipelineRuns, commits) {
 			break
 		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-triggerCtx.Done():
-			timer.Stop()
+		if !awaitPoll(triggerCtx, interval, triggerHeartbeat, func() {
+			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now()))
+		}) {
 			return nil, noPipelineRunError(namespace, commits, pipelineRuns)
-		case <-timer.C:
 		}
 	}
 
+	notify(notice, "PipelineRuns appeared for all %d components; waiting for Buildah TaskRuns", len(commits))
 	buildCtx, cancelBuild := context.WithTimeout(ctx, buildTimeout)
 	defer cancelBuild()
+	buildHeartbeat := time.NewTicker(buildStatusInterval)
+	defer buildHeartbeat.Stop()
 	for {
 		pipelineRuns, taskRuns, err := list(buildCtx)
 		if err != nil {
@@ -710,12 +718,10 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 		if !pending {
 			return identities, nil
 		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-buildCtx.Done():
-			timer.Stop()
+		if !awaitPoll(buildCtx, interval, buildHeartbeat, func() {
+			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now()))
+		}) {
 			return nil, fmt.Errorf("timed out waiting for Buildah TaskRuns after trigger: %w", buildCtx.Err())
-		case <-timer.C:
 		}
 	}
 }
@@ -732,6 +738,9 @@ func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, comm
 			return nil, false, fmt.Errorf("ambiguous PipelineRuns for component %s after trigger %s", commit.Component, commit.SHA)
 		}
 		candidate := candidates[0]
+		if pipelineRunConditionStatus(candidate) == "False" {
+			return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
+		}
 		buildTasks := buildTaskRunsForPipelineRun(taskRuns, candidate)
 		if len(buildTasks) == 0 {
 			return identities, true, nil
