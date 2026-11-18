@@ -71,15 +71,13 @@ glab api projects/konflux-qe%2Fdr_test_mathwizz_gl --jq '[.permissions.project_a
 # 40 (Maintainer) or 50 (Owner), including access inherited from konflux-qe
 ```
 
-**Cluster.** Your identity needs permission to create the tenant namespace (an
-OpenShift `ProjectRequest` when the namespace is absent, which binds you as
-project admin), cluster-scoped `update` on `namespaces` to label it for
-cleanup, and permission to delete it during cleanup. Inside that namespace the
-run needs access to `pipelineruns`, `taskruns`, `applications`, and
-`components`. GitLab runs also need `get`, `create`, and `update` on Secrets
-there, plus `delete` when the run acquires its own GitLab token; fixture setup
-checks these with `SelfSubjectAccessReview` after the namespace exists. If you
-administer an existing namespace, grant the Secret access with:
+**Cluster.** Your identity needs permission to create the tenant namespace
+through an OpenShift `ProjectRequest`, cluster-scoped `update` on `namespaces`
+to label it for cleanup, and permission to delete it during cleanup. Inside
+the namespace the run needs access to `pipelineruns`, `taskruns`,
+`applications`, and `components`. GitLab runs also need `get`, `create`, and
+`update` on Secrets there, plus `delete` when the run acquires its own GitLab
+token. If you administer an existing namespace, grant the Secret access with:
 
 ```bash
 oc adm policy add-role-to-user edit <user> -n mathwizz-test-gitlab
@@ -255,10 +253,9 @@ lists installation repositories for Apps installed for selected repositories;
 when the token cannot list them, preflight logs a warning and continues, and
 the trigger-stage PaC wait remains the backstop.
 
-**`GITLAB_BOT_TOKEN`.** The token is used as-is and is never revoked. It needs
-`api` and `write_repository` access to the fixture repository, because PaC uses
-it to clone the fixture. PaC reuses a usable `gitlab-build-secret` when one
-exists; otherwise LKMABT creates it and keeps it for later runs.
+**`GITLAB_BOT_TOKEN`.** The token is used as-is and is never revoked. PaC
+reuses a usable `gitlab-build-secret` when one exists; otherwise LKMABT creates
+it and keeps it for later runs.
 
 ## Running LKMABT
 
@@ -348,6 +345,11 @@ selection. This applies to configured tokens and browser logins.
 - Triggering appends one comment to each of the three Dockerfiles on the
   fixture's default branch and commits it. The fixtures are shared; your
   commits are visible to other users.
+- A missing tenant namespace is requested through an OpenShift `ProjectRequest`,
+  which binds the requester as project admin; if that API is unavailable or
+  forbidden, LKMABT creates a bare `Namespace`. Cleanup labels are applied only
+  after the created Namespace's UID matches the returned project, and the
+  GitLab Secret access review runs before the Secret is written.
 - LKMABT waits for PaC readiness and for the triggered PipelineRuns.
   `--preflight-timeout` (10m) bounds preflight and fixture setup.
   `--build-timeout` (60m) bounds triggering, the build wait, and build-output
