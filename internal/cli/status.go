@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 
 	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"golang.org/x/term"
@@ -17,15 +16,9 @@ var spinnerFrames = []string{
 }
 
 // spinnerFormat rewrites the spinner line in place. Wrapping is disabled while
-// the frame is drawn so a line wider than the terminal cannot break \r update.
-var spinnerFormat = "\x1b[?7l\r\x1b[2K%s %s\x1b[?7h"
-
-func init() {
-	// Old Windows consoles handle only the simplest escape sequences.
-	if runtime.GOOS == "windows" {
-		spinnerFormat = "\r\x1b[2K%s %s"
-	}
-}
+// the frame is drawn on every platform so a line wider than the terminal cannot
+// wrap and leave stale rows behind when the line is cleared.
+const spinnerFormat = "\x1b[?7l\r\x1b[2K%s %s\x1b[?7h"
 
 // Step is one status line that starts as an animated spinner and is replaced by
 // a success or failure marker when it ends.

@@ -45,11 +45,24 @@ func NewLiveRunner(prompt workflow.Confirmation, out io.Writer, interactive bool
 
 // promptFor routes prompts through the console when it owns the output, so the
 // spinner is cleared and concurrent progress is buffered until the prompt ends.
+// The caller's confirmation policy is preserved: a nil prompt stays nil.
 func promptFor(runner LiveRunner) workflow.Confirmation {
-	if console, ok := runner.Out.(*Console); ok && console != nil && console.Prompt != nil {
-		return console
+	console, ok := runner.Out.(*Console)
+	if !ok || console == nil || runner.Prompt == nil {
+		return runner.Prompt
 	}
-	return runner.Prompt
+	return consolePrompt{console: console, prompt: runner.Prompt}
+}
+
+// consolePrompt runs the caller's prompt through the console's buffering.
+type consolePrompt struct {
+	console *Console
+	prompt  workflow.Confirmation
+}
+
+// Confirm delegates to the caller's prompt while progress is buffered.
+func (p consolePrompt) Confirm(ctx context.Context, message string) (bool, error) {
+	return p.console.confirm(ctx, p.prompt, message)
 }
 
 // stepFor starts a console step when out is a console and otherwise returns a

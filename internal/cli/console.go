@@ -171,10 +171,18 @@ func (c *Console) Suspend() func() {
 	}
 }
 
-// Confirm serializes prompts and buffers progress output until the prompt
-// completes.
+// Confirm serializes an approval through the console's configured prompt.
 func (c *Console) Confirm(ctx context.Context, message string) (bool, error) {
 	if c == nil || c.Prompt == nil {
+		return false, fmt.Errorf("interactive confirmation is not configured")
+	}
+	return c.confirm(ctx, c.Prompt, message)
+}
+
+// confirm runs prompt while the spinner is cleared and concurrent progress is
+// buffered until the prompt completes.
+func (c *Console) confirm(ctx context.Context, prompt workflow.Confirmation, message string) (bool, error) {
+	if c == nil || prompt == nil {
 		return false, fmt.Errorf("interactive confirmation is not configured")
 	}
 	c.promptMu.Lock()
@@ -185,7 +193,7 @@ func (c *Console) Confirm(ctx context.Context, message string) (bool, error) {
 		c.clearLineLocked()
 	}
 	c.outMu.Unlock()
-	approved, err := c.Prompt.Confirm(ctx, message)
+	approved, err := prompt.Confirm(ctx, message)
 	c.outMu.Lock()
 	c.promptActive = false
 	if c.Out != nil && c.pending.Len() > 0 {

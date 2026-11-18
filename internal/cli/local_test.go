@@ -99,11 +99,26 @@ var _ = Describe("NewLiveRunner", func() {
 })
 
 var _ = Describe("promptFor", func() {
-	When("the output is a console with a prompt", func() {
-		It("should route prompts through the console so progress is buffered", func() {
-			runner := LiveRunner{Prompt: &recordingPrompt{}, Out: &Console{Prompt: &recordingPrompt{}}}
+	When("the output is a console and the runner has a prompt", func() {
+		It("should preserve the caller's confirmation policy", func() {
+			consolePrompt := &recordingPrompt{approved: true}
+			runnerPrompt := &recordingPrompt{approved: false}
+			console := &Console{Out: io.Discard, Prompt: consolePrompt}
+			runner := LiveRunner{Prompt: runnerPrompt, Out: console}
 
-			Expect(promptFor(runner)).Should(BeIdenticalTo(runner.Out))
+			prompt := promptFor(runner)
+			Expect(prompt).ShouldNot(BeIdenticalTo(console))
+			approved, err := prompt.Confirm(context.Background(), "delete tenant")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(approved).Should(BeFalse())
+			Expect(runnerPrompt.calls).Should(Equal(1))
+			Expect(consolePrompt.calls).Should(BeZero())
+		})
+
+		It("should not fall back to the console prompt when the runner has none", func() {
+			runner := LiveRunner{Prompt: nil, Out: &Console{Out: io.Discard, Prompt: &recordingPrompt{approved: true}}}
+
+			Expect(promptFor(runner)).Should(BeNil())
 		})
 	})
 
@@ -117,11 +132,16 @@ var _ = Describe("promptFor", func() {
 	})
 
 	When("the console has no prompt", func() {
-		It("should keep the runner prompt", func() {
-			prompt := &recordingPrompt{}
-			runner := LiveRunner{Prompt: prompt, Out: &Console{}}
+		It("should still route the runner prompt through the console", func() {
+			prompt := &recordingPrompt{approved: true}
+			runner := LiveRunner{Prompt: prompt, Out: &Console{Out: io.Discard}}
 
-			Expect(promptFor(runner)).Should(BeIdenticalTo(prompt))
+			routed := promptFor(runner)
+			Expect(routed).ShouldNot(BeIdenticalTo(prompt))
+			approved, err := routed.Confirm(context.Background(), "delete tenant")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(approved).Should(BeTrue())
+			Expect(prompt.calls).Should(Equal(1))
 		})
 	})
 })
