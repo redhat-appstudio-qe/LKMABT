@@ -75,13 +75,15 @@ resources.
    not. When the token cannot list installation repositories, preflight logs a
    warning and continues; the trigger-stage PaC wait remains the backstop for a
    missing selection. In an interactive session, acquisition also verifies that
-   the token can list repositories for each non-suspended installation that
-   covers selected repositories, so the preflight warning does not appear for a
-   token that cannot perform it. A classic or OAuth token may need the
-   `read:user` scope for that listing; add it with
-   `gh auth refresh -h github.com -s read:user`. A listing that remains
-   unverifiable after the browser login still logs the preflight warning and
-   continues.
+   a personal access token can list repositories for each non-suspended
+   installation that covers selected repositories, so the preflight warning does
+   not appear for a token that cannot perform it. A classic or OAuth token may
+   need the `read:user` scope for that listing; add it with
+   `gh auth refresh -h github.com -s read:user`. GitHub rejects a `gh` OAuth
+   user token (`gho_`) for that endpoint even with the scope, so that check is
+   skipped for `gh` logins and preflight keeps the warning path. A listing that
+   remains unverifiable after the browser login still logs the preflight
+   warning and continues.
 8. GitLab runs write the PaC SCM Secret `gitlab-build-secret` in the tenant
    namespace (`mathwizz-test-gitlab` by default). The run identity needs
    `get`, `create`, and `update` on Secrets in that namespace, plus `delete`

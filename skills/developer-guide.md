@@ -252,7 +252,9 @@ the token from the existing `gh` login when it passes them, and otherwise
 with the `gh` browser login. Transient, rate-limit, and timeout check failures
 abort the run without replacing the token. A classic or OAuth token may need the
 `read:user` scope to list selected-installation repositories; add it with
-`gh auth refresh -h github.com -s read:user`. The acquisition check does not
+`gh auth refresh -h github.com -s read:user`. GitHub rejects a `gh` OAuth user
+token (`gho_`) for that endpoint even with the scope, so the acquisition check
+skips it and preflight keeps the warning path. The acquisition check does not
 require the fixture in every installation because the cluster app slug is
 unknown there; a listing that remains unverifiable after the browser login still
 only produces the preflight warning. When `GITLAB_BOT_TOKEN` is empty, GitLab runs

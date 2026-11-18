@@ -196,6 +196,19 @@ var _ = Describe("CheckInstallationRepositoryAccess", func() {
 		})
 	})
 
+	When("the credential is a gh OAuth user token", func() {
+		It("should skip the installation repository listing", func() {
+			client := &fakeClient{installations: []*gh.Installation{
+				{ID: gh.Int64(7), RepositorySelection: gh.String("selected")},
+			}}
+			adapter := New(client)
+			adapter.oauthToken = true
+
+			Expect(adapter.CheckInstallationRepositoryAccess(context.Background())).Should(Succeed())
+			Expect(client.installationRepoCalls).Should(BeEmpty())
+		})
+	})
+
 	When("a selected installation is suspended", func() {
 		It("should skip it without listing repositories", func() {
 			client := &fakeClient{installations: []*gh.Installation{

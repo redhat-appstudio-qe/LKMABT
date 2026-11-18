@@ -101,6 +101,9 @@ func (c apiClient) ListUserInstallationRepositories(ctx context.Context, id int6
 type Adapter struct {
 	client client
 	retry  providers.RetryPolicy
+	// oauthToken is true for gh OAuth user tokens (gho_*). The installation
+	// repository endpoint rejects them, so that capability is not required.
+	oauthToken bool
 }
 
 // New creates a GitHub adapter with the default retry policy.
@@ -121,7 +124,9 @@ func NewFromCredentials(token string) (*Adapter, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("GITHUB_TOKEN is required")
 	}
-	return New(apiClient{client: gh.NewClient(nil).WithAuthToken(token)}), nil
+	adapter := New(apiClient{client: gh.NewClient(nil).WithAuthToken(token)})
+	adapter.oauthToken = strings.HasPrefix(token, "gho_")
+	return adapter, nil
 }
 
 // ValidateFixture confirms the repository is the canonical GitHub test fixture.
@@ -176,6 +181,13 @@ func (a *Adapter) CheckOrganizationAccess(ctx context.Context) error {
 func (a *Adapter) CheckInstallationRepositoryAccess(ctx context.Context) error {
 	if a == nil || a.client == nil {
 		return fmt.Errorf("github client is required")
+	}
+	// GitHub rejects gh OAuth user tokens (gho_*) for the installation
+	// repositories endpoint even with read:user, requiring a GitHub App user
+	// token, personal access token, or basic auth. Keep the gh login usable and
+	// leave fixture-selection verification to preflight's warning path.
+	if a.oauthToken {
+		return nil
 	}
 	installations, err := a.listInstallations(ctx)
 	if err != nil {
