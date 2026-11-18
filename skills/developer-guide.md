@@ -281,13 +281,15 @@ grant, before any cluster mutation.
 Fixtures own exactly one Secret, `gitlab-build-secret`, and label it
 `app.konflux-ci.org/managed-by=lkmabt` plus `app.konflux.org/run-id=<run-id>`.
 The Secret carries the GitLab SCM labels and repository annotation that
-build-service matches. If a Secret with that name already exists without both
-ownership labels, the run refuses to update or delete it and fails with an
-error naming the Secret and namespace; a legacy unowned Secret must be
-deleted once after access is granted. Secret listing is opportunistic: reuse
-or refresh of other repository-scoped Secrets happens only when the API allows
-it, and a `Forbidden` list falls back to managing the owned Secret. Forbidden
-updates during an ephemeral refresh are skipped.
+build-service matches. The managed-by label marks harness ownership: a Secret
+carrying it may be updated and adopted by the current run, which refreshes the
+run ID. Deletion additionally requires the run ID to match. A Secret with that
+name but without the managed-by label is never updated or deleted; the run
+fails with an error naming the Secret and namespace, and a legacy unowned
+Secret must be deleted once after access is granted. Secret listing is
+opportunistic: reuse or refresh of other repository-scoped Secrets happens
+only when the API allows it, and a `Forbidden` list falls back to managing the
+owned Secret. Forbidden updates during an ephemeral refresh are skipped.
 
 Finalization deletes the Secret only for ephemeral tokens and only after
 confirming the managed-by and run-ID labels, using a UID precondition when the

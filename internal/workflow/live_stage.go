@@ -749,6 +749,15 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 // matchBuildTaskRuns matches each commit to one PipelineRun and its successful Buildah TaskRuns.
 func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, commits []model.TriggerCommit) ([]model.PipelineRunIdentity, bool, error) {
 	identities := make([]model.PipelineRunIdentity, 0, len(commits))
+	// Fail on any matched failed PipelineRun before reporting another component as
+	// pending; otherwise a later component's failure can hide behind an earlier
+	// component that never produces a PipelineRun.
+	for _, commit := range commits {
+		candidates := matchingPipelineRuns(pipelineRuns, commit)
+		if len(candidates) == 1 && pipelineRunConditionStatus(candidates[0]) == "False" {
+			return nil, false, &PipelineRunFailedError{Namespace: candidates[0].GetNamespace(), Name: candidates[0].GetName(), Component: commit.Component}
+		}
+	}
 	for _, commit := range commits {
 		candidates := matchingPipelineRuns(pipelineRuns, commit)
 		if len(candidates) == 0 {
@@ -758,9 +767,6 @@ func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, comm
 			return nil, false, fmt.Errorf("ambiguous PipelineRuns for component %s after trigger %s", commit.Component, commit.SHA)
 		}
 		candidate := candidates[0]
-		if pipelineRunConditionStatus(candidate) == "False" {
-			return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
-		}
 		buildTasks := buildTaskRunsForPipelineRun(taskRuns, candidate)
 		if len(buildTasks) == 0 {
 			return identities, true, nil

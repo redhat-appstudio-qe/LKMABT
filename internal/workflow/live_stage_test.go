@@ -954,6 +954,23 @@ var _ = Describe("LiveStage", func() {
 		Expect(err).Should(HaveOccurred())
 	})
 
+	It("rejects a later failed PipelineRun while an earlier component is still pending", func() {
+		commits := []model.TriggerCommit{
+			{Component: "mathwizz-web-server", SHA: "sha-web"},
+			{Component: "mathwizz-frontend", SHA: "sha-frontend"},
+		}
+		pipelineRuns := []unstructured.Unstructured{
+			pipelineRun("run-frontend", "mathwizz-frontend", "sha-frontend", "uid-frontend", "False"),
+		}
+
+		_, pending, err := matchBuildTaskRuns(pipelineRuns, nil, commits)
+
+		var failed *PipelineRunFailedError
+		Expect(errors.As(err, &failed)).Should(BeTrue())
+		Expect(failed.Name).Should(Equal("run-frontend"))
+		Expect(pending).Should(BeFalse())
+	})
+
 	It("fails with component, namespace, trigger SHA, and observed count when no PipelineRun appears", func() {
 		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "trigger-sha", CreatedAt: time.Now().UTC().Add(-time.Second)}
 		_, err := waitForBuildMatches(context.Background(), 10*time.Millisecond, time.Second, time.Millisecond, "mathwizz-test", []model.TriggerCommit{commit}, func(context.Context) ([]unstructured.Unstructured, error) {

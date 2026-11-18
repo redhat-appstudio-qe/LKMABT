@@ -13,11 +13,13 @@ Full lifecycle reference for pull requests in LKMABT
 
 ## Branch Discipline
 
-Always update local `main` before creating a branch. Fetch and fast-forward
-local `main` first; do not assume a previously fetched `origin/main` is enough:
+Always update local `main` before creating a branch. Do not assume a
+previously fetched `origin/main` is enough, and do not fetch directly into a
+checked-out `main` (`git fetch origin main:main` is refused):
 
 ```bash
-git fetch origin main:main            # fast-forward local main to origin/main
+git switch main
+git pull --ff-only                    # fast-forward local main
 git switch -c <type>/<slug> origin/main   # e.g. fix/kflux-catalog-name
 git merge-base --is-ancestor origin/main HEAD   # must exit 0
 ```

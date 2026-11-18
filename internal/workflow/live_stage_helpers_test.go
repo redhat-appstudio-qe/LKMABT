@@ -55,6 +55,21 @@ var _ = Describe("build wait progress", func() {
 			"missing: no PipelineRun"))
 	})
 
+	It("does not report a succeeded PipelineRun as a finished component before Buildah work", func() {
+		now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+		commits := []model.TriggerCommit{{Component: "web", SHA: "sha-web"}}
+		pipelineRuns := []unstructured.Unstructured{
+			pipelineRunAt("run-web", "web", "sha-web", "uid-web", "True", now.Add(-time.Minute)),
+		}
+
+		Expect(buildWaitStatus(commits, pipelineRuns, nil, now)).Should(Equal("builds: web: PipelineRun run-web succeeded; waiting for Buildah TaskRuns"))
+
+		taskRuns := []unstructured.Unstructured{
+			buildTaskRunForWorkflow("task-web", "uid-web", "Unknown", "buildah-oci-ta"),
+		}
+		Expect(buildWaitStatus(commits, pipelineRuns, taskRuns, now)).Should(Equal("builds: web: PipelineRun run-web succeeded; buildah 0/1 succeeded"))
+	})
+
 	It("selects and deduplicates the PipelineRuns a wait matches to the triggers", func() {
 		now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 		objects := []unstructured.Unstructured{

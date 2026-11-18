@@ -105,7 +105,10 @@ func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []u
 		return fmt.Sprintf("failed (PipelineRun %s)", candidate.GetName())
 	case "True":
 		if len(buildTasks) == 0 {
-			return fmt.Sprintf("succeeded (PipelineRun %s)", candidate.GetName())
+			return fmt.Sprintf("PipelineRun %s succeeded; waiting for Buildah TaskRuns", candidate.GetName())
+		}
+		if succeeded < len(buildTasks) {
+			return fmt.Sprintf("PipelineRun %s succeeded; buildah %d/%d succeeded", candidate.GetName(), succeeded, len(buildTasks))
 		}
 		return fmt.Sprintf("succeeded (PipelineRun %s, buildah %d/%d)", candidate.GetName(), succeeded, len(buildTasks))
 	default:
