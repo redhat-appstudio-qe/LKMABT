@@ -13,11 +13,18 @@ Full lifecycle reference for pull requests in LKMABT
 
 ## Branch Discipline
 
-Create a dedicated branch before the first file edit:
+Always update local `main` before creating a branch. Fetch and fast-forward
+local `main` first; do not assume a previously fetched `origin/main` is enough:
 
 ```bash
-git switch -c <type>/<slug>   # e.g. fix/kflux-catalog-name
+git fetch origin main:main            # fast-forward local main to origin/main
+git switch -c <type>/<slug> origin/main   # e.g. fix/kflux-catalog-name
+git merge-base --is-ancestor origin/main HEAD   # must exit 0
 ```
+
+Launching the branch from `origin/main` keeps the base correct even if local
+`main` was stale, but update local `main` anyway: a stale local branch misleads
+the next comparison, rebase, or branch created without an explicit start point.
 
 Never edit or commit on `main`, and never reuse another workstream's branch
 without asking. Uncommitted work on a shared branch hides whose changes are
