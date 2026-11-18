@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -152,9 +153,58 @@ func (a *Adapter) CheckOrganizationAccess(ctx context.Context) error {
 		return fmt.Errorf("github client is required")
 	}
 	if _, err := a.client.ListOrganizationInstallations(ctx, canonicalOwner); err != nil {
+		if isAccessRejection(err) {
+			return fmt.Errorf("%w: list GitHub App installations for %s: %v (the GitHub token needs the read:org scope and an owner who administers the organization)", providers.ErrInsufficientGitHubAccess, canonicalOwner, err)
+		}
 		return fmt.Errorf("list GitHub App installations for %s: %w", canonicalOwner, err)
 	}
 	return nil
+}
+
+// CheckFixtureWriteAccess confirms the token can update the canonical fixture repository,
+// which the run requires before it commits build triggers.
+func (a *Adapter) CheckFixtureWriteAccess(ctx context.Context) error {
+	if a == nil || a.client == nil {
+		return fmt.Errorf("github client is required")
+	}
+	var repository *gh.Repository
+	err := providers.RetryOn5xx(ctx, a.retry, func() error {
+		var err error
+		repository, err = a.client.GetRepository(canonicalOwner, canonicalName)
+		return err
+	}, isGitHub5xx)
+	if err != nil {
+		if isAccessRejection(err) {
+			return fmt.Errorf("%w: read %s: %v", providers.ErrInsufficientGitHubAccess, CanonicalFixtureURL, err)
+		}
+		return fmt.Errorf("read %s: %w", CanonicalFixtureURL, err)
+	}
+	if !repository.GetPermissions()["push"] {
+		return fmt.Errorf("%w: the GitHub token cannot push to %s, which is required to trigger builds; use a token with the repo scope or sign in with gh", providers.ErrInsufficientGitHubAccess, CanonicalFixtureURL)
+	}
+	return nil
+}
+
+// isAccessRejection reports whether err establishes that GitHub rejected the
+// credential itself. Rate limits, 5xx responses, and context errors are
+// transient and never justify replacing the token.
+func isAccessRejection(err error) bool {
+	var rateLimit *gh.RateLimitError
+	if errors.As(err, &rateLimit) {
+		return false
+	}
+	var abuse *gh.AbuseRateLimitError
+	if errors.As(err, &abuse) {
+		return false
+	}
+	var response *gh.ErrorResponse
+	if errors.As(err, &response) && response.Response != nil {
+		switch response.Response.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+			return true
+		}
+	}
+	return false
 }
 
 // VerifyGitHubAppInstallation confirms the cluster GitHub App can onboard the canonical fixture repository.
@@ -206,7 +256,12 @@ func verifyGitHubAppRepositories(ctx context.Context, client client, installatio
 				return nil
 			}
 		}
-		return fmt.Errorf("GitHub App %s is installed for selected repositories in %s but not for %s/%s; add the repository from %s or select all repositories", appSlug, canonicalOwner, canonicalOwner, canonicalName, installationSettingsURL(installation))
+		return &providers.AppRepositorySelectionError{
+			AppSlug:     appSlug,
+			Owner:       canonicalOwner,
+			Repository:  canonicalOwner + "/" + canonicalName,
+			SettingsURL: installationSettingsURL(installation),
+		}
 	default:
 		return fmt.Errorf("GitHub App %s installation in %s reports unknown repository selection %q", appSlug, canonicalOwner, installation.GetRepositorySelection())
 	}

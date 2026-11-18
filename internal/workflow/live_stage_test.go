@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -34,6 +35,57 @@ type confirmationStub struct {
 	calls     int
 	messages  []string
 	onConfirm func()
+}
+
+// syncBuffer is a goroutine-safe bytes.Buffer for progress assertions.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+// Write appends p under the buffer mutex.
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+// String returns the accumulated text under the buffer mutex.
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// fakePreflightCluster satisfies cluster.Cluster for Preflight tests.
+type fakePreflightCluster struct {
+	server string
+}
+
+// Server returns the configured API server.
+func (f fakePreflightCluster) Server(context.Context) (string, error) { return f.server, nil }
+
+// CheckAccess passes every access check.
+func (f fakePreflightCluster) CheckAccess(context.Context, []cluster.AccessCheck) []cluster.CheckResult {
+	return nil
+}
+
+// CheckScheduling passes every scheduling check.
+func (f fakePreflightCluster) CheckScheduling(context.Context, cluster.SchedulingSpec) []cluster.CheckResult {
+	return nil
+}
+
+// contextCheckingLister fails when the namespace listing context is already done.
+type contextCheckingLister struct {
+	names []string
+}
+
+// List returns the configured names unless the context has ended.
+func (l contextCheckingLister) List(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return append([]string(nil), l.names...), nil
 }
 
 // Confirm records the prompt message and returns the stub's configured approval.
@@ -337,9 +389,11 @@ var _ = Describe("LiveStage", func() {
 					Log:      log,
 				}
 
-				Expect(stage.verifyGitHubApp(context.Background())).Should(Succeed())
+				verification, err := stage.verifyGitHubApp(context.Background())
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(verification.Verified).Should(BeTrue())
+				Expect(verification.Slug).Should(Equal("konflux-kflux-ocp-p01"))
 				Expect(provider.slug).Should(Equal("konflux-kflux-ocp-p01"))
-				Expect(log.String()).Should(ContainSubstring("GitHub App konflux-kflux-ocp-p01 installation verified"))
 			})
 		})
 
@@ -353,7 +407,8 @@ var _ = Describe("LiveStage", func() {
 					Log:      log,
 				}
 
-				Expect(stage.verifyGitHubApp(context.Background())).Should(Succeed())
+				_, err := stage.verifyGitHubApp(context.Background())
+				Expect(err).ShouldNot(HaveOccurred())
 				Expect(log.String()).Should(ContainSubstring("warning:"))
 				Expect(log.String()).Should(ContainSubstring("selected repositories"))
 			})
@@ -368,7 +423,8 @@ var _ = Describe("LiveStage", func() {
 					Log:      &bytes.Buffer{},
 				}
 
-				Expect(stage.verifyGitHubApp(context.Background())).Should(MatchError("GitHub App konflux-kflux-ocp-p01 is not installed"))
+				_, err := stage.verifyGitHubApp(context.Background())
+				Expect(err).Should(MatchError("GitHub App konflux-kflux-ocp-p01 is not installed"))
 			})
 		})
 
@@ -376,7 +432,8 @@ var _ = Describe("LiveStage", func() {
 			It("should fail before reading the cluster info", func() {
 				stage := &LiveStage{Provider: &githubAppProviderStub{}, Log: &bytes.Buffer{}}
 
-				Expect(stage.verifyGitHubApp(context.Background())).Should(MatchError("cluster clients are not initialized"))
+				_, err := stage.verifyGitHubApp(context.Background())
+				Expect(err).Should(MatchError("cluster clients are not initialized"))
 			})
 		})
 
@@ -401,7 +458,8 @@ var _ = Describe("LiveStage", func() {
 				githubAppPollInterval = time.Millisecond
 				defer func() { githubAppPollInterval = previous }()
 
-				Expect(stage.verifyGitHubApp(context.Background())).Should(Succeed())
+				verification, err := stage.verifyGitHubApp(context.Background())
+				Expect(err).ShouldNot(HaveOccurred())
 				Expect(opened).Should(Equal([]string{required.InstallURL}))
 				Expect(provider.calls).Should(Equal(3))
 				Expect(out.String()).Should(ContainSubstring(required.InstallURL))
@@ -411,7 +469,7 @@ var _ = Describe("LiveStage", func() {
 				Expect(out.String()).Should(ContainSubstring("Select the redhat-appstudio-qe organization"))
 				Expect(out.String()).Should(ContainSubstring("Grant access to redhat-appstudio-qe/dr_test_mathwizz, or to all repositories"))
 				Expect(out.String()).Should(ContainSubstring("Return to this terminal"))
-				Expect(out.String()).Should(ContainSubstring("GitHub App cluster-app installation verified"))
+				Expect(verification.Verified).Should(BeTrue())
 			})
 		})
 
@@ -430,7 +488,7 @@ var _ = Describe("LiveStage", func() {
 					Log: &bytes.Buffer{},
 				}
 
-				err := stage.verifyGitHubApp(context.Background())
+				_, err := stage.verifyGitHubApp(context.Background())
 				Expect(errors.As(err, &required)).Should(BeTrue())
 				Expect(err).Should(MatchError(ContainSubstring("GitHub App cluster-app is not installed for organization redhat-appstudio-qe")))
 				Expect(opened).Should(BeFalse())
@@ -456,7 +514,7 @@ var _ = Describe("LiveStage", func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 				defer cancel()
 
-				err := stage.verifyGitHubApp(ctx)
+				_, err := stage.verifyGitHubApp(ctx)
 				Expect(errors.Is(err, context.DeadlineExceeded)).Should(BeTrue())
 				Expect(err).Should(MatchError(ContainSubstring("waiting for GitHub App cluster-app installation")))
 			})
@@ -479,7 +537,8 @@ var _ = Describe("LiveStage", func() {
 				githubAppPollInterval = time.Millisecond
 				defer func() { githubAppPollInterval = previous }()
 
-				Expect(stage.verifyGitHubApp(context.Background())).Should(Succeed())
+				_, err := stage.verifyGitHubApp(context.Background())
+				Expect(err).ShouldNot(HaveOccurred())
 				Expect(provider.calls).Should(Equal(3))
 				Expect(out.String()).ShouldNot(ContainSubstring("502 Bad Gateway"))
 				Expect(out.String()).ShouldNot(ContainSubstring("Still waiting"))
@@ -490,7 +549,7 @@ var _ = Describe("LiveStage", func() {
 			It("should report the latest failure at the status interval", func() {
 				required := appInstallationRequired()
 				provider := &githubAppProviderStub{errs: []error{required}, err: errors.New("502 Bad Gateway")}
-				out := &bytes.Buffer{}
+				out := &syncBuffer{}
 				stage := &LiveStage{
 					Provider:    provider,
 					Clients:     &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
@@ -506,14 +565,113 @@ var _ = Describe("LiveStage", func() {
 					githubAppPollInterval = previousPoll
 					githubAppStatusInterval = previousStatus
 				}()
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() {
+					_, err := stage.verifyGitHubApp(ctx)
+					done <- err
+				}()
+
+				Eventually(out.String, 2*time.Second, 5*time.Millisecond).Should(ContainSubstring("Still waiting for GitHub App cluster-app installation"))
+				Eventually(out.String, 2*time.Second, 5*time.Millisecond).Should(ContainSubstring("last check: 502 Bad Gateway"))
+				cancel()
+				var err error
+				Eventually(func() bool {
+					select {
+					case err = <-done:
+						return true
+					default:
+						return false
+					}
+				}, time.Second, 5*time.Millisecond).Should(BeTrue())
+				Expect(errors.Is(err, context.Canceled)).Should(BeTrue())
+			})
+		})
+
+		When("a check outlives the status interval", func() {
+			It("should report progress while the check is still running", func() {
+				required := appInstallationRequired()
+				release := make(chan struct{})
+				defer func() {
+					select {
+					case <-release:
+					default:
+						close(release)
+					}
+				}()
+				provider := &githubAppProviderStub{verify: func(call int) error {
+					if call == 1 {
+						return required
+					}
+					<-release
+					return nil
+				}}
+				out := &syncBuffer{}
+				stage := &LiveStage{
+					Provider:    provider,
+					Clients:     &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
+					Interactive: true,
+					Out:         out,
+					OpenURL:     func(string) error { return nil },
+					Log:         &bytes.Buffer{},
+				}
+				previousPoll, previousStatus := githubAppPollInterval, githubAppStatusInterval
+				githubAppPollInterval = time.Millisecond
+				githubAppStatusInterval = 5 * time.Millisecond
+				defer func() {
+					githubAppPollInterval = previousPoll
+					githubAppStatusInterval = previousStatus
+				}()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				done := make(chan error, 1)
+				go func() {
+					_, err := stage.verifyGitHubApp(ctx)
+					done <- err
+				}()
+
+				Eventually(out.String, 2*time.Second, 5*time.Millisecond).Should(ContainSubstring("Still waiting for GitHub App cluster-app installation"))
+				close(release)
+				Eventually(done, 2*time.Second).Should(Receive(BeNil()))
+			})
+		})
+
+		When("the installation excludes the fixture repository", func() {
+			It("should fail without retrying the check", func() {
+				required := appInstallationRequired()
+				selection := &providers.AppRepositorySelectionError{
+					AppSlug:     "cluster-app",
+					Owner:       "redhat-appstudio-qe",
+					Repository:  "redhat-appstudio-qe/dr_test_mathwizz",
+					SettingsURL: "https://github.com/organizations/redhat-appstudio-qe/settings/installations/7",
+				}
+				provider := &githubAppProviderStub{verify: func(call int) error {
+					if call == 1 {
+						return required
+					}
+					return selection
+				}}
+				stage := &LiveStage{
+					Provider:      provider,
+					Clients:       &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
+					Interactive:   true,
+					ParentContext: context.Background(),
+					Out:           &bytes.Buffer{},
+					OpenURL:       func(string) error { return nil },
+					Log:           &bytes.Buffer{},
+				}
+				previous := githubAppPollInterval
+				githubAppPollInterval = time.Millisecond
+				defer func() { githubAppPollInterval = previous }()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 
-				err := stage.verifyGitHubApp(ctx)
-				Expect(errors.Is(err, context.DeadlineExceeded)).Should(BeTrue())
-				Expect(err).Should(MatchError(ContainSubstring("last check: 502 Bad Gateway")))
-				Expect(out.String()).Should(ContainSubstring("Still waiting for GitHub App cluster-app installation"))
-				Expect(out.String()).Should(ContainSubstring("last check: 502 Bad Gateway"))
+				_, err := stage.verifyGitHubApp(ctx)
+				var got *providers.AppRepositorySelectionError
+				Expect(errors.As(err, &got)).Should(BeTrue())
+				Expect(err).Should(MatchError(ContainSubstring("not for redhat-appstudio-qe/dr_test_mathwizz")))
+				Expect(provider.calls).Should(Equal(2))
 			})
 		})
 
@@ -545,16 +703,18 @@ var _ = Describe("LiveStage", func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 				defer cancel()
 
-				Expect(stage.verifyGitHubApp(ctx)).Should(Succeed())
+				verification, err := stage.verifyGitHubApp(ctx)
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(verification.Verified).Should(BeTrue())
+				Expect(verification.Context).Should(Equal(stage.ParentContext))
 				Expect(prompt.calls).Should(Equal(1))
 				Expect(prompt.messages[0]).Should(ContainSubstring("GitHub App cluster-app is still not installed. Keep waiting?"))
 				Expect(out.String()).Should(ContainSubstring("continuing to wait for GitHub App cluster-app installation"))
-				Expect(out.String()).Should(ContainSubstring("GitHub App cluster-app installation verified"))
 			})
 		})
 
 		When("the installation appears after the preflight deadline but the wait is declined", func() {
-			It("should fail with the deadline error", func() {
+			It("should fail with the deadline error and installation URL", func() {
 				required := appInstallationRequired()
 				provider := &githubAppProviderStub{err: required}
 				prompt := &confirmationStub{}
@@ -574,11 +734,102 @@ var _ = Describe("LiveStage", func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 				defer cancel()
 
-				err := stage.verifyGitHubApp(ctx)
+				_, err := stage.verifyGitHubApp(ctx)
 				Expect(errors.Is(err, context.DeadlineExceeded)).Should(BeTrue())
+				Expect(err).Should(MatchError(ContainSubstring(required.InstallURL)))
 				Expect(prompt.calls).Should(Equal(1))
 			})
 		})
+
+		When("the installation appears but its repository selection cannot be verified", func() {
+			It("should warn without claiming the installation was verified", func() {
+				required := appInstallationRequired()
+				provider := &githubAppProviderStub{verify: func(call int) error {
+					if call == 1 {
+						return required
+					}
+					return fmt.Errorf("%w: selected repositories", providers.ErrUnverifiable)
+				}}
+				out := &bytes.Buffer{}
+				stage := &LiveStage{
+					Provider:      provider,
+					Clients:       &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
+					Interactive:   true,
+					ParentContext: context.Background(),
+					Out:           out,
+					OpenURL:       func(string) error { return nil },
+					Log:           &bytes.Buffer{},
+				}
+				previous := githubAppPollInterval
+				githubAppPollInterval = time.Millisecond
+				defer func() { githubAppPollInterval = previous }()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
+				verification, err := stage.verifyGitHubApp(ctx)
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(verification.Verified).Should(BeFalse())
+				Expect(out.String()).Should(ContainSubstring("warning:"))
+				Expect(out.String()).ShouldNot(ContainSubstring("installation verified"))
+			})
+		})
+
+		When("the installation is approved after the preflight deadline", func() {
+			It("should continue preflight through namespace discovery on the live context", func() {
+				required := appInstallationRequired()
+				installed := false
+				provider := &githubAppProviderStub{verify: func(int) error {
+					if installed {
+						return nil
+					}
+					return required
+				}}
+				prompt := &confirmationStub{approved: true, onConfirm: func() { installed = true }}
+				dynamic := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+				out := &bytes.Buffer{}
+				stage := &LiveStage{
+					Request: config.Request{
+						Provider:        config.ProviderGitHub,
+						ClusterServer:   "https://api.example",
+						TenantNamespace: "tenant",
+					},
+					Provider:         provider,
+					Clients:          &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app")), Dynamic: dynamic},
+					PreflightCluster: fakePreflightCluster{server: "https://api.example"},
+					Interactive:      true,
+					Prompt:           prompt,
+					ParentContext:    context.Background(),
+					Namespace:        cleanup.NamespaceService{Dynamic: dynamic, NameLister: contextCheckingLister{}},
+					Out:              out,
+					OpenURL:          func(string) error { return nil },
+					Log:              &bytes.Buffer{},
+				}
+				previous := githubAppPollInterval
+				githubAppPollInterval = time.Millisecond
+				defer func() { githubAppPollInterval = previous }()
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+				manifest := &model.RunManifest{RunID: "run-1"}
+
+				Expect(stage.Preflight(ctx, manifest)).Should(Succeed())
+				Expect(prompt.calls).Should(Equal(1))
+				Expect(out.String()).Should(ContainSubstring("GitHub App cluster-app installation verified"))
+				Expect(manifest.TargetClusterServer).Should(Equal("https://api.example"))
+			})
+		})
+	})
+
+	It("does not wait for the browser opener to exit", func() {
+		directory := GinkgoT().TempDir()
+		for _, name := range []string{"xdg-open", "open"} {
+			script := filepath.Join(directory, name)
+			Expect(os.WriteFile(script, []byte("#!/bin/sh\nsleep 3\n"), 0o755)).Should(Succeed())
+		}
+		GinkgoT().Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		start := time.Now()
+		Expect(openBrowser("https://github.com/apps/cluster-app/installations/new")).Should(Succeed())
+		Expect(time.Since(start)).Should(BeNumerically("<", time.Second))
 	})
 
 	It("persists the tenant namespace and ephemeral flag when fixture setup fails", func() {

@@ -210,9 +210,11 @@ failure, is reported every 5 minutes. When the preflight timeout expires, an
 interactive run asks whether to keep waiting and, if approved, polls on the run
 context until the installation appears or the run is canceled.
 Declining, or a non-interactive run, fails with the installation URL.
-Installations limited to selected repositories must include the fixture,
-and the error names the installation settings URL; when the token cannot list
-selections, preflight logs a warning and continues.
+Installations limited to selected repositories must include the fixture;
+a confirmed selection that omits it fails the wait immediately with the
+installation settings URL, while selections the token cannot list log a
+warning and continue. After an approved wait that outlives the preflight
+deadline, the remaining preflight steps continue on the run context.
 
 ### Provider Credential Lifecycle
 When `GITHUB_TOKEN` is empty, GitHub runs call `gh auth login --web` with a
@@ -221,9 +223,11 @@ private `GH_CONFIG_DIR` and `--insecure-storage`, then read the token with
 both the OAuth token from glab's Web login and a `GITLAB_BOT_TOKEN` access
 token; GitLab rejects OAuth tokens sent as `PRIVATE-TOKEN`. A configured
 `GITHUB_TOKEN` is checked against the organization's App
-installations; an interactive run replaces a token that cannot list them with
-the token from the existing `gh` login when it can list them, and otherwise
-with the `gh` browser login. When `GITLAB_BOT_TOKEN` is empty, GitLab runs
+installations and the fixture repository's push permission; an interactive run
+replaces a token that fails those checks for credential reasons with
+the token from the existing `gh` login when it passes them, and otherwise
+with the `gh` browser login. Transient, rate-limit, and timeout check failures
+abort the run without replacing the token. When `GITLAB_BOT_TOKEN` is empty, GitLab runs
 `glab auth login` (choose Web) with a private `GLAB_CONFIG_DIR`, then reads the
 token with `glab config get token --host`; the glab directory stays in the
 store so `glab api user` can refresh the OAuth token before each cluster. Each

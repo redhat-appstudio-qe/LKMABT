@@ -145,6 +145,51 @@ var _ = Describe("CheckOrganizationAccess", func() {
 	})
 })
 
+var _ = Describe("CheckFixtureWriteAccess", func() {
+	It("passes when the token can push to the fixture", func() {
+		client := &fakeClient{repository: &gh.Repository{Name: gh.String("dr_test_mathwizz"), Permissions: map[string]bool{"push": true}}}
+
+		Expect(New(client).CheckFixtureWriteAccess(context.Background())).Should(Succeed())
+		Expect(client.getCalls).Should(Equal(1))
+	})
+
+	It("rejects a token without push permission", func() {
+		client := &fakeClient{repository: &gh.Repository{Name: gh.String("dr_test_mathwizz"), Permissions: map[string]bool{"pull": true}}}
+
+		err := New(client).CheckFixtureWriteAccess(context.Background())
+		Expect(err).Should(MatchError(ContainSubstring("cannot push to " + CanonicalFixtureURL)))
+		Expect(errors.Is(err, providers.ErrInsufficientGitHubAccess)).Should(BeTrue())
+	})
+
+	It("rejects a credential GitHub refuses", func() {
+		client := &fakeClient{getRepositoryErrors: []error{&gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusForbidden}}}}
+
+		err := New(client).CheckFixtureWriteAccess(context.Background())
+		Expect(errors.Is(err, providers.ErrInsufficientGitHubAccess)).Should(BeTrue())
+	})
+
+	It("retries a transient server failure without rejecting the credential", func() {
+		client := &fakeClient{
+			repository:          &gh.Repository{Name: gh.String("dr_test_mathwizz"), Permissions: map[string]bool{"push": true}},
+			getRepositoryErrors: []error{&gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusBadGateway}}},
+		}
+		adapter := NewWithRetry(client, providers.RetryPolicy{MaxRetries: 3, Sleep: func(context.Context, time.Duration) error { return nil }})
+
+		err := adapter.CheckFixtureWriteAccess(context.Background())
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(client.getCalls).Should(Equal(2))
+	})
+
+	It("does not reject the credential on a rate limit", func() {
+		client := &fakeClient{installationErr: &gh.RateLimitError{}}
+		adapter := New(client)
+
+		err := adapter.CheckOrganizationAccess(context.Background())
+		Expect(err).Should(MatchError(ContainSubstring("list GitHub App installations")))
+		Expect(errors.Is(err, providers.ErrInsufficientGitHubAccess)).Should(BeFalse())
+	})
+})
+
 var _ = Describe("VerifyGitHubAppInstallation", func() {
 	When("the cluster app is installed for all repositories", func() {
 		It("should pass", func() {
@@ -189,6 +234,8 @@ var _ = Describe("VerifyGitHubAppInstallation", func() {
 			err := New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")
 			Expect(err).Should(MatchError(ContainSubstring("not for redhat-appstudio-qe/dr_test_mathwizz")))
 			Expect(err.Error()).Should(ContainSubstring("https://github.com/organizations/redhat-appstudio-qe/settings/installations/7"))
+			var selection *providers.AppRepositorySelectionError
+			Expect(errors.As(err, &selection)).Should(BeTrue())
 		})
 
 		It("should fail when the selected repositories cannot be listed", func() {

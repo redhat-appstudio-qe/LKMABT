@@ -17,6 +17,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	"github.com/redhat-appstudio/lkmabt/internal/providers/github"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
 )
@@ -33,9 +34,52 @@ var (
 		if err != nil {
 			return err
 		}
-		return adapter.CheckOrganizationAccess(ctx)
+		if err := adapter.CheckOrganizationAccess(ctx); err != nil {
+			return err
+		}
+		return adapter.CheckFixtureWriteAccess(ctx)
 	}
 )
+
+// githubAccessCheckTimeout bounds each pre-workflow GitHub credential check.
+var githubAccessCheckTimeout = 30 * time.Second
+
+// checkGitHubToken verifies, under a bounded context, that a token can list App
+// installations and update the fixture repository. It falls back to the existing
+// gh login and then to a browser login only when GitHub rejects the credential;
+// transient, rate-limit, timeout, and cancellation errors abort the run without
+// replacing a usable token.
+func checkGitHubToken(ctx context.Context, request *config.Request, console *Console) (needsLogin bool, err error) {
+	check := func(token string) error {
+		checkCtx, cancel := context.WithTimeout(ctx, githubAccessCheckTimeout)
+		defer cancel()
+		return checkGitHubAccess(checkCtx, token)
+	}
+	err = check(request.Credentials.GitHubToken)
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, providers.ErrInsufficientGitHubAccess) {
+		return false, fmt.Errorf("check the configured GitHub token: %w", err)
+	}
+	console.Printf("github: configured token cannot access the fixture repository: %v", err)
+	token, readErr := readExistingGitHubToken(ctx, clusterauth.ExecRunner{})
+	if readErr == nil {
+		checkErr := check(token)
+		switch {
+		case checkErr == nil:
+			console.Printf("github: using the existing gh login")
+			request.Credentials.GitHubToken = token
+			return false, nil
+		case !errors.Is(checkErr, providers.ErrInsufficientGitHubAccess):
+			return false, fmt.Errorf("check the existing gh login: %w", checkErr)
+		}
+		console.Printf("github: existing gh login is not usable: %v; starting the gh browser login", checkErr)
+		return true, nil
+	}
+	console.Printf("github: existing gh login is not usable: %v; starting the gh browser login", readErr)
+	return true, nil
+}
 
 type clusterRun struct {
 	Entry   clusterfile.Entry
@@ -54,20 +98,13 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 	githubTokenNeeded := providerNeedsGitHub(request.Provider) && strings.TrimSpace(request.Credentials.GitHubToken) == ""
 	gitlabTokenNeeded := providerNeedsGitLab(request.Provider) && strings.TrimSpace(request.Credentials.GitLabToken) == ""
 	if len(entries) > 0 && providerNeedsGitHub(request.Provider) && !githubTokenNeeded && console.Interactive() {
-		if err := checkGitHubAccess(ctx, request.Credentials.GitHubToken); err != nil {
-			console.Printf("github: configured token cannot list App installations: %v", err)
-			token, reuseErr := readExistingGitHubToken(ctx, clusterauth.ExecRunner{})
-			if reuseErr == nil {
-				reuseErr = checkGitHubAccess(ctx, token)
-			}
-			if reuseErr == nil {
-				console.Printf("github: using the existing gh login")
-				request.Credentials.GitHubToken = token
-			} else {
-				console.Printf("github: existing gh login is not usable: %v; starting the gh browser login", reuseErr)
-				request.Credentials.GitHubToken = ""
-				githubTokenNeeded = true
-			}
+		needsLogin, err := checkGitHubToken(ctx, &request, console)
+		if err != nil {
+			return err
+		}
+		if needsLogin {
+			request.Credentials.GitHubToken = ""
+			githubTokenNeeded = true
 		}
 	}
 	var (

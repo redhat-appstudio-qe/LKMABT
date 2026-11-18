@@ -20,6 +20,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
 )
 
@@ -693,7 +694,7 @@ var _ = Describe("RunClusters credential authentication", func() {
 			tempRoot := credentialTempRoot()
 			checkGitHubAccess = func(_ context.Context, token string) error {
 				Expect(token).Should(Equal("bad-token"))
-				return errors.New("404 Not Found")
+				return fmt.Errorf("%w: 404 Not Found", providers.ErrInsufficientGitHubAccess)
 			}
 
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})).Should(Succeed())
@@ -715,7 +716,7 @@ var _ = Describe("RunClusters credential authentication", func() {
 			}
 			checkGitHubAccess = func(_ context.Context, token string) error {
 				if token == "bad-token" {
-					return errors.New("404 Not Found")
+					return fmt.Errorf("%w: 404 Not Found", providers.ErrInsufficientGitHubAccess)
 				}
 				Expect(token).Should(Equal("existing-token"))
 				return nil
@@ -738,7 +739,9 @@ var _ = Describe("RunClusters credential authentication", func() {
 			readExistingGitHubToken = func(context.Context, clusterauth.CommandRunner) (string, error) {
 				return "existing-token", nil
 			}
-			checkGitHubAccess = func(context.Context, string) error { return errors.New("403 Forbidden") }
+			checkGitHubAccess = func(context.Context, string) error {
+				return fmt.Errorf("%w: 403 Forbidden", providers.ErrInsufficientGitHubAccess)
+			}
 
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: output, interactive: true})).Should(Succeed())
 
@@ -760,6 +763,42 @@ var _ = Describe("RunClusters credential authentication", func() {
 			Expect(defaultGitHubAuth.calls).Should(Equal(0))
 			Expect(runner.requests).Should(HaveLen(1))
 			Expect(runner.requests[0].Credentials.GitHubToken).Should(Equal("good-token"))
+		})
+	})
+
+	When("the GitHub access check fails transiently", func() {
+		It("should keep the configured token and skip the browser login", func() {
+			request, runner := runClustersFixture(1)
+			request.Credentials.GitHubToken = "good-token"
+			readAttempted := false
+			readExistingGitHubToken = func(context.Context, clusterauth.CommandRunner) (string, error) {
+				readAttempted = true
+				return "existing-token", nil
+			}
+			checkGitHubAccess = func(context.Context, string) error { return errors.New("502 Bad Gateway") }
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})
+			Expect(err).Should(MatchError(ContainSubstring("check the configured GitHub token")))
+			Expect(defaultGitHubAuth.calls).Should(Equal(0))
+			Expect(runner.requests).Should(BeEmpty())
+			Expect(readAttempted).Should(BeFalse())
+		})
+	})
+
+	When("the GitHub access check exceeds its deadline", func() {
+		It("should treat the timeout as a check failure instead of a rejected credential", func() {
+			request, runner := runClustersFixture(1)
+			request.Credentials.GitHubToken = "good-token"
+			checkGitHubAccess = func(ctx context.Context, _ string) error {
+				_, bounded := ctx.Deadline()
+				Expect(bounded).Should(BeTrue())
+				return context.DeadlineExceeded
+			}
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})
+			Expect(err).Should(MatchError(ContainSubstring("check the configured GitHub token")))
+			Expect(errors.Is(err, context.DeadlineExceeded)).Should(BeTrue())
+			Expect(defaultGitHubAuth.calls).Should(Equal(0))
 		})
 	})
 

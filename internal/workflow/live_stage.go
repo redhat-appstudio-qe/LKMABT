@@ -35,6 +35,7 @@ type LiveStage struct {
 	Request              config.Request
 	Clients              *cluster.ClientSet
 	RealCluster          *cluster.RealCluster
+	PreflightCluster     cluster.Cluster
 	Provider             providers.Provider
 	Source               providers.SourceRepository
 	Fixture              providers.FixtureRepository
@@ -87,13 +88,25 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 		ConfigMap:  cluster.MultiPlatformControllerConfigMap,
 		Platforms:  []string{"linux/amd64", "linux/arm64"},
 	}}
-	_, err := cluster.RunPreflight(ctx, s.RealCluster, spec)
+	preflightCluster := s.PreflightCluster
+	if preflightCluster == nil {
+		preflightCluster = s.RealCluster
+	}
+	_, err := cluster.RunPreflight(ctx, preflightCluster, spec)
 	if err != nil {
 		return err
 	}
 	if s.Request.Provider == config.ProviderGitHub {
-		if err := s.verifyGitHubApp(ctx); err != nil {
+		verification, err := s.verifyGitHubApp(ctx)
+		if err != nil {
 			return err
+		}
+		// An approved installation wait outlives the step deadline; continue
+		// with the live run context it reports so namespace discovery is not
+		// rejected by an already-expired context.
+		ctx = verification.Context
+		if verification.Verified {
+			s.notice("GitHub App %s installation verified", verification.Slug)
 		}
 	}
 	if err := s.ensureTenantNamespaceAvailable(ctx, manifest); err != nil {
@@ -103,38 +116,50 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 	return nil
 }
 
+// githubAppVerification reports the context remaining valid for preflight and
+// whether the installed App was actually verified.
+type githubAppVerification struct {
+	Context  context.Context
+	Slug     string
+	Verified bool
+}
+
 // verifyGitHubApp rejects clusters whose published GitHub App cannot onboard the fixture repository.
 // An interactive run opens the installation page and waits for an organization administrator to approve it.
-func (s *LiveStage) verifyGitHubApp(ctx context.Context) error {
+func (s *LiveStage) verifyGitHubApp(ctx context.Context) (githubAppVerification, error) {
+	result := githubAppVerification{Context: ctx}
 	if s.Clients == nil {
-		return fmt.Errorf("cluster clients are not initialized")
+		return result, fmt.Errorf("cluster clients are not initialized")
 	}
 	checker, ok := s.Provider.(cluster.GitHubAppChecker)
 	if !ok {
-		return fmt.Errorf("github provider does not support GitHub App verification")
+		return result, fmt.Errorf("github provider does not support GitHub App verification")
 	}
 	slug, err := cluster.VerifyGitHubAppOnboarding(ctx, s.Clients.Kubernetes, checker)
-	if err != nil {
-		var required *providers.AppInstallationRequiredError
-		switch {
-		case s.Interactive && errors.As(err, &required):
-			if err := s.waitForGitHubAppInstallation(ctx, checker, required); err != nil {
-				return err
-			}
-			slug = required.AppSlug
-		case errors.Is(err, providers.ErrUnverifiable):
-			s.notice("warning: %v", err)
-			return nil
-		default:
-			return err
-		}
+	if err == nil {
+		result.Slug, result.Verified = slug, true
+		return result, nil
 	}
-	s.notice("GitHub App %s installation verified", slug)
-	return nil
+	var required *providers.AppInstallationRequiredError
+	switch {
+	case s.Interactive && errors.As(err, &required):
+		wait, waitErr := s.waitForGitHubAppInstallation(ctx, checker, required)
+		if waitErr != nil {
+			return result, waitErr
+		}
+		wait.Slug = required.AppSlug
+		return wait, nil
+	case errors.Is(err, providers.ErrUnverifiable):
+		s.notice("warning: %v", err)
+		return result, nil
+	default:
+		return result, err
+	}
 }
 
 // waitForGitHubAppInstallation opens the App installation page and polls until an administrator installs it.
-func (s *LiveStage) waitForGitHubAppInstallation(ctx context.Context, checker cluster.GitHubAppChecker, required *providers.AppInstallationRequiredError) error {
+func (s *LiveStage) waitForGitHubAppInstallation(ctx context.Context, checker cluster.GitHubAppChecker, required *providers.AppInstallationRequiredError) (githubAppVerification, error) {
+	result := githubAppVerification{Context: ctx}
 	s.notice("GitHub App %s is not installed for organization %s.", required.AppSlug, required.Owner)
 	s.notice("LKMABT has already acquired its GitHub API token; the browser page only approves the organization installation.")
 	s.notice("LKMABT is opening the installation page in your browser:")
@@ -153,58 +178,93 @@ func (s *LiveStage) waitForGitHubAppInstallation(ctx context.Context, checker cl
 		s.notice("Could not open a browser: %v", err)
 		s.notice("Open the URL above manually.")
 	}
-	err := s.pollGitHubAppInstallation(ctx, checker, required)
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) || !s.Interactive || s.Prompt == nil {
-		return err
+	verified, err := s.pollGitHubAppInstallation(ctx, checker, required)
+	if err != nil {
+		if !errors.Is(err, context.DeadlineExceeded) || !s.Interactive || s.Prompt == nil {
+			return result, err
+		}
+		// The preflight deadline belongs to the step context; keep waiting on the
+		// run context so Ctrl-C still ends the wait.
+		waitContext := s.ParentContext
+		if waitContext == nil || waitContext.Err() != nil {
+			return result, err
+		}
+		keepWaiting, promptErr := s.Prompt.Confirm(waitContext, fmt.Sprintf("GitHub App %s is still not installed. Keep waiting?", required.AppSlug))
+		if promptErr != nil {
+			return result, errors.Join(err, fmt.Errorf("confirm keeping the installation wait: %w", promptErr))
+		}
+		if !keepWaiting {
+			return result, err
+		}
+		s.notice("continuing to wait for GitHub App %s installation; press Ctrl-C to cancel", required.AppSlug)
+		verified, err = s.pollGitHubAppInstallation(waitContext, checker, required)
+		if err != nil {
+			return result, err
+		}
+		result.Context = waitContext
 	}
-	// The preflight deadline belongs to the step context; keep waiting on the
-	// run context so Ctrl-C still ends the wait.
-	waitContext := s.ParentContext
-	if waitContext == nil || waitContext.Err() != nil {
-		return err
-	}
-	keepWaiting, promptErr := s.Prompt.Confirm(waitContext, fmt.Sprintf("GitHub App %s is still not installed. Keep waiting?", required.AppSlug))
-	if promptErr != nil {
-		return errors.Join(err, fmt.Errorf("confirm keeping the installation wait: %w", promptErr))
-	}
-	if !keepWaiting {
-		return err
-	}
-	s.notice("continuing to wait for GitHub App %s installation; press Ctrl-C to cancel", required.AppSlug)
-	return s.pollGitHubAppInstallation(waitContext, checker, required)
+	result.Verified = verified
+	return result, nil
 }
 
 // pollGitHubAppInstallation checks the installation every interval and retries
-// check failures until the context ends. Progress, including the latest check
-// failure, is reported at most every status interval.
-func (s *LiveStage) pollGitHubAppInstallation(ctx context.Context, checker cluster.GitHubAppChecker, required *providers.AppInstallationRequiredError) error {
-	ticker := time.NewTicker(githubAppPollInterval)
-	defer ticker.Stop()
+// check failures until the context ends. Checks run in the background so
+// progress, including the latest check failure, is reported at most every
+// status interval even while a check is pending.
+func (s *LiveStage) pollGitHubAppInstallation(ctx context.Context, checker cluster.GitHubAppChecker, required *providers.AppInstallationRequiredError) (bool, error) {
+	pollTicker := time.NewTicker(githubAppPollInterval)
+	defer pollTicker.Stop()
 	statusTicker := time.NewTicker(githubAppStatusInterval)
 	defer statusTicker.Stop()
 	started := time.Now()
 	var lastCheckError string
+
+	checkContext, cancelCheck := context.WithCancel(ctx)
+	defer cancelCheck()
+	results := make(chan error, 1)
+	checking := false
+	startCheck := func() {
+		checking = true
+		go func() {
+			results <- checker.VerifyGitHubAppInstallation(checkContext, required.AppSlug)
+		}()
+	}
+	waitError := func(err error) error {
+		if lastCheckError != "" {
+			return fmt.Errorf("%w: waiting for GitHub App %s installation in %s: %w (last check: %s)", required, required.AppSlug, required.Owner, err, lastCheckError)
+		}
+		return fmt.Errorf("%w: waiting for GitHub App %s installation in %s: %w", required, required.AppSlug, required.Owner, err)
+	}
+	startCheck()
 	for {
 		select {
 		case <-ctx.Done():
-			if lastCheckError != "" {
-				return fmt.Errorf("waiting for GitHub App %s installation in %s: %w (last check: %s)", required.AppSlug, required.Owner, ctx.Err(), lastCheckError)
-			}
-			return fmt.Errorf("waiting for GitHub App %s installation in %s: %w", required.AppSlug, required.Owner, ctx.Err())
+			return false, waitError(ctx.Err())
 		case <-statusTicker.C:
 			if lastCheckError != "" {
 				s.notice("Still waiting for GitHub App %s installation after %s; last check: %s", required.AppSlug, time.Since(started).Round(time.Second), lastCheckError)
 				continue
 			}
 			s.notice("Still waiting for GitHub App %s installation after %s; install it from %s", required.AppSlug, time.Since(started).Round(time.Second), required.InstallURL)
-		case <-ticker.C:
-			err := checker.VerifyGitHubAppInstallation(ctx, required.AppSlug)
+		case <-pollTicker.C:
+			if !checking {
+				startCheck()
+			}
+		case err := <-results:
+			checking = false
+			if ctx.Err() != nil {
+				return false, waitError(ctx.Err())
+			}
 			if err == nil {
-				return nil
+				return true, nil
 			}
 			if errors.Is(err, providers.ErrUnverifiable) {
 				s.notice("warning: %v", err)
-				return nil
+				return false, nil
+			}
+			var selection *providers.AppRepositorySelectionError
+			if errors.As(err, &selection) {
+				return false, err
 			}
 			var pending *providers.AppInstallationRequiredError
 			if errors.As(err, &pending) {
@@ -227,13 +287,20 @@ func (s *LiveStage) notice(format string, args ...any) {
 	}
 }
 
-// openBrowser opens rawURL with the platform's default browser.
+// openBrowser starts the platform's default browser opener and returns without
+// waiting for it to exit; xdg-open can live as long as the opened application.
 func openBrowser(rawURL string) error {
 	name := "xdg-open"
 	if runtime.GOOS == "darwin" {
 		name = "open"
 	}
-	return exec.Command(name, rawURL).Run()
+	command := exec.Command(name, rawURL)
+	command.Stdout = io.Discard
+	command.Stderr = io.Discard
+	if err := command.Start(); err != nil {
+		return err
+	}
+	return command.Process.Release()
 }
 
 // EnsureFixture validates the provider fixture and records its tenant resources in the manifest.

@@ -71,25 +71,29 @@ resources.
    preflight timeout expires, the run asks whether to keep waiting. Declining,
    or a non-interactive run, fails that cluster with the installation URL. An
    app installed for selected repositories must include the fixture repository;
-   the error names the installation settings URL. When the token cannot list
-   installation repositories, preflight logs a warning and continues; the
-   trigger-stage PaC wait remains the backstop for a missing selection.
+   the check fails immediately with the installation settings URL when it does
+   not. When the token cannot list installation repositories, preflight logs a
+   warning and continues; the trigger-stage PaC wait remains the backstop for a
+   missing selection.
 8. Provider credentials come from `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` when
    set. Leave either empty to authenticate at run time: GitHub uses
    `gh auth login` (browser; requests `repo`, `read:org`, and `read:user`) and
    GitLab uses `glab auth login` (choose **Web** in its sign-in menu). Both
    `gh` and `glab` must be on `PATH` when the corresponding token is empty. A
    configured `GITHUB_TOKEN` is checked against the organization's App
-   installations; in an interactive session, a token that cannot list them is
-   replaced by the existing `gh` login when that token can list them, and
-   otherwise falls back to the `gh` browser login. Interactive GitLab login is
+   installations and the fixture repository's push permission; in an
+   interactive session, a token that cannot access them is replaced by the
+   existing `gh` login when that login can, and otherwise falls back to the
+   `gh` browser login. Transient, rate-limit, and timeout check failures abort
+   the run without replacing the token. Interactive GitLab login is
    supported for `gitlab.com`; set `GITLAB_BOT_TOKEN` for self-managed
    instances, custom ports, or HTTP endpoints. Run-scoped tokens live in a
    private temporary directory, are reused for every cluster, and are deleted
    when the last cluster finishes, including on failure. The ephemeral GitLab
    token is also written to the tenant SCM Secret for PaC; that Secret is
-   deleted during finalization. A configured `GITHUB_TOKEN` needs `read:org`
-   and an owner who administers the fixture organization.
+   deleted during finalization. A configured `GITHUB_TOKEN` needs `read:org`,
+   an owner who administers the fixture organization, and push access to the
+   fixture repository.
 9. PaC onboarding must be complete for all three components, with current
    `.tekton` configuration available on each fixture's default branch. The
    harness waits for PaC readiness before writing trigger comments and does not
@@ -136,9 +140,12 @@ After failure, it saves and verifies required artifacts before prompting.
 Copy `.lkmabt.env.example` to `.lkmabt.env`. Keep the copy local.
 `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` are optional. Leave either empty to
 authenticate at run time: GitHub opens the `gh` browser flow; GitLab opens the
-`glab` login prompt (choose **Web**). A configured `GITHUB_TOKEN` is validated;
-when it cannot list App installations, an interactive run reuses the existing
-`gh` login if it can list them, then falls back to the `gh` browser flow. Each
+`glab` login prompt (choose **Web**). A configured `GITHUB_TOKEN` is validated
+for App-installation listing and fixture push access; when it fails for
+credential reasons, an interactive run reuses the existing `gh` login if that
+login passes the same checks, then falls back to the `gh` browser flow.
+Transient check failures, rate limits, and timeouts fail the run instead of
+replacing the token. Each
 run-scoped token is written to a private temporary directory (`0600` file),
 reused for every cluster, and deleted when the last cluster finishes, including
 on failure. The ephemeral GitLab token is also placed in the tenant SCM Secret
