@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -20,11 +22,11 @@ const (
 
 type client interface {
 	// GetRepository looks up a repository by owner and name.
-	GetRepository(string, string) (*gh.Repository, error)
+	GetRepository(context.Context, string, string) (*gh.Repository, error)
 	// GetFile reads a repository path at the requested branch.
-	GetFile(string, string, string, string) (*gh.RepositoryContent, error)
+	GetFile(context.Context, string, string, string, string) (*gh.RepositoryContent, error)
 	// UpdateFile commits replacement content using the current file SHA.
-	UpdateFile(string, string, string, string, string, string) (*gh.RepositoryContentResponse, error)
+	UpdateFile(context.Context, string, string, string, string, string, string) (*gh.RepositoryContentResponse, error)
 	// ListOrganizationInstallations lists the GitHub App installations for an organization.
 	ListOrganizationInstallations(context.Context, string) ([]*gh.Installation, error)
 	// ListUserInstallationRepositories lists the repositories the token can see for an installation.
@@ -34,14 +36,14 @@ type client interface {
 type apiClient struct{ client *gh.Client }
 
 // GetRepository fetches a repository from the GitHub API.
-func (c apiClient) GetRepository(owner, name string) (*gh.Repository, error) {
-	repository, _, err := c.client.Repositories.Get(context.Background(), owner, name)
+func (c apiClient) GetRepository(ctx context.Context, owner, name string) (*gh.Repository, error) {
+	repository, _, err := c.client.Repositories.Get(ctx, owner, name)
 	return repository, err
 }
 
 // GetFile fetches a file from the requested GitHub repository branch.
-func (c apiClient) GetFile(owner, name, path, branch string) (*gh.RepositoryContent, error) {
-	file, _, _, err := c.client.Repositories.GetContents(context.Background(), owner, name, path, &gh.RepositoryContentGetOptions{Ref: branch})
+func (c apiClient) GetFile(ctx context.Context, owner, name, path, branch string) (*gh.RepositoryContent, error) {
+	file, _, _, err := c.client.Repositories.GetContents(ctx, owner, name, path, &gh.RepositoryContentGetOptions{Ref: branch})
 	if err != nil {
 		return nil, err
 	}
@@ -52,9 +54,9 @@ func (c apiClient) GetFile(owner, name, path, branch string) (*gh.RepositoryCont
 }
 
 // UpdateFile commits content to a GitHub repository using the supplied file SHA.
-func (c apiClient) UpdateFile(owner, name, path, content, branch, sha string) (*gh.RepositoryContentResponse, error) {
+func (c apiClient) UpdateFile(ctx context.Context, owner, name, path, content, branch, sha string) (*gh.RepositoryContentResponse, error) {
 	message := "lkmabt trigger"
-	response, _, err := c.client.Repositories.UpdateFile(context.Background(), owner, name, path, &gh.RepositoryContentFileOptions{Message: &message, Content: []byte(content), Branch: &branch, SHA: &sha})
+	response, _, err := c.client.Repositories.UpdateFile(ctx, owner, name, path, &gh.RepositoryContentFileOptions{Message: &message, Content: []byte(content), Branch: &branch, SHA: &sha})
 	return response, err
 }
 
@@ -133,7 +135,7 @@ func (a *Adapter) ValidateFixture(ctx context.Context, fixture providers.Fixture
 	var repository *gh.Repository
 	err := providers.RetryOn5xx(ctx, a.retry, func() error {
 		var err error
-		repository, err = a.client.GetRepository(canonicalOwner, canonicalName)
+		repository, err = a.client.GetRepository(ctx, canonicalOwner, canonicalName)
 		return err
 	}, isGitHub5xx)
 	if err != nil {
@@ -143,6 +145,66 @@ func (a *Adapter) ValidateFixture(ctx context.Context, fixture providers.Fixture
 		return providers.FixtureRepository{}, fmt.Errorf("github API returned unexpected fixture identity")
 	}
 	return providers.FixtureRepository{Owner: canonicalOwner, Name: canonicalName, URL: CanonicalFixtureURL}, nil
+}
+
+// CheckOrganizationAccess confirms the token can list App installations for the fixture organization.
+func (a *Adapter) CheckOrganizationAccess(ctx context.Context) error {
+	if a == nil || a.client == nil {
+		return fmt.Errorf("github client is required")
+	}
+	if _, err := a.client.ListOrganizationInstallations(ctx, canonicalOwner); err != nil {
+		if isAccessRejection(err) {
+			return fmt.Errorf("%w: list GitHub App installations for %s: %v (the GitHub token needs the read:org scope and an owner who administers the organization)", providers.ErrInsufficientGitHubAccess, canonicalOwner, err)
+		}
+		return fmt.Errorf("list GitHub App installations for %s: %w", canonicalOwner, err)
+	}
+	return nil
+}
+
+// CheckFixtureWriteAccess confirms the token can update the canonical fixture repository,
+// which the run requires before it commits build triggers.
+func (a *Adapter) CheckFixtureWriteAccess(ctx context.Context) error {
+	if a == nil || a.client == nil {
+		return fmt.Errorf("github client is required")
+	}
+	var repository *gh.Repository
+	err := providers.RetryOn5xx(ctx, a.retry, func() error {
+		var err error
+		repository, err = a.client.GetRepository(ctx, canonicalOwner, canonicalName)
+		return err
+	}, isGitHub5xx)
+	if err != nil {
+		if isAccessRejection(err) {
+			return fmt.Errorf("%w: read %s: %v", providers.ErrInsufficientGitHubAccess, CanonicalFixtureURL, err)
+		}
+		return fmt.Errorf("read %s: %w", CanonicalFixtureURL, err)
+	}
+	if !repository.GetPermissions()["push"] {
+		return fmt.Errorf("%w: the GitHub token cannot push to %s, which is required to trigger builds; use a token with the repo scope or sign in with gh", providers.ErrInsufficientGitHubAccess, CanonicalFixtureURL)
+	}
+	return nil
+}
+
+// isAccessRejection reports whether err establishes that GitHub rejected the
+// credential itself. Rate limits, 5xx responses, and context errors are
+// transient and never justify replacing the token.
+func isAccessRejection(err error) bool {
+	var rateLimit *gh.RateLimitError
+	if errors.As(err, &rateLimit) {
+		return false
+	}
+	var abuse *gh.AbuseRateLimitError
+	if errors.As(err, &abuse) {
+		return false
+	}
+	var response *gh.ErrorResponse
+	if errors.As(err, &response) && response.Response != nil {
+		switch response.Response.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+			return true
+		}
+	}
+	return false
 }
 
 // VerifyGitHubAppInstallation confirms the cluster GitHub App can onboard the canonical fixture repository.
@@ -163,7 +225,17 @@ func (a *Adapter) VerifyGitHubAppInstallation(ctx context.Context, appSlug strin
 			return verifyGitHubAppRepositories(ctx, a.client, installation, appSlug)
 		}
 	}
-	return fmt.Errorf("GitHub App %s is not installed for organization %s; install it from https://github.com/apps/%s/installations/new or omit this cluster from GitHub runs", appSlug, canonicalOwner, appSlug)
+	return &providers.AppInstallationRequiredError{
+		AppSlug:    appSlug,
+		Owner:      canonicalOwner,
+		Repository: canonicalOwner + "/" + canonicalName,
+		InstallURL: fmt.Sprintf("https://github.com/apps/%s/installations/new", url.PathEscape(appSlug)),
+	}
+}
+
+// installationSettingsURL returns the organization page that manages an installation's repositories.
+func installationSettingsURL(installation *gh.Installation) string {
+	return fmt.Sprintf("https://github.com/organizations/%s/settings/installations/%d", canonicalOwner, installation.GetID())
 }
 
 // verifyGitHubAppRepositories rejects installations that cannot reach the fixture repository.
@@ -184,7 +256,12 @@ func verifyGitHubAppRepositories(ctx context.Context, client client, installatio
 				return nil
 			}
 		}
-		return fmt.Errorf("GitHub App %s is installed for selected repositories in %s but not for %s/%s; add the repository to the installation or select all repositories", appSlug, canonicalOwner, canonicalOwner, canonicalName)
+		return &providers.AppRepositorySelectionError{
+			AppSlug:     appSlug,
+			Owner:       canonicalOwner,
+			Repository:  canonicalOwner + "/" + canonicalName,
+			SettingsURL: installationSettingsURL(installation),
+		}
 	default:
 		return fmt.Errorf("GitHub App %s installation in %s reports unknown repository selection %q", appSlug, canonicalOwner, installation.GetRepositorySelection())
 	}
@@ -195,7 +272,7 @@ func (a *Adapter) ReadFile(ctx context.Context, fixture providers.FixtureReposit
 	var file *gh.RepositoryContent
 	err := providers.RetryOn5xx(ctx, a.retry, func() error {
 		var err error
-		file, err = a.client.GetFile(fixture.Owner, fixture.Name, path, branch)
+		file, err = a.client.GetFile(ctx, fixture.Owner, fixture.Name, path, branch)
 		return err
 	}, isGitHub5xx)
 	if err != nil {
@@ -220,7 +297,7 @@ func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepos
 	var updated *gh.RepositoryContentResponse
 	err = providers.RetryOn5xx(ctx, a.retry, func() error {
 		var err error
-		updated, err = a.client.UpdateFile(fixture.Owner, fixture.Name, path, content, branch, expectedSHA)
+		updated, err = a.client.UpdateFile(ctx, fixture.Owner, fixture.Name, path, content, branch, expectedSHA)
 		return err
 	}, isGitHub5xx)
 	if err != nil {

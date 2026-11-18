@@ -92,7 +92,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/cluster/`** — Kubernetes interactions
 - `RealCluster` wraps k8s client-go operations
 - Preflight checks validate cluster prerequisites (multi-platform-controller deployment, host-config entries)
-- GitHub preflight reads the cluster's app slug from `konflux-info/konflux-public-info` and confirms that app is installed for the fixture organization
+- GitHub preflight reads the cluster's app slug from `konflux-info/konflux-public-info` and confirms that app is installed for the fixture organization; interactive runs open the installation page and wait until the installation appears
 - Build output verification confirms node evidence (Buildah outputs) match expected architectures
 
 **`internal/providers/`** — Git forge abstraction
@@ -144,7 +144,7 @@ definitions via import when the same GVR is needed across packages.
 
 ## Workflow Execution Flow
 
-1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries, and the cluster's GitHub App installation (GitHub runs)
+1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries, and the cluster's GitHub App installation (GitHub runs; interactive runs wait for and can extend a missing installation wait)
 2. **Fixture Ready** — Validate test repositories are accessible, read current Dockerfile SHAs
 3. **Triggered** — Append trigger comments to Dockerfiles, commit changes
 4. **Builds Verified** — Wait for PipelineRuns to succeed (timeout configurable)
@@ -200,20 +200,42 @@ Each Konflux cluster onboards repositories through its own GitHub App. The
 harness reads that app from `konflux-info/konflux-public-info` and verifies
 during `preflight` that the app is installed for the fixture organization, so a
 cluster that cannot onboard the fixture fails before the run creates a tenant
-namespace or touches the fixture. Installations limited to selected
-repositories must include the fixture; when the token cannot list selections,
-preflight logs a warning and continues.
+namespace or touches the fixture. In an interactive session, a missing
+installation prints the installation steps, opens
+`https://github.com/apps/<slug>/installations/new`, and rechecks the
+installation every 10 seconds. The GitHub API token is acquired earlier in the
+run; the browser page only performs the organization-owner installation
+approval. Failed checks are retried, and progress, including the latest
+failure, is reported every 5 minutes. When the preflight timeout expires, an
+interactive run asks whether to keep waiting and, if approved, polls on the run
+context until the installation appears or the run is canceled.
+Declining, or a non-interactive run, fails with the installation URL.
+Installations limited to selected repositories must include the fixture;
+a confirmed selection that omits it fails the wait immediately with the
+installation settings URL, while selections the token cannot list log a
+warning and continue. After an approved wait that outlives the preflight
+deadline, the remaining preflight steps continue on the run context.
 
 ### Provider Credential Lifecycle
 When `GITHUB_TOKEN` is empty, GitHub runs call `gh auth login --web` with a
 private `GH_CONFIG_DIR` and `--insecure-storage`, then read the token with
-`gh auth token`. When `GITLAB_BOT_TOKEN` is empty, GitLab runs `glab auth login`
-(choose Web) with a private `GLAB_CONFIG_DIR`, then reads the token with
-`glab config get token --host`; the glab directory stays in the store so
-`glab api user` can refresh the OAuth token before each cluster. Each acquired
-token is kept in a 0600 file inside one run-scoped `lkmabt-auth-*` temporary
-directory and reused for every cluster. The ephemeral GitLab token is also
-written to the tenant SCM Secret for PaC, and finalization deletes that Secret.
+`gh auth token`. GitLab API requests use `Authorization: Bearer`, which accepts
+both the OAuth token from glab's Web login and a `GITLAB_BOT_TOKEN` access
+token; GitLab rejects OAuth tokens sent as `PRIVATE-TOKEN`. A configured
+`GITHUB_TOKEN` is checked against the organization's App
+installations and the fixture repository's push permission; an interactive run
+replaces a token that fails those checks for credential reasons with
+the token from the existing `gh` login when it passes them, and otherwise
+with the `gh` browser login. Transient, rate-limit, and timeout check failures
+abort the run without replacing the token. When `GITLAB_BOT_TOKEN` is empty, GitLab runs
+`glab auth login` (choose Web) with a private `GLAB_CONFIG_DIR`, then reads the
+token with `glab config get token --host`; the glab directory stays in the
+store so `glab api user` can refresh the OAuth token before each cluster. Each
+acquired token is kept in a 0600 file inside one run-scoped `lkmabt-auth-*`
+temporary directory and reused for every cluster. The ephemeral GitLab token is
+also written to the tenant SCM Secret for PaC, and finalization deletes that
+Secret.
+
 The directory is removed when the run ends, including after failures and
 cancellations, and a removal failure fails the run. Authentication requires an
 interactive terminal; non-interactive runs must provide the tokens. A
@@ -238,15 +260,6 @@ The tool uses **persistent fixtures** rather than creating/deleting test resourc
 **Rationale**: avoids PaC onboarding delays, reduces flakiness from resource
 creation/deletion races, enables faster iteration during development.
 
-### Trigger Pattern from DR Suite
-Trigger logic is based on
-`infra-deployments/tests/disaster-recovery/tenant_application_lifecycle.go`:
-- Append timestamped comment to each component's Dockerfile
-- Commit through provider API
-- Wait for PaC-triggered PipelineRuns matching the exact commit SHA
-
-This pattern is proven reliable in the DR suite's periodic CI runs.
-
 ### Platform Detection Strategy
 Build output verification uses TaskRun labels, annotations, params, and results
 to determine platform. **No Pod/Node lookup** is performed:
@@ -267,14 +280,6 @@ rather than continuously:
 
 **Rationale**: reduces storage overhead for successful runs; redaction prevents
 accidental credential leakage in shared artifacts.
-
-## Relationship to Disaster Recovery Suite
-
-LKMABT extracts patterns from `infra-deployments/tests/disaster-recovery` but is
-not part of the DR e2e suite. It is a standalone local operator tool for
-validating multi-arch builds. Consult the DR suite's
-`tenant_application_lifecycle.go` for trigger pattern changes and collection
-helpers.
 
 ## Artifact Layout
 

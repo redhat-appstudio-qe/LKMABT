@@ -28,7 +28,7 @@ type fakeClient struct {
 }
 
 // GetRepository returns the configured fake repository or the next queued error.
-func (f *fakeClient) GetRepository(string, string) (*gh.Repository, error) {
+func (f *fakeClient) GetRepository(context.Context, string, string) (*gh.Repository, error) {
 	f.getCalls++
 	if len(f.getRepositoryErrors) > 0 {
 		err := f.getRepositoryErrors[0]
@@ -42,12 +42,12 @@ func (f *fakeClient) GetRepository(string, string) (*gh.Repository, error) {
 }
 
 // GetFile returns fixed encoded file content for provider tests.
-func (f *fakeClient) GetFile(string, string, string, string) (*gh.RepositoryContent, error) {
+func (f *fakeClient) GetFile(context.Context, string, string, string, string) (*gh.RepositoryContent, error) {
 	return &gh.RepositoryContent{SHA: gh.String("sha-1"), Content: gh.String("ZmlsZQ==")}, nil
 }
 
 // UpdateFile returns the next queued error or a fixed commit response.
-func (f *fakeClient) UpdateFile(string, string, string, string, string, string) (*gh.RepositoryContentResponse, error) {
+func (f *fakeClient) UpdateFile(context.Context, string, string, string, string, string, string) (*gh.RepositoryContentResponse, error) {
 	f.updateCalls++
 	if len(f.updateErrors) > 0 {
 		err := f.updateErrors[0]
@@ -126,6 +126,70 @@ var _ = Describe("GitHub provider", func() {
 	})
 })
 
+var _ = Describe("CheckOrganizationAccess", func() {
+	When("the token can list installations", func() {
+		It("should pass", func() {
+			client := &fakeClient{installations: []*gh.Installation{{AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("all")}}}
+
+			Expect(New(client).CheckOrganizationAccess(context.Background())).Should(Succeed())
+		})
+	})
+
+	When("the token cannot list installations", func() {
+		It("should return the API error", func() {
+			client := &fakeClient{installationErr: &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}}
+
+			err := New(client).CheckOrganizationAccess(context.Background())
+			Expect(err).Should(MatchError(ContainSubstring("list GitHub App installations for redhat-appstudio-qe")))
+		})
+	})
+})
+
+var _ = Describe("CheckFixtureWriteAccess", func() {
+	It("passes when the token can push to the fixture", func() {
+		client := &fakeClient{repository: &gh.Repository{Name: gh.String("dr_test_mathwizz"), Permissions: map[string]bool{"push": true}}}
+
+		Expect(New(client).CheckFixtureWriteAccess(context.Background())).Should(Succeed())
+		Expect(client.getCalls).Should(Equal(1))
+	})
+
+	It("rejects a token without push permission", func() {
+		client := &fakeClient{repository: &gh.Repository{Name: gh.String("dr_test_mathwizz"), Permissions: map[string]bool{"pull": true}}}
+
+		err := New(client).CheckFixtureWriteAccess(context.Background())
+		Expect(err).Should(MatchError(ContainSubstring("cannot push to " + CanonicalFixtureURL)))
+		Expect(errors.Is(err, providers.ErrInsufficientGitHubAccess)).Should(BeTrue())
+	})
+
+	It("rejects a credential GitHub refuses", func() {
+		client := &fakeClient{getRepositoryErrors: []error{&gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusForbidden}}}}
+
+		err := New(client).CheckFixtureWriteAccess(context.Background())
+		Expect(errors.Is(err, providers.ErrInsufficientGitHubAccess)).Should(BeTrue())
+	})
+
+	It("retries a transient server failure without rejecting the credential", func() {
+		client := &fakeClient{
+			repository:          &gh.Repository{Name: gh.String("dr_test_mathwizz"), Permissions: map[string]bool{"push": true}},
+			getRepositoryErrors: []error{&gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusBadGateway}}},
+		}
+		adapter := NewWithRetry(client, providers.RetryPolicy{MaxRetries: 3, Sleep: func(context.Context, time.Duration) error { return nil }})
+
+		err := adapter.CheckFixtureWriteAccess(context.Background())
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(client.getCalls).Should(Equal(2))
+	})
+
+	It("does not reject the credential on a rate limit", func() {
+		client := &fakeClient{installationErr: &gh.RateLimitError{}}
+		adapter := New(client)
+
+		err := adapter.CheckOrganizationAccess(context.Background())
+		Expect(err).Should(MatchError(ContainSubstring("list GitHub App installations")))
+		Expect(errors.Is(err, providers.ErrInsufficientGitHubAccess)).Should(BeFalse())
+	})
+})
+
 var _ = Describe("VerifyGitHubAppInstallation", func() {
 	When("the cluster app is installed for all repositories", func() {
 		It("should pass", func() {
@@ -136,12 +200,17 @@ var _ = Describe("VerifyGitHubAppInstallation", func() {
 	})
 
 	When("the cluster app is not installed in the fixture organization", func() {
-		It("should name the app and its installation URL", func() {
+		It("should return the typed installation error", func() {
 			client := &fakeClient{installations: []*gh.Installation{{AppSlug: gh.String("other-app"), RepositorySelection: gh.String("all")}}}
 
 			err := New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")
 			Expect(err).Should(MatchError(ContainSubstring("GitHub App cluster-app is not installed for organization redhat-appstudio-qe")))
-			Expect(err.Error()).Should(ContainSubstring("https://github.com/apps/cluster-app/installations/new"))
+			var required *providers.AppInstallationRequiredError
+			Expect(errors.As(err, &required)).Should(BeTrue())
+			Expect(required.AppSlug).Should(Equal("cluster-app"))
+			Expect(required.Owner).Should(Equal("redhat-appstudio-qe"))
+			Expect(required.Repository).Should(Equal("redhat-appstudio-qe/dr_test_mathwizz"))
+			Expect(required.InstallURL).Should(Equal("https://github.com/apps/cluster-app/installations/new"))
 		})
 	})
 
@@ -164,6 +233,9 @@ var _ = Describe("VerifyGitHubAppInstallation", func() {
 
 			err := New(client).VerifyGitHubAppInstallation(context.Background(), "cluster-app")
 			Expect(err).Should(MatchError(ContainSubstring("not for redhat-appstudio-qe/dr_test_mathwizz")))
+			Expect(err.Error()).Should(ContainSubstring("https://github.com/organizations/redhat-appstudio-qe/settings/installations/7"))
+			var selection *providers.AppRepositorySelectionError
+			Expect(errors.As(err, &selection)).Should(BeTrue())
 		})
 
 		It("should fail when the selected repositories cannot be listed", func() {

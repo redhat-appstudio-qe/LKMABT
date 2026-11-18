@@ -13,6 +13,38 @@ import (
 // the available credentials.
 var ErrUnverifiable = errors.New("cluster integration cannot be verified")
 
+// ErrInsufficientGitHubAccess marks a GitHub credential that GitHub rejected or
+// that lacks the fixture repository permissions LKMABT requires.
+var ErrInsufficientGitHubAccess = errors.New("GitHub credential cannot access the fixture organization or repository")
+
+// AppRepositorySelectionError reports a GitHub App installation that excludes
+// the fixture repository. Repeating the installation check cannot resolve it.
+type AppRepositorySelectionError struct {
+	AppSlug     string
+	Owner       string
+	Repository  string
+	SettingsURL string
+}
+
+// Error names the excluded fixture repository and the page that updates the selection.
+func (e *AppRepositorySelectionError) Error() string {
+	return fmt.Sprintf("GitHub App %s is installed for selected repositories in %s but not for %s; add the repository from %s or select all repositories", e.AppSlug, e.Owner, e.Repository, e.SettingsURL)
+}
+
+// AppInstallationRequiredError reports a cluster GitHub App that is not
+// installed for the fixture organization.
+type AppInstallationRequiredError struct {
+	AppSlug    string
+	Owner      string
+	Repository string
+	InstallURL string
+}
+
+// Error names the missing installation and the page that grants it.
+func (e *AppInstallationRequiredError) Error() string {
+	return fmt.Sprintf("GitHub App %s is not installed for organization %s; install it from %s so it can access %s", e.AppSlug, e.Owner, e.InstallURL, e.Repository)
+}
+
 type SourceRepository struct {
 	Owner string `json:"owner"`
 	Name  string `json:"name"`

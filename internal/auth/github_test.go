@@ -57,6 +57,50 @@ func (f *fakeRunner) Stdout(_ context.Context, spec clusterauth.CommandSpec) (st
 	return f.stdout, f.stdoutErr
 }
 
+var _ = Describe("ExistingGitHubToken", func() {
+	When("gh stores a token", func() {
+		It("should read it from the default configuration", func() {
+			runner := &fakeRunner{stdout: "gho_existing\n"}
+
+			token, err := ExistingGitHubToken(context.Background(), runner)
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(token).Should(Equal("gho_existing"))
+			Expect(runner.stdoutSpecs).Should(HaveLen(1))
+			Expect(runner.stdoutSpecs[0].Args).Should(Equal([]string{"auth", "token", "--hostname", "github.com"}))
+			Expect(runner.stdoutSpecs[0].Env).Should(BeEmpty())
+			Expect(runner.stdoutSpecs[0].ClearEnv).Should(ContainElements("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"))
+			Expect(runner.stdoutSpecs[0].ClearEnv).ShouldNot(ContainElement("GH_CONFIG_DIR"))
+		})
+	})
+
+	When("gh is not installed", func() {
+		It("should report the missing CLI", func() {
+			runner := &fakeRunner{lookPathErr: errors.New("not found")}
+
+			_, err := ExistingGitHubToken(context.Background(), runner)
+			Expect(err).Should(MatchError(ContainSubstring("GitHub CLI is required to reuse an existing login")))
+		})
+	})
+
+	When("gh has no stored token", func() {
+		It("should return the command error", func() {
+			runner := &fakeRunner{stdoutErr: errors.New("not logged in")}
+
+			_, err := ExistingGitHubToken(context.Background(), runner)
+			Expect(err).Should(MatchError(ContainSubstring("read the existing GitHub token")))
+		})
+	})
+
+	When("gh returns an empty token", func() {
+		It("should fail", func() {
+			runner := &fakeRunner{stdout: " \n"}
+
+			_, err := ExistingGitHubToken(context.Background(), runner)
+			Expect(err).Should(MatchError("GitHub CLI returned an empty token"))
+		})
+	})
+})
+
 var _ = Describe("GitHubToken", func() {
 	var (
 		runner   *fakeRunner
