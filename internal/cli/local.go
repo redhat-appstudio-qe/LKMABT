@@ -25,6 +25,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/workflow"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 )
 
@@ -232,10 +233,9 @@ func cleanupRun(ctx context.Context, request config.Request, store evidence.Mani
 		fmt.Fprintf(out, "retained tenant namespace %s\n", namespace)
 		return nil
 	}
-	if err := namespaceService.Delete(ctx, namespace, request.RunID); err != nil {
+	if uid, err := namespaceService.Delete(ctx, namespace, request.RunID); err != nil {
 		return err
-	}
-	if err := waitForNamespaceDeletion(ctx, namespaceService, namespace); err != nil {
+	} else if err := waitForNamespaceDeletion(ctx, namespaceService, namespace, uid); err != nil {
 		return err
 	}
 	fmt.Printf("deleted tenant namespace %s from run %s\n", namespace, request.RunID)
@@ -264,10 +264,10 @@ var namespaceDeletionTimeout = 5 * time.Minute
 
 // waitForNamespaceDeletion bounds the deletion wait so a lingering finalizer or
 // stuck API call fails with the namespace name instead of hanging the process.
-func waitForNamespaceDeletion(ctx context.Context, service cleanup.NamespaceService, name string) error {
+func waitForNamespaceDeletion(ctx context.Context, service cleanup.NamespaceService, name string, uid types.UID) error {
 	waitCtx, cancel := context.WithTimeout(ctx, namespaceDeletionTimeout)
 	defer cancel()
-	if err := service.WaitDeleted(waitCtx, name); err != nil {
+	if err := service.WaitDeleted(waitCtx, name, uid); err != nil {
 		statusCtx, statusCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer statusCancel()
 		if blocker := service.DeletionBlocker(statusCtx, name); blocker != "" {
@@ -343,10 +343,11 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 		fmt.Fprintf(l.logWriter(), "retained tenant namespace %s\n", namespace)
 		return secretErr
 	}
-	if err := l.Namespace.Delete(ctx, namespace, manifest.RunID); err != nil {
+	uid, err := l.Namespace.Delete(ctx, namespace, manifest.RunID)
+	if err != nil {
 		return errors.Join(secretErr, err)
 	}
-	return errors.Join(secretErr, waitForNamespaceDeletion(ctx, l.Namespace, namespace))
+	return errors.Join(secretErr, waitForNamespaceDeletion(ctx, l.Namespace, namespace, uid))
 }
 
 // deleteGitLabCredentialSecret removes the run-scoped GitLab SCM Secret after

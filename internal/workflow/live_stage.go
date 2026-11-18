@@ -392,10 +392,11 @@ func (s *LiveStage) ensureTenantNamespaceAvailable(ctx context.Context, manifest
 // deleteOwnedNamespace removes a stale LKMABT namespace without prompting and reports the removal.
 func (s *LiveStage) deleteOwnedNamespace(ctx context.Context, info cleanup.NamespaceInfo) error {
 	s.notice("deleting stale owned tenant namespace %s from run %s", info.Name, info.RunID)
-	if err := s.Namespace.Delete(ctx, info.Name, info.RunID); err != nil {
+	uid, err := s.Namespace.Delete(ctx, info.Name, info.RunID)
+	if err != nil {
 		return err
 	}
-	return s.Namespace.WaitDeleted(ctx, info.Name)
+	return s.Namespace.WaitDeleted(ctx, info.Name, uid)
 }
 
 // deleteUnownedNamespace asks per namespace before deleting a scoped namespace that lacks exact ownership labels.
@@ -413,7 +414,7 @@ func (s *LiveStage) deleteUnownedNamespace(ctx context.Context, info cleanup.Nam
 	if err := s.Namespace.DeleteApproved(ctx, info); err != nil {
 		return err
 	}
-	return s.Namespace.WaitDeleted(ctx, info.Name)
+	return s.Namespace.WaitDeleted(ctx, info.Name, info.UID)
 }
 
 // TriggerComponents waits for PaC onboarding, updates fixture files, and records trigger commits.
