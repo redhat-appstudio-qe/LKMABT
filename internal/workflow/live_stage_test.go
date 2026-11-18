@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -108,6 +109,7 @@ func (l testNameLister) List(context.Context) ([]string, error) {
 }
 
 type githubAppProviderStub struct {
+	mu      sync.Mutex
 	slug    string
 	err     error
 	errs    []error
@@ -129,19 +131,42 @@ func (p *githubAppProviderStub) UpdateFile(context.Context, providers.FixtureRep
 }
 
 // VerifyGitHubAppInstallation records the slug and returns the next queued
-// error, then the configured error.
+// error, then the configured error. Checks run in background goroutines, so
+// the stub state is mutex-guarded.
 func (p *githubAppProviderStub) VerifyGitHubAppInstallation(_ context.Context, slug string) error {
+	p.mu.Lock()
 	p.slug = slug
 	p.calls++
-	if p.verify != nil {
-		return p.verify(p.calls)
+	call := p.calls
+	verify := p.verify
+	var err error
+	if verify == nil {
+		if len(p.errs) > 0 {
+			err = p.errs[0]
+			p.errs = p.errs[1:]
+		} else {
+			err = p.err
+		}
 	}
-	if len(p.errs) > 0 {
-		err := p.errs[0]
-		p.errs = p.errs[1:]
-		return err
+	p.mu.Unlock()
+	if verify != nil {
+		return verify(call)
 	}
-	return p.err
+	return err
+}
+
+// callCount returns the number of installation checks performed.
+func (p *githubAppProviderStub) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// lastSlug returns the last checked app slug.
+func (p *githubAppProviderStub) lastSlug() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.slug
 }
 
 // appInstallationRequired builds the provider error for an uninstalled cluster App.
@@ -393,7 +418,7 @@ var _ = Describe("LiveStage", func() {
 				Expect(err).ShouldNot(HaveOccurred())
 				Expect(verification.Verified).Should(BeTrue())
 				Expect(verification.Slug).Should(Equal("konflux-kflux-ocp-p01"))
-				Expect(provider.slug).Should(Equal("konflux-kflux-ocp-p01"))
+				Expect(provider.lastSlug()).Should(Equal("konflux-kflux-ocp-p01"))
 			})
 		})
 
@@ -461,7 +486,7 @@ var _ = Describe("LiveStage", func() {
 				verification, err := stage.verifyGitHubApp(context.Background())
 				Expect(err).ShouldNot(HaveOccurred())
 				Expect(opened).Should(Equal([]string{required.InstallURL}))
-				Expect(provider.calls).Should(Equal(3))
+				Expect(provider.callCount()).Should(Equal(3))
 				Expect(out.String()).Should(ContainSubstring(required.InstallURL))
 				Expect(out.String()).Should(ContainSubstring("LKMABT is opening the installation page in your browser"))
 				Expect(out.String()).Should(ContainSubstring("LKMABT has already acquired its GitHub API token"))
@@ -492,7 +517,7 @@ var _ = Describe("LiveStage", func() {
 				Expect(errors.As(err, &required)).Should(BeTrue())
 				Expect(err).Should(MatchError(ContainSubstring("GitHub App cluster-app is not installed for organization redhat-appstudio-qe")))
 				Expect(opened).Should(BeFalse())
-				Expect(provider.calls).Should(Equal(1))
+				Expect(provider.callCount()).Should(Equal(1))
 			})
 		})
 
@@ -539,7 +564,7 @@ var _ = Describe("LiveStage", func() {
 
 				_, err := stage.verifyGitHubApp(context.Background())
 				Expect(err).ShouldNot(HaveOccurred())
-				Expect(provider.calls).Should(Equal(3))
+				Expect(provider.callCount()).Should(Equal(3))
 				Expect(out.String()).ShouldNot(ContainSubstring("502 Bad Gateway"))
 				Expect(out.String()).ShouldNot(ContainSubstring("Still waiting"))
 			})
@@ -671,21 +696,21 @@ var _ = Describe("LiveStage", func() {
 				var got *providers.AppRepositorySelectionError
 				Expect(errors.As(err, &got)).Should(BeTrue())
 				Expect(err).Should(MatchError(ContainSubstring("not for redhat-appstudio-qe/dr_test_mathwizz")))
-				Expect(provider.calls).Should(Equal(2))
+				Expect(provider.callCount()).Should(Equal(2))
 			})
 		})
 
 		When("the installation appears after the preflight deadline", func() {
 			It("should keep waiting when approved", func() {
 				required := appInstallationRequired()
-				installed := false
+				var installed atomic.Bool
 				provider := &githubAppProviderStub{verify: func(int) error {
-					if installed {
+					if installed.Load() {
 						return nil
 					}
 					return required
 				}}
-				prompt := &confirmationStub{approved: true, onConfirm: func() { installed = true }}
+				prompt := &confirmationStub{approved: true, onConfirm: func() { installed.Store(true) }}
 				out := &bytes.Buffer{}
 				stage := &LiveStage{
 					Provider:      provider,
@@ -777,14 +802,14 @@ var _ = Describe("LiveStage", func() {
 		When("the installation is approved after the preflight deadline", func() {
 			It("should continue preflight through namespace discovery on the live context", func() {
 				required := appInstallationRequired()
-				installed := false
+				var installed atomic.Bool
 				provider := &githubAppProviderStub{verify: func(int) error {
-					if installed {
+					if installed.Load() {
 						return nil
 					}
 					return required
 				}}
-				prompt := &confirmationStub{approved: true, onConfirm: func() { installed = true }}
+				prompt := &confirmationStub{approved: true, onConfirm: func() { installed.Store(true) }}
 				dynamic := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
 				out := &bytes.Buffer{}
 				stage := &LiveStage{
