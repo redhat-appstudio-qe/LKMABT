@@ -185,6 +185,16 @@ func (c *Console) confirm(ctx context.Context, prompt workflow.Confirmation, mes
 	if c == nil || prompt == nil {
 		return false, fmt.Errorf("interactive confirmation is not configured")
 	}
+	// A console passed as its own prompt would recurse into promptMu.
+	if promptConsole, ok := prompt.(*Console); ok && promptConsole == c {
+		prompt = c.Prompt
+		if prompt == nil {
+			return false, fmt.Errorf("interactive confirmation is not configured")
+		}
+		if nested, ok := prompt.(*Console); ok && nested == c {
+			return false, fmt.Errorf("interactive confirmation is configured recursively")
+		}
+	}
 	c.promptMu.Lock()
 	defer c.promptMu.Unlock()
 	c.outMu.Lock()

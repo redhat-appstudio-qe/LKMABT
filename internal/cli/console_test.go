@@ -140,6 +140,28 @@ var _ = Describe("Console.Confirm", func() {
 		})
 	})
 
+	When("the console is its own prompt", func() {
+		It("should delegate to the configured prompt instead of recursing", func() {
+			inner := &recordingPrompt{approved: true}
+			console := &Console{Out: io.Discard, Prompt: inner}
+
+			approved, err := console.confirm(context.Background(), console, "delete tenant")
+
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(approved).Should(BeTrue())
+			Expect(inner.calls).Should(Equal(1))
+		})
+
+		It("should reject a recursively configured prompt", func() {
+			console := &Console{Out: io.Discard}
+			console.Prompt = console
+
+			_, err := console.Confirm(context.Background(), "delete tenant")
+
+			Expect(err).Should(MatchError(ContainSubstring("configured recursively")))
+		})
+	})
+
 	When("one prompt is open", func() {
 		It("should buffer status lines until the prompt completes", func() {
 			prompt := &countingPrompt{approved: true, entered: make(chan struct{}), release: make(chan struct{})}

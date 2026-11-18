@@ -122,6 +122,15 @@ var _ = Describe("promptFor", func() {
 		})
 	})
 
+	When("the runner prompt is the output console", func() {
+		It("should return the console without wrapping it", func() {
+			console := &Console{Out: io.Discard, Prompt: &recordingPrompt{approved: true}}
+			runner := LiveRunner{Prompt: console, Out: console}
+
+			Expect(promptFor(runner)).Should(BeIdenticalTo(console))
+		})
+	})
+
 	When("the output is not a console", func() {
 		It("should keep the runner prompt", func() {
 			prompt := &recordingPrompt{}

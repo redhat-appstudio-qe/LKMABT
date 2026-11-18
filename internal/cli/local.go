@@ -51,6 +51,10 @@ func promptFor(runner LiveRunner) workflow.Confirmation {
 	if !ok || console == nil || runner.Prompt == nil {
 		return runner.Prompt
 	}
+	// A console prompt already owns buffering; wrapping it would recurse.
+	if promptConsole, ok := runner.Prompt.(*Console); ok && promptConsole == console {
+		return runner.Prompt
+	}
 	return consolePrompt{console: console, prompt: runner.Prompt}
 }
 
