@@ -59,7 +59,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 - `Runner` interface defines the execution contract
 - `Execute()` drives the full workflow lifecycle
 - Owns the aggregate run directory, the sequential cluster runner, and the per-cluster/per-provider run logs
-- `Console` serializes output from concurrent providers. On a terminal it draws one live line per active step, updates heartbeat detail in place via `Step.Update`, and overwrites a completed step with a `✓`/`✗` line; on a pipe, file, or CI log it emits plain bullet/check lines without ANSI codes. `Suspend` pauses the live region while an interactive login owns the terminal, and prompts buffer progress until they finish
+- `Console` serializes output from concurrent providers. On a terminal it draws one live line per active step, updates heartbeat detail in place via `Step.Update`, clips overlong live rows and prints the full detail as a durable line, and overwrites a completed step with a `✓`/`✗` line; on a pipe, file, or CI log it emits plain bullet/check lines without ANSI codes. `Suspend` pauses the live region while an interactive login owns the terminal, and prompts buffer progress until they finish
 - `internal/workflow.Runner` reports each executed phase through `Options.OnPhaseStart` and `Options.OnPhaseEnd`; `phaseObserver` maps them to step descriptions and emojis, and `LiveStage.Progress` feeds PaC/build heartbeats into the active step while `LiveStage.Log` keeps the full lines
 
 **`internal/clusterfile/`** — Clusters-file schema

@@ -287,7 +287,9 @@ to `.lkmabt-clusters.yaml`.
   step is replaced by a green `✓` line. `both` shows one live line per provider.
   Non-interactive output (redirected streams or CI) prints every heartbeat as a
   plain ` • <action>  ...` / ` ✓ <action>` / ` ✗ <action>` line with no ANSI
-  codes, and `run.log` always records the full heartbeat line.
+  codes, and `run.log` always records the full heartbeat line. Heartbeat
+  details wider than the terminal are printed once as a durable line above the
+  live region; the live row shows a clipped summary.
 - Instructions that need action — GitHub App installation steps, the GitLab
   token page and scopes, and login output — are durable blocks printed above the
   live lines. Animation is suspended while `gh`/`glab` or a hidden token prompt

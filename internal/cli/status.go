@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"unicode"
 
 	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"golang.org/x/term"
@@ -43,6 +45,10 @@ func (s *Step) Update(detail string) {
 		return
 	}
 	s.detail = detail
+	full := s.description
+	if detail != "" {
+		full += " · " + detail
+	}
 	if !c.animate {
 		line := s.plainDetail()
 		if line == "" {
@@ -53,6 +59,12 @@ func (s *Step) Update(detail string) {
 		} else {
 			fmt.Fprintln(c.Out, line)
 		}
+		return
+	}
+	if limit := c.renderWidth(); limit > 0 && displayWidth(full) > limit {
+		c.writePermanentLocked(1, func() {
+			fmt.Fprintln(c.Out, full)
+		})
 		return
 	}
 	if c.spinning && !c.promptActive && !c.suspended {
@@ -99,12 +111,68 @@ func (s *Step) End(success bool) {
 	}
 }
 
-// render returns the live line text, including the current detail.
+// render returns the live line text, including the current detail, clipped to
+// the terminal width so disabled wrapping cannot drop the tail silently.
 func (s *Step) render() string {
-	if s.detail == "" {
-		return s.description
+	line := s.description
+	if s.detail != "" {
+		line += " · " + s.detail
 	}
-	return s.description + " · " + s.detail
+	if s.console == nil {
+		return line
+	}
+	return truncateLine(line, s.console.renderWidth())
+}
+
+// renderWidth returns the cells available after the spinner frame and space.
+func (c *Console) renderWidth() int {
+	if c.width <= 3 {
+		return 0
+	}
+	return c.width - 3
+}
+
+// displayWidth estimates terminal cells, treating emoji as double-width.
+func displayWidth(line string) int {
+	width := 0
+	for _, r := range line {
+		width += runeWidth(r)
+	}
+	return width
+}
+
+// truncateLine clips line to width cells and appends an ellipsis.
+func truncateLine(line string, width int) string {
+	if width <= 0 || displayWidth(line) <= width {
+		return line
+	}
+	if width == 1 {
+		return "…"
+	}
+	var builder strings.Builder
+	used := 0
+	for _, r := range line {
+		charWidth := runeWidth(r)
+		if used+charWidth > width-1 {
+			break
+		}
+		builder.WriteRune(r)
+		used += charWidth
+	}
+	builder.WriteString("…")
+	return builder.String()
+}
+
+// runeWidth estimates the terminal width of one rune.
+func runeWidth(r rune) int {
+	switch {
+	case r == '\u200d' || r == '\ufe0f' || unicode.Is(unicode.Mn, r):
+		return 0
+	case r >= 0x1F000 && r <= 0x1FAFF, r >= 0x2600 && r <= 0x27BF:
+		return 2
+	default:
+		return 1
+	}
 }
 
 // plainDetail returns the provider-prefixed heartbeat line for non-TTY output.
@@ -143,6 +211,19 @@ func smartTerminal(w io.Writer) bool {
 		return false
 	}
 	return term.IsTerminal(int(file.Fd()))
+}
+
+// terminalWidth returns w's column count, or 0 when it is not a terminal.
+func terminalWidth(w io.Writer) int {
+	file, ok := w.(*os.File)
+	if !ok || !term.IsTerminal(int(file.Fd())) {
+		return 0
+	}
+	width, _, err := term.GetSize(int(file.Fd()))
+	if err != nil {
+		return 0
+	}
+	return width
 }
 
 // phaseAction describes a workflow phase as a short action and its emoji.

@@ -31,6 +31,8 @@ type Console struct {
 	promptActive bool
 	suspended    bool
 	pending      bytes.Buffer
+	partial      []byte
+	width        int
 
 	active        []*Step
 	frame         int
@@ -52,6 +54,7 @@ func NewConsole() *Console {
 		interactive: prompt.Interactive,
 		animate:     animate,
 		color:       animate && os.Getenv("NO_COLOR") == "",
+		width:       terminalWidth(os.Stdout),
 	}
 }
 
@@ -88,12 +91,21 @@ func (c *Console) Write(p []byte) (int, error) {
 	if c.promptActive {
 		return c.pending.Write(p)
 	}
-	var written int
-	var err error
-	c.writePermanentLocked(permanentLines(p), func() {
-		written, err = c.Out.Write(p)
+	c.partial = append(c.partial, p...)
+	index := bytes.LastIndexByte(c.partial, '\n')
+	if index < 0 {
+		return len(p), nil
+	}
+	complete := append([]byte(nil), c.partial[:index+1]...)
+	c.partial = append(c.partial[:0], c.partial[index+1:]...)
+	var writeErr error
+	c.writePermanentLocked(permanentLines(complete), func() {
+		_, writeErr = c.Out.Write(complete)
 	})
-	return written, err
+	if writeErr != nil {
+		return 0, writeErr
+	}
+	return len(p), nil
 }
 
 // StartStep begins one status step. In a terminal it draws an animated spinner;
@@ -161,6 +173,7 @@ func (c *Console) Suspend() func() {
 	}
 	c.outMu.Lock()
 	c.suspended = true
+	c.flushPartialLocked()
 	c.eraseLiveLocked()
 	c.haltSpinnerLocked()
 	c.outMu.Unlock()
@@ -205,6 +218,7 @@ func (c *Console) confirm(ctx context.Context, prompt workflow.Confirmation, mes
 	c.promptMu.Lock()
 	defer c.promptMu.Unlock()
 	c.outMu.Lock()
+	c.flushPartialLocked()
 	c.promptActive = true
 	c.eraseLiveLocked()
 	c.outMu.Unlock()
@@ -212,6 +226,9 @@ func (c *Console) confirm(ctx context.Context, prompt workflow.Confirmation, mes
 	c.outMu.Lock()
 	c.promptActive = false
 	if c.Out != nil && c.pending.Len() > 0 {
+		if c.pending.Bytes()[c.pending.Len()-1] != '\n' {
+			c.pending.WriteByte('\n')
+		}
 		_, _ = c.pending.WriteTo(c.Out)
 	}
 	if len(c.active) > 0 && !c.suspended {
@@ -227,6 +244,17 @@ func (c *Console) confirm(ctx context.Context, prompt workflow.Confirmation, mes
 // writePermanentLocked clears the live region, writes durable output, and
 // redraws the remaining steps. Callers hold outMu.
 func (c *Console) writePermanentLocked(lines int, write func()) {
+	if len(c.partial) > 0 {
+		partial := append([]byte(nil), c.partial...)
+		c.partial = c.partial[:0]
+		original := write
+		lines++
+		write = func() {
+			_, _ = c.Out.Write(partial)
+			fmt.Fprintln(c.Out)
+			original()
+		}
+	}
 	erased := c.eraseLiveLocked()
 	write()
 	if !c.spinning || len(c.active) == 0 {
@@ -235,6 +263,20 @@ func (c *Console) writePermanentLocked(lines int, write func()) {
 	}
 	c.drawLiveLocked()
 	c.clearBelowLocked(erased - lines - len(c.active))
+}
+
+// flushPartialLocked completes a buffered unterminated line before a prompt or
+// external command takes over the terminal. Callers hold outMu.
+func (c *Console) flushPartialLocked() {
+	if len(c.partial) == 0 {
+		return
+	}
+	partial := append([]byte(nil), c.partial...)
+	c.partial = c.partial[:0]
+	c.writePermanentLocked(1, func() {
+		_, _ = c.Out.Write(partial)
+		fmt.Fprintln(c.Out)
+	})
 }
 
 // permanentLines counts the terminal lines a write occupies.

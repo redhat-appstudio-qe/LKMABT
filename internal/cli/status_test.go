@@ -64,6 +64,22 @@ var _ = Describe("Console steps", func() {
 			Expect(out.String()).ShouldNot(ContainSubstring("\x1b["))
 			step.End(true)
 		})
+
+		It("should hold a partial write until its newline arrives", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out}
+
+			step := console.StartStep("Verify builds 🏗️")
+			written, err := console.Write([]byte("partial"))
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(written).Should(Equal(len("partial")))
+			Expect(out.String()).ShouldNot(ContainSubstring("partial"))
+
+			_, err = console.Write([]byte(" line\n"))
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(out.String()).Should(ContainSubstring("partial line\n"))
+			step.End(true)
+		})
 	})
 
 	When("output is a terminal", func() {
@@ -111,6 +127,20 @@ var _ = Describe("Console steps", func() {
 			Expect(text).Should(ContainSubstring("waiting for component graph\n"))
 			Expect(strings.LastIndex(text, "Verify builds (github) 🏗️")).Should(
 				BeNumerically(">", strings.Index(text, "waiting for component graph")))
+			step.End(true)
+		})
+
+		It("should print an overlong heartbeat durably and clip the live line", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, animate: true, width: 50, frameInterval: time.Hour}
+
+			step := console.StartStep("Verify builds (github) 🏗️")
+			detail := strings.Repeat("web: buildah 0/2; ", 8)
+			step.Update(detail)
+
+			text := out.String()
+			Expect(text).Should(ContainSubstring(detail))
+			Expect(text).Should(ContainSubstring("…"))
 			step.End(true)
 		})
 
