@@ -21,13 +21,12 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/providers/github"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
 	"github.com/redhat-appstudio/lkmabt/internal/workflow"
+	"golang.org/x/term"
 )
 
 // Credential acquisition and destruction are replaceable in tests.
 var (
 	authenticateGitHub      = auth.GitHubToken
-	authenticateGitLab      = auth.GitLabToken
-	refreshGitLabToken      = auth.RefreshGitLabToken
 	readExistingGitHubToken = auth.ExistingGitHubToken
 	destroyCredentials      = (*auth.Store).Destroy
 	checkGitHubAccess       = func(ctx context.Context, token string) error {
@@ -98,6 +97,17 @@ const GitLabTokenURL = "https://gitlab.com/-/user_settings/personal_access_token
 // openGitLabTokenPage opens the token page; tests replace it.
 var openGitLabTokenPage = workflow.OpenBrowser
 
+// readGitLabToken reads a personal access token without echoing it; tests replace it.
+var readGitLabToken = func() (string, error) {
+	fmt.Fprint(os.Stderr, "Paste the personal access token: ")
+	data, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
 type clusterRun struct {
 	Entry   clusterfile.Entry
 	AuthErr error
@@ -124,11 +134,8 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 			githubTokenNeeded = true
 		}
 	}
-	var (
-		store           *auth.Store
-		gitlabEphemeral bool
-	)
-	if len(entries) > 0 && (githubTokenNeeded || gitlabTokenNeeded) {
+	var store *auth.Store
+	if len(entries) > 0 && githubTokenNeeded {
 		store, err = auth.NewStore()
 		if err != nil {
 			return err
@@ -139,38 +146,42 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 				store = nil
 			}
 		}()
-		if gitlabTokenNeeded {
-			if console.Interactive() {
-				console.Printf("gitlab: authentication required\nA browser window is opening at GitLab's personal access token page.\nSet the expiration to 1 day, keep the api and write_repository scopes, and create the token.\nThen choose Token in the glab prompt and paste the token. Do not choose Web: PaC cannot use its OAuth token.")
-				if err := openGitLabTokenPage(GitLabTokenURL); err != nil {
-					console.Printf("could not open the token page: %v\nOpen it manually: %s", err, GitLabTokenURL)
-				}
-			}
-			token, err := authenticateGitLab(ctx, clusterauth.ExecRunner{}, store, console.Interactive(), request.Credentials.GitLabAPIURL)
-			if err != nil {
-				return err
-			}
-			request.Credentials.GitLabToken = token
-			request.Credentials.GitLabTokenEphemeral = true
-			gitlabEphemeral = true
-			defer func() {
-				revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
-				defer cancel()
-				if revokeErr := revokeGitLabToken(revokeCtx, request.Credentials.GitLabToken, request.Credentials.GitLabAPIURL); revokeErr != nil {
-					runErr = errors.Join(runErr, fmt.Errorf("revoke GitLab token: %w", revokeErr))
-				}
-			}()
+		if console.Interactive() {
+			console.Printf("github: authentication required; starting the gh browser login")
 		}
-		if githubTokenNeeded {
-			if console.Interactive() {
-				console.Printf("github: authentication required; starting the gh browser login")
-			}
-			token, err := authenticateGitHub(ctx, clusterauth.ExecRunner{}, store, console.Interactive())
-			if err != nil {
-				return err
-			}
-			request.Credentials.GitHubToken = token
+		token, err := authenticateGitHub(ctx, clusterauth.ExecRunner{}, store, console.Interactive())
+		if err != nil {
+			return err
 		}
+		request.Credentials.GitHubToken = token
+	}
+	if len(entries) > 0 && gitlabTokenNeeded {
+		if !console.Interactive() {
+			return fmt.Errorf("GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to paste a personal access token")
+		}
+		if err := validateInteractiveGitLabURL(request.Credentials.GitLabAPIURL); err != nil {
+			return err
+		}
+		console.Printf("gitlab: authentication required\nA browser window is opening at GitLab's personal access token page.\nSet the expiration to 1 day, keep the api and write_repository scopes, and create the token.")
+		if err := openGitLabTokenPage(GitLabTokenURL); err != nil {
+			console.Printf("could not open the token page: %v\nOpen it manually: %s", err, GitLabTokenURL)
+		}
+		token, err := readGitLabToken()
+		if err != nil {
+			return fmt.Errorf("read GitLab personal access token: %w", err)
+		}
+		if !strings.HasPrefix(token, "glpat-") {
+			return fmt.Errorf("GitLab requires a personal access token with api and write_repository; create one at %s or set GITLAB_BOT_TOKEN", GitLabTokenURL)
+		}
+		request.Credentials.GitLabToken = token
+		request.Credentials.GitLabTokenEphemeral = true
+		defer func() {
+			revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+			defer cancel()
+			if revokeErr := revokeGitLabToken(revokeCtx, request.Credentials.GitLabToken, request.Credentials.GitLabAPIURL); revokeErr != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("revoke GitLab token: %w", revokeErr))
+			}
+		}()
 	}
 	aggregate, err := newAggregateRun(request.StateDir)
 	if err != nil {
@@ -182,24 +193,30 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 	if err := rejectDuplicateServers(entries, authFailures); err != nil {
 		return err
 	}
-	var refresh func(context.Context, *config.Request) error
-	if gitlabEphemeral {
-		refresh = func(ctx context.Context, request *config.Request) error {
-			token, err := refreshGitLabToken(ctx, clusterauth.ExecRunner{Log: aggregate.Log}, store, request.Credentials.GitLabAPIURL)
-			if err != nil {
-				return err
-			}
-			request.Credentials.GitLabToken = token
-			return nil
-		}
-	}
-	runs := scheduleClusters(ctx, request, entries, authFailures, aggregate, runner, console, refresh)
+	runs := scheduleClusters(ctx, request, entries, authFailures, aggregate, runner, console)
 	var credentialErr error
 	if store != nil {
 		credentialErr = destroyCredentials(store)
 		store = nil
 	}
 	return finishAggregateRun(aggregate, request, runs, console, credentialErr)
+}
+
+// validateInteractiveGitLabURL rejects the token-page prompt for API endpoints
+// other than gitlab.com, because the page issues gitlab.com tokens.
+func validateInteractiveGitLabURL(apiURL string) error {
+	apiURL = strings.TrimSpace(apiURL)
+	if apiURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(apiURL)
+	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("invalid GitLab API URL %q", apiURL)
+	}
+	if parsed.Scheme != "https" || parsed.Port() != "" || parsed.Hostname() != "gitlab.com" {
+		return fmt.Errorf("interactive GitLab authentication is only supported for gitlab.com; set GITLAB_BOT_TOKEN for %s", apiURL)
+	}
+	return nil
 }
 
 // providerNeedsGitHub reports whether the selected provider includes GitHub.
@@ -280,20 +297,13 @@ func rejectDuplicateServers(entries []clusterfile.Entry, authFailures map[string
 }
 
 // scheduleClusters runs authenticated clusters one at a time in clusters-file order.
-func scheduleClusters(ctx context.Context, request config.Request, entries []clusterfile.Entry, authFailures map[string]error, aggregate *aggregateRun, runner Runner, console *Console, refresh func(context.Context, *config.Request) error) []clusterRun {
+func scheduleClusters(ctx context.Context, request config.Request, entries []clusterfile.Entry, authFailures map[string]error, aggregate *aggregateRun, runner Runner, console *Console) []clusterRun {
 	runs := make([]clusterRun, len(entries))
 	for index, entry := range entries {
 		runs[index] = clusterRun{Entry: entry, AuthErr: authFailures[entry.Name]}
 		if runs[index].AuthErr != nil {
 			console.Printf("cluster %s: authentication failed: %v", entry.Name, runs[index].AuthErr)
 			continue
-		}
-		if refresh != nil {
-			if err := refresh(ctx, &request); err != nil {
-				runs[index].AuthErr = err
-				console.Printf("cluster %s: authentication failed: %v", entry.Name, err)
-				continue
-			}
 		}
 		console.Printf("cluster %s: authenticated", entry.Name)
 		console.Printf("cluster %s: started", entry.Name)

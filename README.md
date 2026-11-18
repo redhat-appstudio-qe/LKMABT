@@ -44,7 +44,7 @@ resources.
 | `kflux` | `ocp` clusters whose kubeconfig is missing or rejected; LKMABT installs it when absent. |
 | `ibmcloud` with the `kubernetes-service` plug-in | `type: roks` clusters. |
 | `gh` | GitHub runs with an empty `GITHUB_TOKEN`. |
-| `glab` | GitLab runs with an empty `GITLAB_BOT_TOKEN`. |
+| `glab` | Optional; verifies GitLab fixture access. LKMABT does not invoke it. |
 
 ### Accounts and access
 
@@ -64,7 +64,7 @@ the organization; see [Cluster requirements](#cluster-requirements).
 
 **GitLab.** Your account needs at least Maintainer (access level 40) on
 [konflux-qe/dr_test_mathwizz_gl](https://gitlab.com/konflux-qe/dr_test_mathwizz_gl);
-the trigger commit lands on `main`. Verify it after `glab auth login`:
+the trigger commit lands on `main`. Verify it in GitLab or with `glab api`:
 
 ```bash
 glab api projects/konflux-qe%2Fdr_test_mathwizz_gl --jq '[.permissions.project_access.access_level, .permissions.group_access.access_level] | map(. // 0) | max'
@@ -187,9 +187,11 @@ written. Checking now avoids a failed run.
 
 LKMABT needs a GitHub token for GitHub runs and a GitLab token for GitLab runs.
 Choose either method; `run both` uses both credentials. Values in the process
-environment take precedence over `.lkmabt.env`. Tokens acquired through browser
-authentication are written to a private temporary directory as `0600` files and
-deleted when the last cluster finishes.
+environment take precedence over `.lkmabt.env`. A GitHub token acquired through
+browser authentication is written to a private temporary directory as a `0600`
+file and deleted when the last cluster finishes. A prompted GitLab PAT is kept
+for the run and revoked after the last cluster; a configured `GITLAB_BOT_TOKEN`
+is never revoked.
 
 ### Browser authentication
 
@@ -208,23 +210,18 @@ GitHub authentication is required: set GITHUB_TOKEN or run in a terminal to use 
 ```
 
 **GitLab.** LKMABT opens the prefilled personal access token page (scopes
-`api` and `write_repository`), asks you to set the expiration to 1 day, and runs
-`glab auth login --hostname gitlab.com --use-keyring=false`. Create the token,
-then choose **Token** in the glab prompt and paste it. PaC cannot
-use the OAuth token from **Web**; LKMABT rejects it at login, before any cluster
-work. The registry-domain prompt defaults to
-`gitlab.com,gitlab.com:443,registry.gitlab.com` (glab's own default) and can be
-accepted with Enter; the git-protocol and git-credential-helper choices do not
-affect LKMABT. Interactive login is supported only for `gitlab.com`; set
-`GITLAB_BOT_TOKEN` for self-managed instances, custom ports, or HTTP endpoints.
-The token is written into the tenant SCM Secret `gitlab-build-secret` so PaC can
-clone the fixture. Each cluster's finalization deletes its Secret; the acquired
-PAT is revoked once after the last cluster with
-`DELETE /personal_access_tokens/self`, and its temporary copy is deleted when
-the run ends. Without a terminal, the run fails with:
+`api` and `write_repository`) and asks you to set the expiration to 1 day.
+Create the token, then paste it at the hidden `Paste the personal access token:`
+prompt. PaC cannot use OAuth tokens, so there is no Web login. Interactive entry
+is supported only for `gitlab.com`; set `GITLAB_BOT_TOKEN` for self-managed
+instances, custom ports, or HTTP endpoints. The token is written into the tenant
+SCM Secret `gitlab-build-secret` so PaC can clone the fixture. Each cluster's
+finalization deletes its Secret; the acquired PAT is revoked once after the last
+cluster with `DELETE /personal_access_tokens/self`. Without a terminal, the run
+fails with:
 
 ```text
-GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to use the glab login
+GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to paste a personal access token
 ```
 
 ### Configured tokens
@@ -242,7 +239,7 @@ automatically. The copy is ignored by Git; keep it local. The parser reads
 | Variable | Notes |
 | --- | --- |
 | `GITHUB_TOKEN` | Needs `repo`, `read:org`, and push access to the fixture; its owner must administer `redhat-appstudio-qe` to list App installations. Leave empty for the browser login. |
-| `GITLAB_BOT_TOKEN` | Personal access token with `api` and `write_repository`. Leave empty for the `glab` Token login on `gitlab.com`. LKMABT never revokes it. |
+| `GITLAB_BOT_TOKEN` | Personal access token with `api` and `write_repository`. Leave empty for the token-page prompt on `gitlab.com`. LKMABT never revokes it. |
 | `GITLAB_API_URL` | Defaults to `https://gitlab.com/api/v4`. |
 
 **`GITHUB_TOKEN`.** In a terminal, LKMABT checks before the first cluster that

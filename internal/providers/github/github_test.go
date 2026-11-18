@@ -14,17 +14,18 @@ import (
 )
 
 type fakeClient struct {
-	repository            *gh.Repository
-	getRepositoryErrors   []error
-	updateErrors          []error
-	installations         []*gh.Installation
-	installationErr       error
-	installationRepos     []*gh.Repository
-	installationRepoErr   error
-	getCalls              int
-	updateCalls           int
-	installationCalls     int
-	installationRepoCalls []int64
+	repository             *gh.Repository
+	getRepositoryErrors    []error
+	updateErrors           []error
+	installations          []*gh.Installation
+	installationErr        error
+	installationRepos      []*gh.Repository
+	installationRepoErr    error
+	installationRepoErrors []error
+	getCalls               int
+	updateCalls            int
+	installationCalls      int
+	installationRepoCalls  []int64
 }
 
 // GetRepository returns the configured fake repository or the next queued error.
@@ -66,6 +67,11 @@ func (f *fakeClient) ListOrganizationInstallations(context.Context, string) ([]*
 // ListUserInstallationRepositories returns the configured fake installation repositories or error.
 func (f *fakeClient) ListUserInstallationRepositories(_ context.Context, id int64) ([]*gh.Repository, error) {
 	f.installationRepoCalls = append(f.installationRepoCalls, id)
+	if len(f.installationRepoErrors) > 0 {
+		err := f.installationRepoErrors[0]
+		f.installationRepoErrors = f.installationRepoErrors[1:]
+		return nil, err
+	}
 	return f.installationRepos, f.installationRepoErr
 }
 
@@ -152,6 +158,21 @@ var _ = Describe("CheckInstallationRepositoryAccess", func() {
 				{ID: gh.Int64(7), AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("selected")},
 				{ID: gh.Int64(8), AppSlug: gh.String("other-app"), RepositorySelection: gh.String("selected")},
 			}}
+
+			Expect(New(client).CheckInstallationRepositoryAccess(context.Background())).Should(Succeed())
+			Expect(client.installationRepoCalls).Should(Equal([]int64{7, 8}))
+		})
+	})
+
+	When("one selected installation is not visible to the token", func() {
+		It("should skip the 404 and check the remaining installations", func() {
+			client := &fakeClient{
+				installations: []*gh.Installation{
+					{ID: gh.Int64(7), RepositorySelection: gh.String("selected")},
+					{ID: gh.Int64(8), RepositorySelection: gh.String("selected")},
+				},
+				installationRepoErrors: []error{&gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}},
+			}
 
 			Expect(New(client).CheckInstallationRepositoryAccess(context.Background())).Should(Succeed())
 			Expect(client.installationRepoCalls).Should(Equal([]int64{7, 8}))

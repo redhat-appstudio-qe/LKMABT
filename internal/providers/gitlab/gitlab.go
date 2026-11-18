@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -119,26 +118,14 @@ func NewFromCredentials(token, apiURL string) (*Adapter, error) {
 	return New(apiClient{client: gitlabClient}), nil
 }
 
-// RevokeToken revokes the run-scoped personal access token. OAuth tokens return
-// 404 or 400 because only personal access tokens can revoke themselves.
+// RevokeToken revokes the run-scoped personal access token. A prompted token is
+// always a glpat- value, so a 404 or 400 is surfaced instead of being treated as
+// already revoked.
 func (a *Adapter) RevokeToken(ctx context.Context) error {
 	if a == nil || a.client == nil {
 		return fmt.Errorf("gitlab client is required")
 	}
-	err := a.client.RevokeToken(ctx)
-	var response *gl.ErrorResponse
-	if errors.As(err, &response) && response.Response != nil {
-		switch response.Response.StatusCode {
-		case http.StatusNotFound:
-			return nil
-		case http.StatusBadRequest:
-			message := strings.ToLower(response.Message + " " + string(response.Body))
-			if strings.Contains(message, "requires token type to be a personal access token") {
-				return nil
-			}
-		}
-	}
-	return err
+	return a.client.RevokeToken(ctx)
 }
 
 // ValidateFixture confirms the project is the canonical GitLab test fixture.

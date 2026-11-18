@@ -100,23 +100,6 @@ var _ = Describe("GitLab provider", func() {
 		Expect(client.revokeCalls).Should(Equal(1))
 	})
 
-	It("treats a missing personal access token as already revoked", func() {
-		client := &fakeClient{revokeErrors: []error{&gl.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}}}
-
-		Expect(New(client).RevokeToken(context.Background())).Should(Succeed())
-		Expect(client.revokeCalls).Should(Equal(1))
-	})
-
-	It("treats an OAuth token rejection as already revoked", func() {
-		client := &fakeClient{revokeErrors: []error{&gl.ErrorResponse{
-			Response: &http.Response{StatusCode: http.StatusBadRequest},
-			Message:  "400 Bad request - This endpoint requires token type to be a personal access token",
-		}}}
-
-		Expect(New(client).RevokeToken(context.Background())).Should(Succeed())
-		Expect(client.revokeCalls).Should(Equal(1))
-	})
-
 	It("surfaces a token revocation failure", func() {
 		client := &fakeClient{revokeErrors: []error{errors.New("forbidden")}}
 

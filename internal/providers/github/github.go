@@ -199,6 +199,13 @@ func (a *Adapter) CheckInstallationRepositoryAccess(ctx context.Context) error {
 		}
 		if _, err := a.client.ListUserInstallationRepositories(ctx, installation.GetID()); err != nil {
 			if isAccessRejection(err) {
+				var response *gh.ErrorResponse
+				if errors.As(err, &response) && response.Response != nil && response.Response.StatusCode == http.StatusNotFound {
+					// GitHub hides installations the token cannot see. The cluster App
+					// is verified against the fixture at preflight, so one invisible
+					// installation must not reject an otherwise usable token.
+					continue
+				}
 				return fmt.Errorf("%w: list repositories for GitHub App installation %d in %s: %v (the GitHub token needs the read:user scope to list installation repositories)", providers.ErrInsufficientGitHubAccess, installation.GetID(), canonicalOwner, err)
 			}
 			return fmt.Errorf("list repositories for GitHub App installation %d in %s: %w", installation.GetID(), canonicalOwner, err)

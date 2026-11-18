@@ -74,7 +74,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/auth/`** — Provider credential acquisition
 - Creates one run-scoped `lkmabt-auth-*` directory with 0700 credentials written as 0600 files
 - GitHub: runs `gh auth login --web` with an isolated `GH_CONFIG_DIR` and `--insecure-storage`
-- GitLab: opens a prefilled PAT page (1-day expiration, `api` and `write_repository`), runs `glab auth login` (choose Token and paste the PAT) with an isolated `GLAB_CONFIG_DIR`, keeps that directory for token re-reads, and deletes the ephemeral SCM Secret during finalization
+- GitLab: opens a prefilled PAT page (1-day expiration, `api` and `write_repository`), prompts for the token without echo, and deletes the ephemeral SCM Secret during finalization; the run-acquired token is revoked once after the last cluster
 - `RunClusters` deletes the directory after the last cluster; non-interactive runs must provide the provider tokens
 
 **`internal/report/`** — Aggregate reports
@@ -242,34 +242,28 @@ deadline, the remaining preflight steps continue on the run context.
 When `GITHUB_TOKEN` is empty, GitHub runs call `gh auth login --web` with a
 private `GH_CONFIG_DIR` and `--insecure-storage`, then read the token with
 `gh auth token`. GitLab API requests use `Authorization: Bearer`, which accepts
-both the OAuth token from glab's Web login and a `GITLAB_BOT_TOKEN` access
-token; GitLab rejects OAuth tokens sent as `PRIVATE-TOKEN`. A configured
+a personal access token; GitLab rejects OAuth tokens sent as `PRIVATE-TOKEN`. A configured
 `GITHUB_TOKEN` is checked against the organization's App installations, the
 fixture repository's push permission, and the repositories of each
 non-suspended installation that covers selected repositories; an interactive run
 replaces a token that fails those checks for credential reasons with
 the token from the existing `gh` login when it passes them, and otherwise
 with the `gh` browser login. Transient, rate-limit, and timeout check failures
-abort the run without replacing the token. A classic or OAuth token may need the
-`read:user` scope to list selected-installation repositories; add it with
+abort the run without replacing the token. A 404 for a selected installation the token cannot see is skipped; preflight
+verifies the cluster App against the fixture. A classic or OAuth token may need
+the `read:user` scope to list selected-installation repositories; add it with
 `gh auth refresh -h github.com -s read:user`. GitHub rejects a `gh` OAuth user
 token (`gho_`) for that endpoint even with the scope, so the acquisition check
 skips it and preflight keeps the warning path. The acquisition check does not
 require the fixture in every installation because the cluster app slug is
 unknown there; a listing that remains unverifiable after the browser login still
 only produces the preflight warning. When `GITLAB_BOT_TOKEN` is empty, GitLab opens the prefilled PAT page (1-day
-expiration, `api` and `write_repository`) and runs `glab auth login` (choose
-Token and paste the PAT) with a private `GLAB_CONFIG_DIR`; the registry-domain and git-protocol prompts are
-glab defaults and do not affect LKMABT. It then reads the token with
-`glab config get token --host`; the glab directory stays in the store so
-`glab api user` can validate the stored token before each cluster. An OAuth
-token is rejected at acquisition because PaC cannot use it. Each
-acquired token is kept in a 0600 file inside one run-scoped `lkmabt-auth-*`
-temporary directory and reused for every cluster. The ephemeral GitLab token is
-also written to the tenant SCM Secret for PaC; each cluster's finalization deletes
-that Secret, and the run-acquired token is revoked once after the last cluster
-with `DELETE /personal_access_tokens/self`. An OAuth token answers 404 or 400 and is
-left to expire; a configured `GITLAB_BOT_TOKEN` is never revoked.
+expiration, `api` and `write_repository`) and prompts for the token without
+echo; the token is used directly and is never written to the credential store.
+The ephemeral GitLab token is also written to the tenant SCM Secret for PaC;
+each cluster's finalization deletes that Secret, and the run-acquired token is
+revoked once after the last cluster with `DELETE /personal_access_tokens/self`.
+A configured `GITLAB_BOT_TOKEN` is never revoked.
 
 The directory is removed when the run ends, including after failures and
 cancellations, and a removal failure fails the run. Authentication requires an
