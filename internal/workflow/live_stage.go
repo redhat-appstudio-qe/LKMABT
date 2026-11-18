@@ -114,29 +114,14 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 	return nil
 }
 
-// accessChecks lists the API versions, and GitLab Secret authorization, preflight must verify.
+// accessChecks lists the API versions preflight must verify.
 func (s *LiveStage) accessChecks() []cluster.AccessCheck {
-	checks := []cluster.AccessCheck{
+	return []cluster.AccessCheck{
 		{Name: "pipelineruns", Resource: PipelineRunGVR, Namespace: s.Request.TenantNamespace},
 		{Name: "taskruns", Resource: cluster.TaskRunGVR, Namespace: s.Request.TenantNamespace},
 		{Name: "applications", Resource: cluster.ApplicationGVR, Namespace: s.Request.TenantNamespace},
 		{Name: "components", Resource: cluster.ComponentGVR, Namespace: s.Request.TenantNamespace},
 	}
-	if s.Request.Provider != config.ProviderGitLab {
-		return checks
-	}
-	verbs := []string{"get", "create", "update"}
-	if s.Request.Credentials.GitLabTokenEphemeral {
-		verbs = append(verbs, "delete")
-	}
-	namespace := s.Request.TenantNamespace
-	return append(checks, cluster.AccessCheck{
-		Name:      "GitLab SCM Secret",
-		Resource:  cluster.SecretGVR,
-		Namespace: namespace,
-		Verbs:     verbs,
-		Guidance:  fmt.Sprintf("GitLab runs require %s on Secrets in namespace %s; ask a namespace administrator to grant them, for example: oc adm policy add-role-to-user edit <user> -n %s", strings.Join(verbs, ", "), namespace, namespace),
-	})
 }
 
 // githubAppVerification reports the context remaining valid for preflight and
@@ -353,7 +338,7 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 	}
 	manifest.Fixture.TenantNamespace = namespace
 	manifest.Fixture.EphemeralGitLabAuth = s.Request.Credentials.GitLabTokenEphemeral
-	result, err := (cluster.FixtureService{Dynamic: s.Clients.Dynamic}).EnsureFixture(ctx, cluster.FixtureSpec{
+	result, err := (cluster.FixtureService{Dynamic: s.Clients.Dynamic, Kubernetes: s.Clients.Kubernetes}).EnsureFixture(ctx, cluster.FixtureSpec{
 		Namespace:            namespace,
 		RunID:                manifest.RunID,
 		Application:          application,

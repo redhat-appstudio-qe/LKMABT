@@ -9,6 +9,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/redhat-appstudio/lkmabt/internal/cleanup"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
+	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	kubetesting "k8s.io/client-go/testing"
 )
 
@@ -36,11 +38,35 @@ func testFixtureSpec(provider, token string) FixtureSpec {
 	}
 }
 
-// fixtureTestClient creates a fake dynamic client configured for Secret lists.
+// fixtureTestClient creates a fake dynamic client that simulates the OpenShift
+// project controller creating a Namespace for each ProjectRequest.
 func fixtureTestClient(objects ...runtime.Object) *fake.FakeDynamicClient {
-	return fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		SecretGVR: "SecretList",
+	client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		SecretGVR:    "SecretList",
+		NamespaceGVR: "NamespaceList",
 	}, objects...)
+	client.PrependReactor("create", ProjectRequestGVR.Resource, func(action kubetesting.Action) (bool, runtime.Object, error) {
+		create := action.(kubetesting.CreateAction)
+		request := create.GetObject().(metav1.Object)
+		namespace := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": request.GetName()}}}
+		if err := client.Tracker().Create(NamespaceGVR, namespace, ""); err != nil {
+			return true, nil, err
+		}
+		return true, create.GetObject(), nil
+	})
+	return client
+}
+
+// fixtureTestKubernetes returns a fake clientset that allows every Secret verb.
+func fixtureTestKubernetes() *kubernetesfake.Clientset {
+	client := kubernetesfake.NewSimpleClientset()
+	respondSSAR(client, authorizationv1.SubjectAccessReviewStatus{Allowed: true}, nil)
+	return client
+}
+
+// fixtureTestService wires the clients EnsureFixture needs.
+func fixtureTestService(client *fake.FakeDynamicClient) FixtureService {
+	return FixtureService{Dynamic: client, Kubernetes: fixtureTestKubernetes()}
 }
 
 // forbidSecretList makes every Secret list fail with Forbidden.
@@ -61,7 +87,7 @@ var _ = Describe("FixtureService", func() {
 		spec.Components[2].Context = "frontend"
 		spec.Components[2].Dockerfile = "Dockerfile"
 
-		_, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), spec)
+		_, err := (fixtureTestService(client)).EnsureFixture(context.Background(), spec)
 		Expect(err).NotTo(HaveOccurred())
 		for _, expected := range []struct {
 			name    string
@@ -87,7 +113,7 @@ var _ = Describe("FixtureService", func() {
 	It("does not create GitLab Secret for GitHub", func() {
 		client := fixtureTestClient()
 
-		if _, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), testFixtureSpec("github", "token")); err != nil {
+		if _, err := (fixtureTestService(client)).EnsureFixture(context.Background(), testFixtureSpec("github", "token")); err != nil {
 			Expect(err).NotTo(HaveOccurred())
 		}
 
@@ -101,7 +127,7 @@ var _ = Describe("FixtureService", func() {
 	It("creates GitLab SCM Secret", func() {
 		client := fixtureTestClient()
 
-		if _, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "token")); err != nil {
+		if _, err := (fixtureTestService(client)).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "token")); err != nil {
 			Expect(err).NotTo(HaveOccurred())
 		}
 
@@ -152,7 +178,7 @@ var _ = Describe("FixtureService", func() {
 		spec := testFixtureSpec("gitlab", "new-token")
 		spec.GitLabTokenEphemeral = true
 
-		if _, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), spec); err != nil {
+		if _, err := (fixtureTestService(client)).EnsureFixture(context.Background(), spec); err != nil {
 			Expect(err).NotTo(HaveOccurred())
 		}
 
@@ -200,7 +226,7 @@ var _ = Describe("FixtureService", func() {
 			"data": map[string]any{"password": "existing-token"},
 		}})
 
-		if _, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token")); err != nil {
+		if _, err := (fixtureTestService(client)).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token")); err != nil {
 			Expect(err).NotTo(HaveOccurred())
 		}
 
@@ -231,7 +257,7 @@ var _ = Describe("FixtureService", func() {
 			"data": map[string]any{"password": "unrelated-token"},
 		}})
 
-		if _, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "token")); err != nil {
+		if _, err := (fixtureTestService(client)).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "token")); err != nil {
 			Expect(err).NotTo(HaveOccurred())
 		}
 
@@ -243,8 +269,8 @@ var _ = Describe("FixtureService", func() {
 	})
 
 	It("sets application display name", func() {
-		client := fake.NewSimpleDynamicClient(runtime.NewScheme())
-		service := FixtureService{Dynamic: client}
+		client := fixtureTestClient()
+		service := fixtureTestService(client)
 		_, err := service.EnsureFixture(context.Background(), FixtureSpec{
 			Namespace:   "tenant",
 			RunID:       "run-1",
@@ -272,8 +298,8 @@ var _ = Describe("FixtureService", func() {
 	})
 
 	It("configures build and image controllers", func() {
-		client := fake.NewSimpleDynamicClient(runtime.NewScheme())
-		service := FixtureService{Dynamic: client}
+		client := fixtureTestClient()
+		service := fixtureTestService(client)
 		_, err := service.EnsureFixture(context.Background(), FixtureSpec{
 			Namespace:   "tenant",
 			RunID:       "run-1",
@@ -300,8 +326,8 @@ var _ = Describe("FixtureService", func() {
 	})
 
 	It("rejects drift", func() {
-		client := fake.NewSimpleDynamicClient(runtime.NewScheme())
-		service := FixtureService{Dynamic: client}
+		client := fixtureTestClient()
+		service := fixtureTestService(client)
 		spec := FixtureSpec{Namespace: "tenant", RunID: "run-1", Application: "app", Components: []ComponentSpec{{Name: "one", Repository: "https://gitlab.com/o/r", Branch: "main", Dockerfile: "one/Dockerfile"}, {Name: "two", Repository: "https://gitlab.com/o/r", Branch: "main", Dockerfile: "two/Dockerfile"}, {Name: "three", Repository: "https://gitlab.com/o/r", Branch: "main", Dockerfile: "three/Dockerfile"}}}
 		_, err := service.EnsureFixture(context.Background(), spec)
 		if err != nil {
@@ -313,8 +339,8 @@ var _ = Describe("FixtureService", func() {
 	})
 
 	It("labels created namespace with ownership", func() {
-		client := fake.NewSimpleDynamicClient(runtime.NewScheme())
-		_, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), FixtureSpec{
+		client := fixtureTestClient()
+		_, err := (fixtureTestService(client)).EnsureFixture(context.Background(), FixtureSpec{
 			Namespace: "tenant", RunID: "run-1", Application: "app",
 			Components: []ComponentSpec{{Name: "one", Repository: "https://gitlab.com/o/r", Branch: "main"}, {Name: "two", Repository: "https://gitlab.com/o/r", Branch: "main"}, {Name: "three", Repository: "https://gitlab.com/o/r", Branch: "main"}},
 		})
@@ -329,6 +355,106 @@ var _ = Describe("FixtureService", func() {
 	})
 })
 
+var _ = Describe("tenant namespace creation", func() {
+	It("requests the project, labels the created namespace, and authorizes the GitLab Secret", func() {
+		client := fixtureTestClient()
+		kubernetes := fixtureTestKubernetes()
+		spec := testFixtureSpec("gitlab", "token")
+		spec.GitLabTokenEphemeral = true
+
+		_, err := (FixtureService{Dynamic: client, Kubernetes: kubernetes}).EnsureFixture(context.Background(), spec)
+		Expect(err).ShouldNot(HaveOccurred())
+
+		var requests []string
+		for _, action := range client.Actions() {
+			create, ok := action.(kubetesting.CreateAction)
+			if ok && action.GetResource() == ProjectRequestGVR {
+				requests = append(requests, create.GetObject().(metav1.Object).GetName())
+			}
+		}
+		Expect(requests).Should(ConsistOf("tenant"))
+
+		namespace, err := client.Resource(NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(namespace.GetLabels()).Should(SatisfyAll(HaveKeyWithValue(cleanup.ManagedByLabel, cleanup.ManagedByValue), HaveKeyWithValue(cleanup.RunIDLabel, "run-1"), HaveKeyWithValue("konflux-ci.dev/type", "tenant"), HaveKeyWithValue("cost-center", "670")))
+
+		var verbs []string
+		for _, action := range kubernetes.Actions() {
+			create, ok := action.(kubetesting.CreateAction)
+			if !ok || action.GetResource().Resource != "selfsubjectaccessreviews" {
+				continue
+			}
+			review, ok := create.GetObject().(*authorizationv1.SelfSubjectAccessReview)
+			Expect(ok).Should(BeTrue())
+			verbs = append(verbs, review.Spec.ResourceAttributes.Verb)
+		}
+		Expect(verbs).Should(ConsistOf("get", "create", "update", "delete"))
+	})
+
+	DescribeTable("falls back to a bare Namespace when the ProjectRequest API is unavailable",
+		func(unavailable error) {
+			client := fixtureTestClient()
+			client.PrependReactor("create", ProjectRequestGVR.Resource, func(kubetesting.Action) (bool, runtime.Object, error) {
+				return true, nil, unavailable
+			})
+
+			_, err := fixtureTestService(client).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "token"))
+			Expect(err).ShouldNot(HaveOccurred())
+
+			namespace, err := client.Resource(NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(namespace.GetLabels()).Should(SatisfyAll(HaveKeyWithValue(cleanup.ManagedByLabel, cleanup.ManagedByValue), HaveKeyWithValue(cleanup.RunIDLabel, "run-1"), HaveKeyWithValue("konflux-ci.dev/type", "tenant"), HaveKeyWithValue("cost-center", "670")))
+		},
+		Entry("not found", apierrors.NewNotFound(schema.GroupResource{Group: "project.openshift.io", Resource: "projectrequests"}, "tenant")),
+		Entry("forbidden", apierrors.NewForbidden(schema.GroupResource{Group: "project.openshift.io", Resource: "projectrequests"}, "tenant", fmt.Errorf("not allowed"))),
+	)
+
+	It("fails before writing the Secret when Secret authorization is denied", func() {
+		client := fixtureTestClient()
+		kubernetes := kubernetesfake.NewSimpleClientset()
+		respondSSAR(kubernetes, authorizationv1.SubjectAccessReviewStatus{Reason: "rbac denied"}, nil)
+
+		_, err := (FixtureService{Dynamic: client, Kubernetes: kubernetes}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "token"))
+		Expect(err).Should(MatchError(ContainSubstring("get secrets in namespace tenant denied: rbac denied")))
+		Expect(err.Error()).Should(ContainSubstring("get, create, update"))
+		Expect(err.Error()).Should(ContainSubstring("oc adm policy add-role-to-user edit <user> -n tenant"))
+
+		_, getErr := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})
+		Expect(apierrors.IsNotFound(getErr)).Should(BeTrue())
+	})
+
+	It("does not attempt Secret authorization before the namespace exists", func() {
+		client := fixtureTestClient()
+		client.PrependReactor("create", ProjectRequestGVR.Resource, func(kubetesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "project.openshift.io", Resource: "projectrequests"}, "tenant", fmt.Errorf("not allowed"))
+		})
+		client.PrependReactor("create", "namespaces", func(kubetesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "tenant", fmt.Errorf("not allowed"))
+		})
+		kubernetes := fixtureTestKubernetes()
+
+		_, err := (FixtureService{Dynamic: client, Kubernetes: kubernetes}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "token"))
+		Expect(err).Should(MatchError(ContainSubstring("create namespace")))
+		Expect(kubernetes.Actions()).Should(BeEmpty())
+	})
+
+	It("explains the orphaned namespace when labels cannot be applied", func() {
+		client := fixtureTestClient()
+		client.PrependReactor("update", "namespaces", func(kubetesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "tenant", fmt.Errorf("not allowed"))
+		})
+
+		_, err := fixtureTestService(client).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "token"))
+		Expect(err).Should(MatchError(ContainSubstring("cluster-scoped update on namespaces")))
+		Expect(err.Error()).Should(ContainSubstring("delete namespace tenant manually"))
+	})
+
+	It("requires a Kubernetes client to authorize the GitLab Secret", func() {
+		_, err := (FixtureService{Dynamic: fixtureTestClient()}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "token"))
+		Expect(err).Should(MatchError(ContainSubstring("kubernetes client is required")))
+	})
+})
+
 var _ = Describe("GitLab Secret management", func() {
 	DescribeTable("creates the managed Secret when listing is forbidden",
 		func(ephemeral bool) {
@@ -337,7 +463,7 @@ var _ = Describe("GitLab Secret management", func() {
 			spec := testFixtureSpec("gitlab", "new-token")
 			spec.GitLabTokenEphemeral = ephemeral
 
-			_, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), spec)
+			_, err := (fixtureTestService(client)).EnsureFixture(context.Background(), spec)
 			Expect(err).ShouldNot(HaveOccurred())
 
 			secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})
@@ -366,7 +492,7 @@ var _ = Describe("GitLab Secret management", func() {
 				"type":     "kubernetes.io/basic-auth", "data": map[string]any{"password": "foreign-token"},
 			}})
 
-			_, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token"))
+			_, err := (fixtureTestService(client)).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token"))
 
 			Expect(err).Should(MatchError(ContainSubstring("is not owned by lkmabt")))
 			Expect(err.Error()).Should(ContainSubstring(GitLabCredentialSecretName))
@@ -390,7 +516,7 @@ var _ = Describe("GitLab Secret management", func() {
 				"type": "kubernetes.io/basic-auth", "data": map[string]any{"password": "partial-token"},
 			}})
 
-			_, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token"))
+			_, err := (fixtureTestService(client)).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token"))
 
 			Expect(err).Should(MatchError(ContainSubstring("is not owned by lkmabt")))
 			secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})
@@ -413,7 +539,7 @@ var _ = Describe("GitLab Secret management", func() {
 				"type": "kubernetes.io/basic-auth", "data": map[string]any{"password": "old-token"},
 			}})
 
-			_, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token"))
+			_, err := (fixtureTestService(client)).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token"))
 			Expect(err).ShouldNot(HaveOccurred())
 
 			secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})

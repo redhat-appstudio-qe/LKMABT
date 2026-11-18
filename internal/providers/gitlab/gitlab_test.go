@@ -24,6 +24,8 @@ type fakeClient struct {
 	getCalls         int
 	updateCalls      int
 	headCalls        int
+	revokeCalls      int
+	revokeErrors     []error
 }
 
 // GetProject returns the configured fake project or the next queued error.
@@ -79,7 +81,38 @@ func (f *fakeClient) GetBranchHead(string, string) (*gl.Commit, error) {
 	return f.headCommits[index], nil
 }
 
+// RevokeToken returns the next queued revocation error.
+func (f *fakeClient) RevokeToken(context.Context) error {
+	f.revokeCalls++
+	if len(f.revokeErrors) > 0 {
+		err := f.revokeErrors[0]
+		f.revokeErrors = f.revokeErrors[1:]
+		return err
+	}
+	return nil
+}
+
 var _ = Describe("GitLab provider", func() {
+	It("revokes the run-scoped personal access token", func() {
+		client := &fakeClient{}
+
+		Expect(New(client).RevokeToken(context.Background())).Should(Succeed())
+		Expect(client.revokeCalls).Should(Equal(1))
+	})
+
+	It("treats a missing personal access token as already revoked", func() {
+		client := &fakeClient{revokeErrors: []error{&gl.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}}}
+
+		Expect(New(client).RevokeToken(context.Background())).Should(Succeed())
+		Expect(client.revokeCalls).Should(Equal(1))
+	})
+
+	It("surfaces a token revocation failure", func() {
+		client := &fakeClient{revokeErrors: []error{errors.New("forbidden")}}
+
+		Expect(New(client).RevokeToken(context.Background())).Should(MatchError("forbidden"))
+	})
+
 	It("authenticates with a bearer token for glab OAuth tokens", func() {
 		var authorization, privateToken string
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

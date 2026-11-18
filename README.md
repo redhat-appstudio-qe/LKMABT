@@ -85,12 +85,19 @@ resources.
    remains unverifiable after the browser login still logs the preflight
    warning and continues.
 8. GitLab runs write the PaC SCM Secret `gitlab-build-secret` in the tenant
-   namespace (`mathwizz-test-gitlab` by default). The run identity needs
-   `get`, `create`, and `update` on Secrets in that namespace, plus `delete`
-   when the GitLab token is ephemeral (acquired at run time). Preflight asks
-   the API with a `SelfSubjectAccessReview`, so missing permissions fail before
-   any cluster mutation with guidance naming the namespace. Grant them as a
-   namespace administrator, for example:
+   namespace (`mathwizz-test-gitlab` by default). When the namespace is absent,
+   fixture setup requests it through the OpenShift `ProjectRequest` API, which
+   makes the requester project admin and therefore able to manage the Secret.
+   If that API is unavailable or forbidden, setup falls back to creating a bare
+   `Namespace`. Because a ProjectRequest does not copy labels, the run identity
+   also needs cluster-scoped `update` on `namespaces` to mark the new project
+   for cleanup; without it, setup fails and names the namespace to delete
+   manually. After the namespace exists, setup asks the API with a
+   `SelfSubjectAccessReview` for `get`, `create`, and `update` on Secrets there,
+   plus `delete` when the GitLab token is ephemeral (acquired at run time).
+   Missing permissions fail fixture setup before the Secret is written, with
+   guidance naming the namespace. Grant them as a namespace administrator, for
+   example:
    `oc adm policy add-role-to-user edit <user> -n mathwizz-test-gitlab`.
    The Secret is labeled `app.konflux-ci.org/managed-by=lkmabt` and
    `app.konflux.org/run-id=<run-id>`. Both labels mark harness ownership: a
@@ -107,6 +114,8 @@ resources.
    `gh auth login` (browser; requests `repo`, `read:org`, and `read:user`) and
    GitLab uses `glab auth login` (choose **Web** in its sign-in menu). Both
    `gh` and `glab` must be on `PATH` when the corresponding token is empty. A
+   run-acquired GitLab token is revoked during finalization, including after a
+   failed run; a configured `GITLAB_BOT_TOKEN` is never revoked. A
    configured `GITHUB_TOKEN` is checked against the organization's App
    installations, the fixture repository's push permission, and the repositories
    of each non-suspended installation that covers selected repositories; in an

@@ -264,7 +264,9 @@ store so `glab api user` can refresh the OAuth token before each cluster. Each
 acquired token is kept in a 0600 file inside one run-scoped `lkmabt-auth-*`
 temporary directory and reused for every cluster. The ephemeral GitLab token is
 also written to the tenant SCM Secret for PaC, and finalization deletes that
-Secret.
+Secret and revokes the run-acquired token with
+`DELETE /personal_access_tokens/self`. An OAuth token answers 404 and is left
+to expire; a configured `GITLAB_BOT_TOKEN` is never revoked.
 
 The directory is removed when the run ends, including after failures and
 cancellations, and a removal failure fails the run. Authentication requires an
@@ -274,11 +276,22 @@ administers the fixture organization, push access to the fixture repository,
 and `read:user` when an App installation is limited to selected repositories.
 
 ### GitLab SCM Secret Lifecycle
-GitLab preflight adds a `SelfSubjectAccessReview` check for `get`, `create`,
-and `update` on `secrets` in the tenant namespace; ephemeral tokens also
-require `delete`. A denial or review error fails preflight with the namespace
-and an example `oc adm policy add-role-to-user edit <user> -n <namespace>`
-grant, before any cluster mutation.
+Fixture setup creates the tenant namespace before writing the GitLab Secret.
+When the namespace is absent, it first requests one through the OpenShift
+`ProjectRequest` API (`project.openshift.io/v1`, resource `projectrequests`),
+which binds the requester as project admin. A NotFound or Forbidden
+ProjectRequest API falls back to creating a bare Namespace, which surfaces the
+cluster's own namespace RBAC error. A ProjectRequest does not guarantee label
+copying, so setup applies the ownership labels after the controller creates the
+Namespace. That update is cluster-scoped: the run identity needs `update` on
+`namespaces`, and a denial fails setup with an error naming the namespace to
+delete manually.
+
+After the namespace exists, setup runs one `SelfSubjectAccessReview` per verb:
+`get`, `create`, and `update` on `secrets` in the tenant namespace; ephemeral
+tokens also require `delete`. A denial or review error fails fixture setup with
+the namespace and an example `oc adm policy add-role-to-user edit <user> -n
+<namespace>` grant, before the Secret is written.
 
 Fixtures own exactly one Secret, `gitlab-build-secret`, and label it
 `app.konflux-ci.org/managed-by=lkmabt` plus `app.konflux.org/run-id=<run-id>`.

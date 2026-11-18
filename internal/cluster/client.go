@@ -153,7 +153,7 @@ func (c *RealCluster) CheckAccess(ctx context.Context, checks []AccessCheck) []C
 			results = append(results, result)
 			continue
 		}
-		result.Details = c.authorizeVerbs(ctx, check)
+		result.Details = authorizeVerbs(ctx, c.Clients.Kubernetes, check)
 		result.Passed = result.Details == ""
 		results = append(results, result)
 	}
@@ -162,8 +162,8 @@ func (c *RealCluster) CheckAccess(ctx context.Context, checks []AccessCheck) []C
 
 // authorizeVerbs returns failure details from one SelfSubjectAccessReview per verb,
 // or an empty string when every request is allowed.
-func (c *RealCluster) authorizeVerbs(ctx context.Context, check AccessCheck) string {
-	if c.Clients.Kubernetes == nil {
+func authorizeVerbs(ctx context.Context, kubernetesClient kubernetes.Interface, check AccessCheck) string {
+	if kubernetesClient == nil {
 		return withGuidance("kubernetes client is not initialized", check.Guidance)
 	}
 	if strings.TrimSpace(check.Namespace) == "" {
@@ -179,7 +179,7 @@ func (c *RealCluster) authorizeVerbs(ctx context.Context, check AccessCheck) str
 				Resource:  check.Resource.Resource,
 			},
 		}}
-		response, err := c.Clients.Kubernetes.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
+		response, err := kubernetesClient.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s %s in namespace %s: %v", verb, check.Resource.Resource, check.Namespace, err))
 			continue

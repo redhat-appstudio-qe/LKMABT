@@ -6,13 +6,18 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/redhat-appstudio/lkmabt/internal/cleanup"
 )
@@ -22,7 +27,17 @@ var (
 	ApplicationGVR = schema.GroupVersionResource{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "applications"}
 	ComponentGVR   = schema.GroupVersionResource{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "components"}
 	SecretGVR      = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+	// ProjectRequestGVR is the OpenShift self-service namespace API. A
+	// ProjectRequest makes the requester project admin.
+	ProjectRequestGVR = schema.GroupVersionResource{Group: "project.openshift.io", Version: "v1", Resource: "projectrequests"}
 )
+
+// projectCreationInterval bounds how often fixture setup rechecks for a requested project.
+var projectCreationInterval = time.Second
+
+// projectCreationTimeout bounds how long the OpenShift project controller may
+// take to create the Namespace for a ProjectRequest.
+const projectCreationTimeout = 30 * time.Second
 
 const (
 	componentPaCRequestAnnotation = "build.appstudio.openshift.io/request"
@@ -60,7 +75,8 @@ type FixtureResult struct {
 }
 
 type FixtureService struct {
-	Dynamic dynamic.Interface
+	Dynamic    dynamic.Interface
+	Kubernetes kubernetes.Interface
 }
 
 // EnsureFixture creates missing tenant resources and rejects drift in existing components.
@@ -72,15 +88,13 @@ func (s FixtureService) EnsureFixture(ctx context.Context, spec FixtureSpec) (Fi
 		return FixtureResult{}, fmt.Errorf("fixture requires namespace, application, and exactly three components")
 	}
 	namespaces := s.Dynamic.Resource(NamespaceGVR)
-	if _, err := namespaces.Get(ctx, spec.Namespace, metav1.GetOptions{}); errors.IsNotFound(err) {
-		object := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": spec.Namespace, "labels": map[string]any{"app.konflux-ci.org/managed-by": "lkmabt", "app.konflux.org/run-id": spec.RunID, "konflux-ci.dev/type": "tenant", "cost-center": "670"}}}}
-		if _, err := namespaces.Create(ctx, object, metav1.CreateOptions{}); err != nil {
-			return FixtureResult{}, fmt.Errorf("create namespace: %w", err)
-		}
-	} else if err != nil {
-		return FixtureResult{}, fmt.Errorf("get namespace: %w", err)
+	if err := s.ensureNamespace(ctx, namespaces, spec.Namespace, spec.RunID); err != nil {
+		return FixtureResult{}, err
 	}
 	if spec.Provider == "gitlab" {
+		if err := s.authorizeGitLabSecretAccess(ctx, spec.Namespace, spec.GitLabTokenEphemeral); err != nil {
+			return FixtureResult{}, err
+		}
 		if err := s.ensureGitLabCredentialSecret(ctx, spec.Namespace, spec.RunID, spec.GitLabToken, spec.Repository, spec.GitLabTokenEphemeral); err != nil {
 			return FixtureResult{}, err
 		}
@@ -128,6 +142,112 @@ func (s FixtureService) EnsureFixture(ctx context.Context, spec FixtureSpec) (Fi
 		result.Components = append(result.Components, component.Name)
 	}
 	return result, nil
+}
+
+// ensureNamespace creates the tenant namespace, preferring an OpenShift
+// ProjectRequest so the requester becomes project admin. It falls back to a
+// bare Namespace when the ProjectRequest API is unavailable or forbidden.
+func (s FixtureService) ensureNamespace(ctx context.Context, namespaces dynamic.ResourceInterface, namespace, runID string) error {
+	if _, err := namespaces.Get(ctx, namespace, metav1.GetOptions{}); err == nil {
+		return nil
+	} else if !errors.IsNotFound(err) {
+		return fmt.Errorf("get namespace: %w", err)
+	}
+	if err := s.createProject(ctx, namespaces, namespace); err == nil {
+		return s.labelNamespace(ctx, namespaces, namespace, runID)
+	} else if !errors.IsNotFound(err) && !errors.IsForbidden(err) && !meta.IsNoMatchError(err) {
+		return err
+	}
+	object := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": namespace}}}
+	object.SetLabels(tenantNamespaceLabels(runID))
+	if _, err := namespaces.Create(ctx, object, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("create namespace: %w", err)
+	}
+	return nil
+}
+
+// createProject requests a namespace from the OpenShift project controller and
+// waits for it to appear. The controller deletes the ProjectRequest afterward.
+func (s FixtureService) createProject(ctx context.Context, namespaces dynamic.ResourceInterface, namespace string) error {
+	request := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "project.openshift.io/v1", "kind": "ProjectRequest", "metadata": map[string]any{"name": namespace},
+	}}
+	if _, err := s.Dynamic.Resource(ProjectRequestGVR).Create(ctx, request, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("create project request %s: %w", namespace, err)
+	}
+	err := wait.PollUntilContextTimeout(ctx, projectCreationInterval, projectCreationTimeout, true, func(ctx context.Context) (bool, error) {
+		_, err := namespaces.Get(ctx, namespace, metav1.GetOptions{})
+		if err == nil {
+			return true, nil
+		}
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	})
+	if err != nil {
+		return fmt.Errorf("wait for project %s: %w", namespace, err)
+	}
+	return nil
+}
+
+// labelNamespace applies the harness ownership labels that a ProjectRequest
+// does not guarantee the project controller copies.
+func (s FixtureService) labelNamespace(ctx context.Context, namespaces dynamic.ResourceInterface, namespace, runID string) error {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		object, err := namespaces.Get(ctx, namespace, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get requested namespace: %w", err)
+		}
+		labels := object.GetLabels()
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		for key, value := range tenantNamespaceLabels(runID) {
+			labels[key] = value
+		}
+		object.SetLabels(labels)
+		_, err = namespaces.Update(ctx, object, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("label requested namespace %s: %w (a ProjectRequest does not copy ownership labels, so the run identity needs cluster-scoped update on namespaces to mark it for cleanup; grant that permission or delete namespace %s manually)", namespace, err, namespace)
+	}
+	return nil
+}
+
+// tenantNamespaceLabels returns the labels cleanup requires to own a namespace.
+func tenantNamespaceLabels(runID string) map[string]string {
+	return map[string]string{
+		cleanup.ManagedByLabel: cleanup.ManagedByValue,
+		cleanup.RunIDLabel:     runID,
+		"konflux-ci.dev/type":  "tenant",
+		"cost-center":          "670",
+	}
+}
+
+// authorizeGitLabSecretAccess verifies Secret permissions in the tenant
+// namespace. It runs at fixture setup because a ProjectRequest grants the
+// requester project admin only once the namespace exists.
+func (s FixtureService) authorizeGitLabSecretAccess(ctx context.Context, namespace string, ephemeral bool) error {
+	if s.Kubernetes == nil {
+		return fmt.Errorf("kubernetes client is required to authorize GitLab SCM Secret access in namespace %s", namespace)
+	}
+	verbs := []string{"get", "create", "update"}
+	if ephemeral {
+		verbs = append(verbs, "delete")
+	}
+	check := AccessCheck{
+		Name:      "GitLab SCM Secret",
+		Resource:  SecretGVR,
+		Namespace: namespace,
+		Verbs:     verbs,
+		Guidance:  fmt.Sprintf("GitLab runs require %s on Secrets in namespace %s; ask a namespace administrator to grant them, for example: oc adm policy add-role-to-user edit <user> -n %s", strings.Join(verbs, ", "), namespace, namespace),
+	}
+	if details := authorizeVerbs(ctx, s.Kubernetes, check); details != "" {
+		return fmt.Errorf("GitLab SCM Secret authorization failed: %s", details)
+	}
+	return nil
 }
 
 // ensureGitLabCredentialSecret manages the harness-owned GitLab SCM basic-auth Secret.

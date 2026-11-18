@@ -123,3 +123,17 @@ var _ = Describe("LiveRunner.Run", func() {
 		})
 	})
 })
+
+var _ = Describe("gitLabTokenRevoker", func() {
+	It("returns no callback for configured long-lived tokens", func() {
+		Expect(gitLabTokenRevoker(config.Request{Provider: config.ProviderGitLab, Credentials: config.Credentials{GitLabToken: "token"}})).Should(BeNil())
+	})
+
+	It("returns no callback for GitHub runs", func() {
+		Expect(gitLabTokenRevoker(config.Request{Provider: config.ProviderGitHub, Credentials: config.Credentials{GitLabToken: "token", GitLabTokenEphemeral: true}})).Should(BeNil())
+	})
+
+	It("returns a callback for run-acquired GitLab tokens", func() {
+		Expect(gitLabTokenRevoker(config.Request{Provider: config.ProviderGitLab, Credentials: config.Credentials{GitLabToken: "token", GitLabTokenEphemeral: true}})).ShouldNot(BeNil())
+	})
+})

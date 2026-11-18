@@ -22,6 +22,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -877,7 +878,13 @@ var _ = Describe("LiveStage", func() {
 				"url": "https://gitlab.com/other/repo", "revision": "main", "context": "web-server", "dockerfileUrl": "Dockerfile",
 			}}},
 		}}
-		dynamic := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, wrongComponent)
+		dynamic := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": "tenant"},
+		}}, wrongComponent)
+		kubernetes := kubernetesfake.NewSimpleClientset()
+		kubernetes.PrependReactor("create", "selfsubjectaccessreviews", func(kubetesting.Action) (bool, runtime.Object, error) {
+			return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true}}, nil
+		})
 		fixture := providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl", URL: "https://gitlab.com/konflux-qe/dr_test_mathwizz_gl"}
 		stage := &LiveStage{
 			Request: config.Request{
@@ -885,7 +892,7 @@ var _ = Describe("LiveStage", func() {
 				SourceBranch: "main", ComponentPaths: config.DefaultComponentPaths,
 				Credentials: config.Credentials{GitLabToken: "token", GitLabTokenEphemeral: true},
 			},
-			Clients:  &cluster.ClientSet{Dynamic: dynamic},
+			Clients:  &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetes},
 			Provider: &githubAppProviderStub{fixture: fixture},
 			Fixture:  fixture,
 			Log:      io.Discard,
@@ -1396,72 +1403,37 @@ func namespaceDynamicClient(objects ...runtime.Object) *dynamicfake.FakeDynamicC
 }
 
 var _ = Describe("LiveStage preflight access checks", func() {
-	// gitLabSecretCheck returns the GitLab Secret access check, or false when absent.
-	gitLabSecretCheck := func(checks []cluster.AccessCheck) (cluster.AccessCheck, bool) {
+	It("checks the four pipeline resources and no GitLab Secret", func() {
+		stage := &LiveStage{Request: config.Request{
+			Provider:        config.ProviderGitLab,
+			TenantNamespace: "mathwizz-test-gitlab",
+			Credentials:     config.Credentials{GitLabTokenEphemeral: true},
+		}}
+
+		checks := stage.accessChecks()
+		Expect(checks).Should(HaveLen(4))
+		resources := make([]schema.GroupVersionResource, 0, len(checks))
 		for _, check := range checks {
-			if check.Name == "GitLab SCM Secret" {
-				return check, true
-			}
-		}
-		return cluster.AccessCheck{}, false
-	}
-
-	When("the GitLab token is ephemeral", func() {
-		It("should require get, create, update, and delete on Secrets in the tenant namespace", func() {
-			stage := &LiveStage{Request: config.Request{
-				Provider:        config.ProviderGitLab,
-				TenantNamespace: "mathwizz-test-gitlab",
-				Credentials:     config.Credentials{GitLabTokenEphemeral: true},
-			}}
-
-			check, found := gitLabSecretCheck(stage.accessChecks())
-			Expect(found).Should(BeTrue())
-			Expect(check.Resource).Should(Equal(cluster.SecretGVR))
 			Expect(check.Namespace).Should(Equal("mathwizz-test-gitlab"))
-			Expect(check.Verbs).Should(ConsistOf("get", "create", "update", "delete"))
-			Expect(check.Guidance).Should(ContainSubstring("mathwizz-test-gitlab"))
-			Expect(check.Guidance).Should(ContainSubstring("get, create, update, delete"))
-			Expect(check.Guidance).Should(ContainSubstring("oc adm policy add-role-to-user edit <user> -n mathwizz-test-gitlab"))
-		})
+			Expect(check.Verbs).Should(BeEmpty())
+			resources = append(resources, check.Resource)
+		}
+		Expect(resources).Should(ConsistOf(PipelineRunGVR, cluster.TaskRunGVR, cluster.ApplicationGVR, cluster.ComponentGVR))
+		Expect(resources).ShouldNot(ContainElement(cluster.SecretGVR))
 	})
 
-	When("the GitLab token is long-lived", func() {
-		It("should require get, create, and update without delete", func() {
-			stage := &LiveStage{Request: config.Request{
-				Provider:        config.ProviderGitLab,
-				TenantNamespace: "mathwizz-test-gitlab",
-			}}
+	It("sends only the four API checks to preflight", func() {
+		var checks []cluster.AccessCheck
+		stage := &LiveStage{
+			Request:          config.Request{Provider: config.ProviderGitLab, ClusterServer: "https://api.example", TenantNamespace: "tenant", Credentials: config.Credentials{GitLabTokenEphemeral: true}},
+			PreflightCluster: fakePreflightCluster{server: "https://api.example", accessChecks: &checks},
+			Namespace:        cleanup.NamespaceService{Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), NameLister: testNameLister{}},
+		}
 
-			check, found := gitLabSecretCheck(stage.accessChecks())
-			Expect(found).Should(BeTrue())
-			Expect(check.Verbs).Should(ConsistOf("get", "create", "update"))
-			Expect(check.Guidance).ShouldNot(ContainSubstring("delete"))
-		})
-	})
-
-	When("the provider is GitHub", func() {
-		It("should not add a Secrets check", func() {
-			stage := &LiveStage{Request: config.Request{Provider: config.ProviderGitHub, TenantNamespace: "mathwizz-test-github"}}
-
-			_, found := gitLabSecretCheck(stage.accessChecks())
-			Expect(found).Should(BeFalse())
-		})
-	})
-
-	When("preflight runs for GitLab", func() {
-		It("should send the Secrets check to the cluster", func() {
-			var checks []cluster.AccessCheck
-			stage := &LiveStage{
-				Request:          config.Request{Provider: config.ProviderGitLab, ClusterServer: "https://api.example", TenantNamespace: "tenant", Credentials: config.Credentials{GitLabTokenEphemeral: true}},
-				PreflightCluster: fakePreflightCluster{server: "https://api.example", accessChecks: &checks},
-				Namespace:        cleanup.NamespaceService{Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), NameLister: testNameLister{}},
-			}
-
-			Expect(stage.Preflight(context.Background(), &model.RunManifest{})).Should(Succeed())
-			check, found := gitLabSecretCheck(checks)
-			Expect(found).Should(BeTrue())
-			Expect(check.Namespace).Should(Equal("tenant"))
-			Expect(check.Verbs).Should(ConsistOf("get", "create", "update", "delete"))
-		})
+		Expect(stage.Preflight(context.Background(), &model.RunManifest{})).Should(Succeed())
+		Expect(checks).Should(HaveLen(4))
+		for _, check := range checks {
+			Expect(check.Resource).ShouldNot(Equal(cluster.SecretGVR))
+		}
 	})
 })
