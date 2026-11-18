@@ -155,6 +155,28 @@ On failure, transition to **Failed** phase and collect artifacts. Clusters run
 sequentially in clusters-file order; each completes or fails before the next
 starts.
 
+### Build Wait Progress and Deadlock Detection
+PaC onboarding and build waits emit at most one progress line per minute: PaC
+shows enabled/total plus pending component names; build waits name each
+component's matching PipelineRun, pending/running age, and Buildah TaskRun
+counts, with milestone lines at each phase entry. `VerifyBuilds` inspects the
+`pipelinesascode.tekton.dev/git-auth-secret` annotation on pending
+PipelineRuns: when the referenced Secret is absent for more than two minutes it
+fails with `MissingPacAuthSecretError`, which names the run, component, Secret,
+and pending duration and suggests checking for a concurrent run. A Secret read
+that fails for any other reason warns once and keeps waiting. A matched
+PipelineRun with a `Succeeded=False` condition fails the wait immediately
+instead of waiting for Buildah TaskRuns.
+
+### Tenant Namespace Locking
+`LiveRunner.Run` and `cleanupRun` take a non-blocking `flock` on
+`<user cache>/lkmabt/locks/<sha256(server + namespace)>.lock` before mutating
+cluster resources. A contended call fails immediately with the namespace,
+server, and recorded holder (run ID, pid, start time), before any artifact is
+created. The lock is per Unix user and host; it does not protect against runs
+from other machines or users, and prefixed `<tenant>-*` namespaces are outside
+its key.
+
 ## Testing Structure
 
 Ginkgo v2 + Gomega, TDD (failing test first). Test files are colocated with the
@@ -248,6 +270,30 @@ interactive terminal; non-interactive runs must provide the tokens. A
 configured `GITHUB_TOKEN` needs the `read:org` scope, an owner who
 administers the fixture organization, push access to the fixture repository,
 and `read:user` when an App installation is limited to selected repositories.
+
+### GitLab SCM Secret Lifecycle
+GitLab preflight adds a `SelfSubjectAccessReview` check for `get`, `create`,
+and `update` on `secrets` in the tenant namespace; ephemeral tokens also
+require `delete`. A denial or review error fails preflight with the namespace
+and an example `oc adm policy add-role-to-user edit <user> -n <namespace>`
+grant, before any cluster mutation.
+
+Fixtures own exactly one Secret, `gitlab-build-secret`, and label it
+`app.konflux-ci.org/managed-by=lkmabt` plus `app.konflux.org/run-id=<run-id>`.
+The Secret carries the GitLab SCM labels and repository annotation that
+build-service matches. If a Secret with that name already exists without both
+ownership labels, the run refuses to update or delete it and fails with an
+error naming the Secret and namespace; a legacy unowned Secret must be
+deleted once after access is granted. Secret listing is opportunistic: reuse
+or refresh of other repository-scoped Secrets happens only when the API allows
+it, and a `Forbidden` list falls back to managing the owned Secret. Forbidden
+updates during an ephemeral refresh are skipped.
+
+Finalization deletes the Secret only for ephemeral tokens and only after
+confirming the managed-by and run-ID labels, using a UID precondition when the
+Secret has one. A missing Secret is treated as already cleaned up. A failed
+ownership check or API call is joined into the returned error while failure
+evidence is still collected and saved, so the report retains its artifacts.
 
 ### Sequential Cluster Execution
 Clusters run one at a time in clusters-file order so run-scoped credentials are

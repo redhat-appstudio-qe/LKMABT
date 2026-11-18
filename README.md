@@ -82,7 +82,23 @@ resources.
    `gh auth refresh -h github.com -s read:user`. A listing that remains
    unverifiable after the browser login still logs the preflight warning and
    continues.
-8. Provider credentials come from `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` when
+8. GitLab runs write the PaC SCM Secret `gitlab-build-secret` in the tenant
+   namespace (`mathwizz-test-gitlab` by default). The run identity needs
+   `get`, `create`, and `update` on Secrets in that namespace, plus `delete`
+   when the GitLab token is ephemeral (acquired at run time). Preflight asks
+   the API with a `SelfSubjectAccessReview`, so missing permissions fail before
+   any cluster mutation with guidance naming the namespace. Grant them as a
+   namespace administrator, for example:
+   `oc adm policy add-role-to-user edit <user> -n mathwizz-test-gitlab`.
+   The Secret is labeled `app.konflux-ci.org/managed-by=lkmabt` and
+   `app.konflux.org/run-id=<run-id>`; only a Secret with both labels is
+   updated or deleted. A pre-existing `gitlab-build-secret` without them is
+   never modified or deleted: the run fails after inspecting its labels with an
+   actionable error naming the Secret, and a legacy unowned Secret must be
+   deleted once after access is granted before the next GitLab run. An ephemeral token's Secret is
+   removed during finalization; a configured `GITLAB_BOT_TOKEN` keeps the
+   managed Secret for reuse.
+9. Provider credentials come from `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` when
    set. Leave either empty to authenticate at run time: GitHub uses
    `gh auth login` (browser; requests `repo`, `read:org`, and `read:user`) and
    GitLab uses `glab auth login` (choose **Web** in its sign-in menu). Both
@@ -103,7 +119,7 @@ resources.
    an owner who administers the fixture organization, push access to the
    fixture repository, and the `read:user` scope when an App is installed for
    selected repositories (`gh auth refresh -h github.com -s read:user`).
-9. PaC onboarding must be complete for all three components, with current
+10. PaC onboarding must be complete for all three components, with current
    `.tekton` configuration available on each fixture's default branch. The
    harness waits for PaC readiness before writing trigger comments and does not
    merge onboarding changes.
@@ -143,6 +159,18 @@ that cluster at `preflight`.
 After success, the harness prompts before deleting the current owned tenant
 namespace. A declined prompt retains the namespace and successful result.
 After failure, it saves and verifies required artifacts before prompting.
+
+Long waits are never silent: PaC onboarding reports enabled/total and pending
+components at most once per minute, and build waits name each component's
+PipelineRun, age, and Buildah TaskRun count. A pending PipelineRun whose PaC
+git-auth Secret has been missing for more than two minutes fails immediately
+with the Secret name and a concurrent-run hint; a matched PipelineRun that has
+already failed also fails the wait immediately.
+
+Two LKMABT processes cannot share one tenant namespace on the same API server.
+Each run and `cleanup` hold a non-blocking per-user file lock keyed by API
+server and namespace; a contended run fails before creating artifacts and names
+the current holder. Use another `--tenant-namespace` or wait for that run.
 
 ## Environment configuration
 
