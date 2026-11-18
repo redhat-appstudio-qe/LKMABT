@@ -1,10 +1,14 @@
 # Local Multi-Architecture Build Testing Tool for Konflux Clusters
 
-`LKMABT` runs the selected provider workflow (GitHub, GitLab, or both)
-against every cluster listed in the clusters file. It reuses fixed
-repositories, appends one harmless comment to each of their three Dockerfiles,
-waits for matching successful PipelineRuns, verifies pre-publication
-`linux/amd64` and `linux/arm64` build outputs, then stops.
+LKMABT validates multi-architecture builds on Konflux clusters. For every
+cluster in the clusters file it:
+
+1. checks that the cluster can run multi-platform builds;
+2. creates or reuses the tenant namespace, Application, and Components;
+3. appends one harmless comment to each fixture Dockerfile and commits it;
+4. waits for the matching PipelineRuns to succeed;
+5. verifies the pre-publication Buildah outputs cover `linux/amd64` and
+   `linux/arm64`.
 
 Fixed fixtures:
 
@@ -17,143 +21,286 @@ resources.
 
 ## Prerequisites
 
-1. A clusters file (`.lkmabt-clusters.yaml` by default; override with
-   `--clusters-file <path>`). Each entry has a `name` (required, unique; the
-   report directory name and the `--cluster` identity), an optional `type`
-   (`ocp` by default, or `roks`), an optional `kflux` catalog name (defaults to
-   `name`; the `kflux cluster login -c` target for `ocp` and the prefix of the
-   default kubeconfig path), an optional `kubeconfig` path (defaults to
-   `~/.kube/config-<kflux>`), and an optional `server` API server URL (omitted
-   means the kubeconfig's own server is used). `roks` entries also accept an
-   optional `ibmcloud` cluster name or ID (defaults to `name`) and an optional
-   `ibmcloud-endpoint` (`vpe` by default; `private` and `link` are also
-   accepted). See `.lkmabt-clusters.yaml.example`.
-2. `kflux` names are the short catalog names, not the API server hosts:
-   `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is catalog cluster `ocp-p01`, so
-   that entry needs `kflux: ocp-p01`. List the catalog with `kflux cluster list`;
-   an unknown name fails with kflux's own `unknown cluster` error.
-3. Authentication follows a ladder per cluster: every kubeconfig is verified
-   with `oc whoami` on every run, because a rejected token leaves the file
-   readable. A rejected `roks` kubeconfig is refreshed through the IBM Cloud CLI;
-   every other entry goes through kflux then `oc login`.
-   ROKS runs reuse an active `ibmcloud` session, run `ibmcloud login --sso` when
-   there is none, write the entry's kubeconfig with
-   `ibmcloud ks cluster config --cluster <ibmcloud> --endpoint <ibmcloud-endpoint>`
-   through `KUBECONFIG`, then prove the kubeconfig with `oc whoami`. A rejected
-   kubeconfig fails that cluster at `authentication` with first-time-login
-   instructions: open the cluster's OpenShift web console once from the IBM
-   Cloud console, then re-run. ROKS entries never fall through to kflux or
-   `oc login`. For other entries, one
-   `kflux cluster login -c <kflux> [-c <kflux>...]` runs for every entry that
-   fails verification and uses its default kubeconfig path, with kflux installed
-   from https://gitlab.cee.redhat.com/hares/kflux.git into
-   `~/.local/share/lkmabt/kflux-src` and `~/.local/bin/kflux` when missing from
-   `PATH`; otherwise `oc login` runs with `KUBECONFIG` set to the entry's
-   kubeconfig path.
-4. `type: roks` needs the IBM Cloud CLI with the `kubernetes-service` plug-in on
-   `PATH`, `oc` for the post-login check, and network access to the configured
-   master endpoint (VPE endpoints require the VPC VPN). An existing ROKS
-   kubeconfig needs only `oc` for its verification.
-5. A kubeconfig the ladder cannot replace fails that cluster at `authentication`,
-   before any cluster API work starts. For `roks` entries the failure keeps the
-   refresh path and first-time-login instructions visible.
-6. A ready `multi-platform-controller` deployment and `host-config` entries for
-   `linux/amd64` and `linux/arm64`. Dynamic arm64 provisioning is sufficient;
-   physical arm64 nodes are not required.
-7. Every GitHub cluster must publish its Konflux GitHub App URL in
-   `konflux-info/konflux-public-info` and that app must be installed for the
-   fixture organization. GitHub runs verify the installation at `preflight`,
-   before any cluster mutation. In an interactive session, a missing
-   installation prints the installation steps, opens the app's installation
-   page automatically, and waits for an organization administrator to approve
-   it, rechecking every 10 seconds. Failed checks are retried, and progress,
-   including the latest failure, is reported every 5 minutes. When the
-   preflight timeout expires, the run asks whether to keep waiting. Declining,
-   or a non-interactive run, fails that cluster with the installation URL. An
-   app installed for selected repositories must include the fixture repository;
-   the check fails immediately with the installation settings URL when it does
-   not. When the token cannot list installation repositories, preflight logs a
-   warning and continues; the trigger-stage PaC wait remains the backstop for a
-   missing selection.
-8. Provider credentials come from `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` when
-   set. Leave either empty to authenticate at run time: GitHub uses
-   `gh auth login` (browser; requests `repo`, `read:org`, and `read:user`) and
-   GitLab uses `glab auth login` (choose **Web** in its sign-in menu). Both
-   `gh` and `glab` must be on `PATH` when the corresponding token is empty. A
-   configured `GITHUB_TOKEN` is checked against the organization's App
-   installations and the fixture repository's push permission; in an
-   interactive session, a token that cannot access them is replaced by the
-   existing `gh` login when that login can, and otherwise falls back to the
-   `gh` browser login. Transient, rate-limit, and timeout check failures abort
-   the run without replacing the token. Interactive GitLab login is
-   supported for `gitlab.com`; set `GITLAB_BOT_TOKEN` for self-managed
-   instances, custom ports, or HTTP endpoints. Run-scoped tokens live in a
-   private temporary directory, are reused for every cluster, and are deleted
-   when the last cluster finishes, including on failure. The ephemeral GitLab
-   token is also written to the tenant SCM Secret for PaC; that Secret is
-   deleted during finalization. A configured `GITHUB_TOKEN` needs `read:org`,
-   an owner who administers the fixture organization, and push access to the
-   fixture repository.
-9. PaC onboarding must be complete for all three components, with current
-   `.tekton` configuration available on each fixture's default branch. The
-   harness waits for PaC readiness before writing trigger comments and does not
-   merge onboarding changes.
+### Local tools
 
-## Commands
+| Tool | Needed for |
+| --- | --- |
+| Go 1.26 or newer | Building LKMABT (see `go.mod`). |
+| `oc` | Every run. Each kubeconfig is proved with `oc whoami`; a readable file with an expired token is not enough. |
+| `kflux` | `ocp` clusters whose kubeconfig is missing or rejected. If `kflux` is absent, LKMABT clones `https://gitlab.cee.redhat.com/hares/kflux.git` into `~/.local/share/lkmabt/kflux-src`, builds it, and installs `~/.local/bin/kflux`; that path needs `git`, `make`, Go, and network access to the internal GitLab. If kflux cannot refresh the kubeconfig, LKMABT falls back to `oc login`. |
+| `ibmcloud` with the `kubernetes-service` plug-in | `type: roks` clusters. |
+| `gh` | GitHub runs with an empty `GITHUB_TOKEN`. |
+| `glab` | GitLab runs with an empty `GITLAB_BOT_TOKEN`. |
 
-Run from this checkout's root, the directory holding `bin/`, `.lkmabt.env`, and
-`.lkmabt-clusters.yaml`; the example paths are relative to it.
+`type: roks` also needs network access to the configured master endpoint. VPE
+endpoints require the VPC VPN.
+
+### Accounts and access
+
+**GitHub.** Your account needs push access to
+`redhat-appstudio-qe/dr_test_mathwizz`; LKMABT commits the trigger there.
+Verify it after `gh auth login`:
 
 ```bash
-cd /path/to/konflux-test
+gh api repos/redhat-appstudio-qe/dr_test_mathwizz --jq .permissions.push
+# true
+```
+
+Installing the cluster's Konflux GitHub App additionally requires an owner of
+the `redhat-appstudio-qe` organization. Push access alone cannot approve an
+installation.
+
+**GitLab.** Your account needs at least Maintainer (access level 40) on
+`konflux-qe/dr_test_mathwizz_gl`; the trigger commit lands on `main`. Verify it
+after `glab auth login`:
+
+```bash
+glab api projects/konflux-qe%2Fdr_test_mathwizz_gl --jq .permissions.project_access.access_level
+# 40 (Maintainer) or 50 (Owner)
+```
+
+**Cluster.** Your identity must be able to create and delete the tenant
+namespace and its resources (`pipelineruns`, `taskruns`, `applications`,
+`components`). GitLab runs also need `list`, `get`, `create`, and `update` on
+Secrets in the tenant namespace, plus `delete` when the run acquires its own
+GitLab token. For a namespace you do not administer:
+
+```bash
+oc adm policy add-role-to-user edit <user> -n mathwizz-test-gitlab
+```
+
+### Cluster requirements
+
+- The `multi-platform-controller` deployment is ready in namespace
+  `multi-platform-controller`, and its `host-config` ConfigMap declares
+  `linux/amd64` and `linux/arm64`. Dynamic arm64 provisioning is sufficient;
+  physical arm64 nodes are not required.
+- PaC onboarding is complete for all three components, with current `.tekton`
+  configuration on each fixture's default branch. LKMABT waits for PaC
+  readiness and does not merge onboarding changes.
+- GitHub clusters publish the Konflux GitHub App URL in
+  `konflux-info/konflux-public-info` (`integrations.github.application_url`),
+  and that app is installed for `redhat-appstudio-qe`. See
+  [When the cluster GitHub App is not installed](#when-the-cluster-github-app-is-not-installed).
+
+## Setup
+
+### 1. Build LKMABT
+
+```bash
+go build -o bin/lkmabt ./cmd/lkmabt
+```
+
+### 2. Create the local configuration files
+
+```bash
+cp .lkmabt.env.example .lkmabt.env
+cp .lkmabt-clusters.yaml.example .lkmabt-clusters.yaml
+```
+
+Both copies are gitignored. Keep them local. The environment parser reads
+`KEY=VALUE` lines and does not execute the file.
+
+### 3. List the clusters
+
+Edit `.lkmabt-clusters.yaml`. A minimal entry for a kflux cluster:
+
+```yaml
+clusters:
+  - name: ocp-p01
+    kflux: ocp-p01
+```
+
+- `name` is unique and is the report directory name and the identity used by
+  `--cluster` and in logs.
+- `kflux` is the short kflux catalog name, not the API server host.
+  `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is catalog cluster `ocp-p01`. List
+  catalog names with `kflux cluster list`; an unknown name fails with kflux's
+  `unknown cluster` error.
+- `kubeconfig` defaults to `~/.kube/config-<kflux>` and is verified on every
+  run. kflux refreshes default paths; any entry still rejected falls back to
+  `oc login`.
+- `server` is optional; omit it to use the kubeconfig's own server.
+
+A ROKS entry:
+
+```yaml
+clusters:
+  - name: kflux-lw-p01
+    type: roks
+    ibmcloud: kflux-lw-p01
+    ibmcloud-endpoint: vpe
+```
+
+ROKS runs reuse an active `ibmcloud` session or run `ibmcloud login --sso`,
+write the entry's kubeconfig with `ibmcloud ks cluster config`, then verify it
+with `oc whoami`. If a ROKS kubeconfig is still rejected, open the cluster's
+OpenShift web console once from the IBM Cloud console and re-run. ROKS entries
+never fall through to kflux or `oc login`. All available fields are documented
+in `.lkmabt-clusters.yaml.example`.
+
+### 4. Verify fixture access
+
+Run the two commands from [Accounts and access](#accounts-and-access). In a
+terminal, a configured GitHub token is checked before the first cluster; a
+browser-login token is only exercised when the first trigger commit is
+written. Checking now avoids a failed run.
+
+## Running LKMABT
+
+Run from the checkout root, or pass absolute paths. `--clusters-file` defaults
+to `.lkmabt-clusters.yaml`; `--env-file` is optional and falls back to the
+process environment.
+
+```bash
 ./bin/lkmabt run github --env-file .lkmabt.env --clusters-file .lkmabt-clusters.yaml
 ./bin/lkmabt run gitlab --env-file .lkmabt.env
 ./bin/lkmabt run both --env-file .lkmabt.env
-./bin/lkmabt cleanup --cluster <name> --run-id <run-id> --env-file .lkmabt.env
 ```
 
-Clusters run one at a time in clusters-file order. `both` runs GitHub and
-GitLab concurrently inside every cluster. The `--cluster-server` and
-`--resume` flags no longer exist.
+- `github` and `gitlab` test one fixture; `both` tests both.
+- Clusters run one at a time in clusters-file order. Each cluster finishes or
+  fails before the next one starts. `both` runs the two providers concurrently
+  inside a cluster.
+- Each run creates one tenant namespace per provider it tests:
+  `mathwizz-test-github` for GitHub and `mathwizz-test-gitlab` for GitLab.
+  Single-provider runs accept `--tenant-namespace`.
+- The console prints `cluster <name>: started`, `cluster <name>: finished
+  (<n> passed, <n> failed)`, one result line per provider and cluster, and the
+  Markdown and HTML report paths.
+- The run ID appears in the report title and in the
+  `multi-run-<time>_<date>_<run-id>` directory name under `.lkmabt-runs/`. Use
+  it to clean up a retained namespace later:
 
-`cleanup` resolves `--cluster` through the clusters file (authenticating it
-through the same ladder when needed), locates the run by exact run ID and
-cluster inside the aggregate directories, then loads the manifest to select its
-recorded namespace, verifies both exact ownership labels, and asks for
-confirmation before deleting the namespace.
+```bash
+./bin/lkmabt cleanup --cluster <name> --run-id <run-id>
+```
 
-Each run creates one tenant namespace labeled with
-`app.konflux-ci.org/managed-by=lkmabt` and
-`app.konflux.org/run-id=<run-id>`.
+`cleanup` authenticates the cluster, finds the run by exact run ID, verifies
+the saved artifacts and both ownership labels, and asks before deleting the
+namespace.
 
-Owned scoped namespaces (`<tenant>` and `<tenant>-*`) are deleted
-automatically and logged. Unowned or label-mismatched namespaces are prompted
-individually and re-inspected before deletion. A declined prompt fails only
-that cluster at `preflight`.
+### Authentication without provider tokens
 
-After success, the harness prompts before deleting the current owned tenant
-namespace. A declined prompt retains the namespace and successful result.
-After failure, it saves and verifies required artifacts before prompting.
+`GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` are optional. Leave either empty to
+authenticate in a browser. A run is interactive when standard input is a
+terminal; prompts and the browser flows are skipped otherwise.
+
+**Empty `GITHUB_TOKEN`.** LKMABT prints
+`github: authentication required; starting the gh browser login` and runs
+`gh auth login --web` in an isolated `GH_CONFIG_DIR`. It requests the `repo`,
+`read:org`, and `read:user` scopes. Complete the browser flow; the token is
+kept in a private `lkmabt-auth-*` temporary directory (mode `0600`), reused for
+every cluster, and deleted when the last cluster finishes, including on
+failure. A non-interactive run without the token fails before any cluster work
+with:
+
+```text
+GitHub authentication is required: set GITHUB_TOKEN or run in a terminal to use the gh browser login
+```
+
+**Empty `GITLAB_BOT_TOKEN`.** LKMABT prints
+`gitlab: authentication required; choose Web in the glab login prompt` and runs
+`glab auth login --hostname gitlab.com --use-keyring=false`. Choose **Web**.
+Interactive login is supported only for `gitlab.com`; set `GITLAB_BOT_TOKEN`
+for self-managed instances, custom ports, or HTTP endpoints. The token is
+written into the tenant SCM Secret `gitlab-build-secret` so PaC can clone the
+fixture. Finalization deletes that Secret; the token's temporary copy is
+deleted when the run ends. A non-interactive run without the token fails with:
+
+```text
+GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to use the glab browser login
+```
+
+**Configured `GITHUB_TOKEN`.** In a terminal, LKMABT checks before the first
+cluster that the token can list App installations for `redhat-appstudio-qe`,
+can push to the fixture, and can list repositories for App installations that
+cover selected repositories. A token GitHub rejects is replaced by an existing
+`gh` login when that login passes the same checks, and otherwise by the `gh`
+browser login. Transient failures, rate limits, and timeouts abort the run
+without replacing the token. Classic or OAuth tokens need `read:org`; add
+`read:user` when an App is installed for selected repositories:
+
+```bash
+gh auth refresh -h github.com -s read:user
+```
+
+**Configured `GITLAB_BOT_TOKEN`.** The token is used as-is and is never
+revoked. It needs `api` access to the fixture repository.
+
+### When the cluster GitHub App is not installed
+
+GitHub preflight reads the App slug from `konflux-info/konflux-public-info` and
+checks that the App is installed for `redhat-appstudio-qe`. This happens
+before the run touches the tenant namespace or commits a trigger.
+
+**Interactive run.** LKMABT reports
+`GitHub App <slug> is not installed for organization redhat-appstudio-qe.` and
+opens `https://github.com/apps/<slug>/installations/new` (the URL is printed if
+the browser does not open). To complete the installation:
+
+1. sign in to the browser as an organization owner and approve the App;
+2. select the `redhat-appstudio-qe` organization;
+3. grant access to `redhat-appstudio-qe/dr_test_mathwizz`, or to all
+   repositories;
+4. return to the terminal.
+
+LKMABT rechecks every 10 seconds and continues automatically once the
+installation appears; it prints
+`GitHub App <slug> installation verified`. Progress, including the latest check
+failure, is reported every 5 minutes. If the preflight timeout (default 10
+minutes; `--preflight-timeout`) expires, the run asks
+`GitHub App <slug> is still not installed. Keep waiting?`. Answering `y`
+continues the wait; declining fails that cluster at `preflight`. `Ctrl-C`
+cancels the wait.
+
+**Non-interactive run.** The cluster fails at `preflight` with the installation
+URL. Other clusters in the file still run.
+
+**Installed for selected repositories, but the fixture is missing.** The check
+fails immediately at `preflight` with the installation settings URL. Add
+`redhat-appstudio-qe/dr_test_mathwizz` to the installation or select all
+repositories.
+
+**Token cannot list installation repositories.** Preflight logs a warning and
+continues; the PaC wait during triggering remains the backstop for a missing
+selection. A `gh` OAuth user token (`gho_`) cannot list installation
+repositories, so GitHub logins keep this warning path.
+
+### During the run
+
+- Triggering appends one comment to each of the three Dockerfiles on the
+  fixture's default branch and commits it. The fixtures are shared; your
+  commits are visible to other users.
+- LKMABT waits for PaC readiness and for the triggered PipelineRuns. The
+  preflight, trigger, and build phases are bounded by `--preflight-timeout`,
+  `--trigger-timeout`, and `--build-timeout` (defaults: 10m, 5m, and 60m). A
+  matching PipelineRun that has already failed fails the wait immediately.
+- Owned stale tenant namespaces (`<tenant>` and `<tenant>-*`) are deleted
+  automatically and logged. Namespaces with absent or different ownership
+  labels are prompted individually and re-inspected before deletion. Declining
+  fails that cluster at `preflight`.
+- After success, LKMABT collects and verifies the run artifacts, then prompts
+  before deleting the current tenant namespace. Declining keeps the namespace
+  and the successful result. After failure, it saves the failure artifacts
+  first, then prompts; if collection is incomplete, it skips the prompt and
+  retains the namespace. A non-interactive run never prompts, so both the
+  success and failure paths retain the namespace.
 
 ## Environment configuration
 
-Copy `.lkmabt.env.example` to `.lkmabt.env`. Keep the copy local.
-`GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` are optional. Leave either empty to
-authenticate at run time: GitHub opens the `gh` browser flow; GitLab opens the
-`glab` login prompt (choose **Web**). A configured `GITHUB_TOKEN` is validated
-for App-installation listing and fixture push access; when it fails for
-credential reasons, an interactive run reuses the existing `gh` login if that
-login passes the same checks, then falls back to the `gh` browser flow.
-Transient check failures, rate limits, and timeouts fail the run instead of
-replacing the token. Each
-run-scoped token is written to a private temporary directory (`0600` file),
-reused for every cluster, and deleted when the last cluster finishes, including
-on failure. The ephemeral GitLab token is also placed in the tenant SCM Secret
-for PaC and that Secret is deleted during finalization. Set `GITLAB_API_URL`
-when needed. Cluster selection lives in `.lkmabt-clusters.yaml` (schema in
-`.lkmabt-clusters.yaml.example`).
+`.lkmabt.env` holds provider credentials only; cluster selection lives in
+`.lkmabt-clusters.yaml`.
 
-The parser reads `KEY=VALUE` lines. It does not execute the environment file.
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `GITHUB_TOKEN` | No | Needs `repo` and `read:org`; `read:user` when an App is installed for selected repositories. Leave empty for the browser login. |
+| `GITLAB_BOT_TOKEN` | No | Needs `api` access. Leave empty for the `glab` Web login on `gitlab.com`. Never revoked. |
+| `GITLAB_API_URL` | No | Defaults to `https://gitlab.com/api/v4`. |
+
+Values in the process environment take precedence over the file. Run-scoped
+tokens are written to a private temporary directory as `0600` files and deleted
+when the last cluster finishes.
 
 ## Artifact retention
 
