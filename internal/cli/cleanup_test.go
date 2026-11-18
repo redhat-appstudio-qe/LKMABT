@@ -196,6 +196,33 @@ var _ = Describe("cleanupRun", func() {
 	})
 })
 
+var _ = Describe("cleanupRun output", func() {
+	It("should print verification and deletion steps to a console", func() {
+		store := cleanupTestStore()
+		client := cleanupTestClient("run-1", cleanup.ManagedByValue)
+		out := &bytes.Buffer{}
+
+		Expect(cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, &cleanupTestPrompt{approved: true}, &Console{Out: out})).Should(Succeed())
+
+		Expect(out.String()).Should(ContainSubstring(" • Verify run run-1 🧾  ..."))
+		Expect(out.String()).Should(ContainSubstring(" ✓ Verify run run-1 🧾"))
+		Expect(out.String()).Should(ContainSubstring(" • Delete tenant namespace tenant-run-1 🧹  ..."))
+		Expect(out.String()).Should(ContainSubstring(" ✓ Delete tenant namespace tenant-run-1 🧹"))
+	})
+
+	It("should report a failed verification step", func() {
+		store := cleanupTestStore()
+		client := cleanupTestClient("another-run", cleanup.ManagedByValue)
+		out := &bytes.Buffer{}
+
+		err := cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, &cleanupTestPrompt{}, &Console{Out: out})
+
+		Expect(err).Should(HaveOccurred())
+		Expect(out.String()).Should(ContainSubstring(" ✗ Verify run run-1 🧾"))
+		Expect(out.String()).ShouldNot(ContainSubstring("Delete tenant namespace"))
+	})
+})
+
 var _ = Describe("cleanupRun retention notice", func() {
 	When("the confirmation is declined", func() {
 		It("should write the retention notice to the visible writer", func() {
@@ -215,7 +242,7 @@ var _ = Describe("cleanupRun retention notice", func() {
 			var notice bytes.Buffer
 
 			Expect(cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, &cleanupTestPrompt{approved: true}, &notice)).Should(Succeed())
-			Expect(notice.Len()).Should(BeZero())
+			Expect(notice.String()).ShouldNot(ContainSubstring("retained tenant namespace"))
 			_, err := client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-run-1", metav1.GetOptions{})
 			Expect(apierrors.IsNotFound(err)).Should(BeTrue())
 		})
