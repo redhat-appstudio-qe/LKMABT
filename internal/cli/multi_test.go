@@ -731,6 +731,31 @@ var _ = Describe("RunClusters credential authentication", func() {
 		})
 	})
 
+	When("a configured GitHub token cannot list a selected installation's repositories but the existing gh login can", func() {
+		It("should reuse the existing login without a browser flow", func() {
+			request, runner := runClustersFixture(1)
+			request.Credentials.GitHubToken = "bad-token"
+			output := &bytes.Buffer{}
+			readExistingGitHubToken = func(context.Context, clusterauth.CommandRunner) (string, error) {
+				return "existing-token", nil
+			}
+			checkGitHubAccess = func(_ context.Context, token string) error {
+				if token == "bad-token" {
+					return fmt.Errorf("%w: list repositories for GitHub App installation 7: 403 (the GitHub token needs the read:user scope)", providers.ErrInsufficientGitHubAccess)
+				}
+				Expect(token).Should(Equal("existing-token"))
+				return nil
+			}
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: output, interactive: true})).Should(Succeed())
+
+			Expect(defaultGitHubAuth.calls).Should(Equal(0))
+			Expect(runner.requests).Should(HaveLen(1))
+			Expect(runner.requests[0].Credentials.GitHubToken).Should(Equal("existing-token"))
+			Expect(output.String()).Should(ContainSubstring("github: using the existing gh login"))
+		})
+	})
+
 	When("a configured GitHub token and the existing gh login cannot list App installations", func() {
 		It("should start the gh browser login", func() {
 			request, runner := runClustersFixture(1)

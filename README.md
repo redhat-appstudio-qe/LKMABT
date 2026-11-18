@@ -74,14 +74,22 @@ resources.
    the check fails immediately with the installation settings URL when it does
    not. When the token cannot list installation repositories, preflight logs a
    warning and continues; the trigger-stage PaC wait remains the backstop for a
-   missing selection.
+   missing selection. In an interactive session, acquisition also verifies that
+   the token can list repositories for each non-suspended installation that
+   covers selected repositories, so the preflight warning does not appear for a
+   token that cannot perform it. A classic or OAuth token may need the
+   `read:user` scope for that listing; add it with
+   `gh auth refresh -h github.com -s read:user`. A listing that remains
+   unverifiable after the browser login still logs the preflight warning and
+   continues.
 8. Provider credentials come from `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` when
    set. Leave either empty to authenticate at run time: GitHub uses
    `gh auth login` (browser; requests `repo`, `read:org`, and `read:user`) and
    GitLab uses `glab auth login` (choose **Web** in its sign-in menu). Both
    `gh` and `glab` must be on `PATH` when the corresponding token is empty. A
    configured `GITHUB_TOKEN` is checked against the organization's App
-   installations and the fixture repository's push permission; in an
+   installations, the fixture repository's push permission, and the repositories
+   of each non-suspended installation that covers selected repositories; in an
    interactive session, a token that cannot access them is replaced by the
    existing `gh` login when that login can, and otherwise falls back to the
    `gh` browser login. Transient, rate-limit, and timeout check failures abort
@@ -92,8 +100,9 @@ resources.
    when the last cluster finishes, including on failure. The ephemeral GitLab
    token is also written to the tenant SCM Secret for PaC; that Secret is
    deleted during finalization. A configured `GITHUB_TOKEN` needs `read:org`,
-   an owner who administers the fixture organization, and push access to the
-   fixture repository.
+   an owner who administers the fixture organization, push access to the
+   fixture repository, and the `read:user` scope when an App is installed for
+   selected repositories (`gh auth refresh -h github.com -s read:user`).
 9. PaC onboarding must be complete for all three components, with current
    `.tekton` configuration available on each fixture's default branch. The
    harness waits for PaC readiness before writing trigger comments and does not

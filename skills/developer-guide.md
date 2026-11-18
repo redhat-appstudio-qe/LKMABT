@@ -222,12 +222,18 @@ private `GH_CONFIG_DIR` and `--insecure-storage`, then read the token with
 `gh auth token`. GitLab API requests use `Authorization: Bearer`, which accepts
 both the OAuth token from glab's Web login and a `GITLAB_BOT_TOKEN` access
 token; GitLab rejects OAuth tokens sent as `PRIVATE-TOKEN`. A configured
-`GITHUB_TOKEN` is checked against the organization's App
-installations and the fixture repository's push permission; an interactive run
+`GITHUB_TOKEN` is checked against the organization's App installations, the
+fixture repository's push permission, and the repositories of each
+non-suspended installation that covers selected repositories; an interactive run
 replaces a token that fails those checks for credential reasons with
 the token from the existing `gh` login when it passes them, and otherwise
 with the `gh` browser login. Transient, rate-limit, and timeout check failures
-abort the run without replacing the token. When `GITLAB_BOT_TOKEN` is empty, GitLab runs
+abort the run without replacing the token. A classic or OAuth token may need the
+`read:user` scope to list selected-installation repositories; add it with
+`gh auth refresh -h github.com -s read:user`. The acquisition check does not
+require the fixture in every installation because the cluster app slug is
+unknown there; a listing that remains unverifiable after the browser login still
+only produces the preflight warning. When `GITLAB_BOT_TOKEN` is empty, GitLab runs
 `glab auth login` (choose Web) with a private `GLAB_CONFIG_DIR`, then reads the
 token with `glab config get token --host`; the glab directory stays in the
 store so `glab api user` can refresh the OAuth token before each cluster. Each
@@ -239,8 +245,9 @@ Secret.
 The directory is removed when the run ends, including after failures and
 cancellations, and a removal failure fails the run. Authentication requires an
 interactive terminal; non-interactive runs must provide the tokens. A
-configured `GITHUB_TOKEN` needs the `read:org` scope and an owner who
-administers the fixture organization.
+configured `GITHUB_TOKEN` needs the `read:org` scope, an owner who
+administers the fixture organization, push access to the fixture repository,
+and `read:user` when an App installation is limited to selected repositories.
 
 ### Sequential Cluster Execution
 Clusters run one at a time in clusters-file order so run-scoped credentials are

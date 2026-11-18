@@ -37,7 +37,10 @@ var (
 		if err := adapter.CheckOrganizationAccess(ctx); err != nil {
 			return err
 		}
-		return adapter.CheckFixtureWriteAccess(ctx)
+		if err := adapter.CheckFixtureWriteAccess(ctx); err != nil {
+			return err
+		}
+		return adapter.CheckInstallationRepositoryAccess(ctx)
 	}
 )
 
@@ -45,7 +48,8 @@ var (
 var githubAccessCheckTimeout = 30 * time.Second
 
 // checkGitHubToken verifies, under a bounded context, that a token can list App
-// installations and update the fixture repository. It falls back to the existing
+// installations, update the fixture repository, and list the repositories of
+// selected App installations. It falls back to the existing
 // gh login and then to a browser login only when GitHub rejects the credential;
 // transient, rate-limit, timeout, and cancellation errors abort the run without
 // replacing a usable token.
@@ -62,7 +66,7 @@ func checkGitHubToken(ctx context.Context, request *config.Request, console *Con
 	if !errors.Is(err, providers.ErrInsufficientGitHubAccess) {
 		return false, fmt.Errorf("check the configured GitHub token: %w", err)
 	}
-	console.Printf("github: configured token cannot access the fixture repository: %v", err)
+	console.Printf("github: configured token is not usable: %v", err)
 	readCtx, cancelRead := context.WithTimeout(ctx, githubAccessCheckTimeout)
 	token, readErr := readExistingGitHubToken(readCtx, clusterauth.ExecRunner{})
 	readEnded := readCtx.Err() != nil

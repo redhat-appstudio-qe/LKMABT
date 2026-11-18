@@ -145,6 +145,80 @@ var _ = Describe("CheckOrganizationAccess", func() {
 	})
 })
 
+var _ = Describe("CheckInstallationRepositoryAccess", func() {
+	When("a selected installation's repositories can be listed", func() {
+		It("should pass and list exactly that installation", func() {
+			client := &fakeClient{installations: []*gh.Installation{
+				{ID: gh.Int64(7), AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("selected")},
+				{ID: gh.Int64(8), AppSlug: gh.String("other-app"), RepositorySelection: gh.String("selected")},
+			}}
+
+			Expect(New(client).CheckInstallationRepositoryAccess(context.Background())).Should(Succeed())
+			Expect(client.installationRepoCalls).Should(Equal([]int64{7, 8}))
+		})
+	})
+
+	When("the token cannot list a selected installation's repositories", func() {
+		It("should reject the credential and name the read:user scope", func() {
+			client := &fakeClient{
+				installations:       []*gh.Installation{{ID: gh.Int64(7), AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("selected")}},
+				installationRepoErr: &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusForbidden}},
+			}
+
+			err := New(client).CheckInstallationRepositoryAccess(context.Background())
+			Expect(errors.Is(err, providers.ErrInsufficientGitHubAccess)).Should(BeTrue())
+			Expect(err).Should(MatchError(ContainSubstring("read:user")))
+			Expect(err).Should(MatchError(ContainSubstring("installation 7")))
+		})
+	})
+
+	When("listing a selected installation's repositories fails transiently", func() {
+		It("should not reject the credential on a 5xx response", func() {
+			client := &fakeClient{
+				installations:       []*gh.Installation{{ID: gh.Int64(7), RepositorySelection: gh.String("selected")}},
+				installationRepoErr: &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusBadGateway}},
+			}
+
+			err := New(client).CheckInstallationRepositoryAccess(context.Background())
+			Expect(err).Should(HaveOccurred())
+			Expect(errors.Is(err, providers.ErrInsufficientGitHubAccess)).Should(BeFalse())
+		})
+
+		It("should not reject the credential on a rate limit", func() {
+			client := &fakeClient{
+				installations:       []*gh.Installation{{ID: gh.Int64(7), RepositorySelection: gh.String("selected")}},
+				installationRepoErr: &gh.RateLimitError{},
+			}
+
+			err := New(client).CheckInstallationRepositoryAccess(context.Background())
+			Expect(err).Should(HaveOccurred())
+			Expect(errors.Is(err, providers.ErrInsufficientGitHubAccess)).Should(BeFalse())
+		})
+	})
+
+	When("a selected installation is suspended", func() {
+		It("should skip it without listing repositories", func() {
+			client := &fakeClient{installations: []*gh.Installation{
+				{ID: gh.Int64(7), RepositorySelection: gh.String("selected"), SuspendedAt: &gh.Timestamp{}},
+			}}
+
+			Expect(New(client).CheckInstallationRepositoryAccess(context.Background())).Should(Succeed())
+			Expect(client.installationRepoCalls).Should(BeEmpty())
+		})
+	})
+
+	When("an installation covers all repositories", func() {
+		It("should not list repositories", func() {
+			client := &fakeClient{installations: []*gh.Installation{
+				{ID: gh.Int64(7), RepositorySelection: gh.String("all")},
+			}}
+
+			Expect(New(client).CheckInstallationRepositoryAccess(context.Background())).Should(Succeed())
+			Expect(client.installationRepoCalls).Should(BeEmpty())
+		})
+	})
+})
+
 var _ = Describe("CheckFixtureWriteAccess", func() {
 	It("passes when the token can push to the fixture", func() {
 		client := &fakeClient{repository: &gh.Repository{Name: gh.String("dr_test_mathwizz"), Permissions: map[string]bool{"push": true}}}
