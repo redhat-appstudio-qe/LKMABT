@@ -7,6 +7,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
@@ -20,6 +21,10 @@ type AccessCheck struct {
 	Name      string
 	Resource  schema.GroupVersionResource
 	Namespace string
+	// Verbs requests a SelfSubjectAccessReview for each verb in Namespace.
+	Verbs []string
+	// Guidance is appended to failure details so preflight errors are actionable.
+	Guidance string
 }
 
 type CheckResult struct {
@@ -126,7 +131,8 @@ func (c *RealCluster) Server(context.Context) (string, error) {
 	return strings.TrimRight(c.Clients.Config.Host, "/"), nil
 }
 
-// CheckAccess checks whether each requested API group version is served by the cluster.
+// CheckAccess checks whether each requested API group version is served by the cluster
+// and, when verbs are listed, whether the current user may perform them in the namespace.
 func (c *RealCluster) CheckAccess(ctx context.Context, checks []AccessCheck) []CheckResult {
 	results := make([]CheckResult, 0, len(checks))
 	for _, check := range checks {
@@ -140,10 +146,69 @@ func (c *RealCluster) CheckAccess(ctx context.Context, checks []AccessCheck) []C
 		result.Passed = err == nil
 		if err != nil {
 			result.Details = err.Error()
+			results = append(results, result)
+			continue
 		}
+		if len(check.Verbs) == 0 {
+			results = append(results, result)
+			continue
+		}
+		result.Details = c.authorizeVerbs(ctx, check)
+		result.Passed = result.Details == ""
 		results = append(results, result)
 	}
 	return results
+}
+
+// authorizeVerbs returns failure details from one SelfSubjectAccessReview per verb,
+// or an empty string when every request is allowed.
+func (c *RealCluster) authorizeVerbs(ctx context.Context, check AccessCheck) string {
+	if c.Clients.Kubernetes == nil {
+		return withGuidance("kubernetes client is not initialized", check.Guidance)
+	}
+	if strings.TrimSpace(check.Namespace) == "" {
+		return withGuidance(fmt.Sprintf("namespace is required to authorize %s", check.Resource.Resource), check.Guidance)
+	}
+	failures := make([]string, 0, len(check.Verbs))
+	for _, verb := range check.Verbs {
+		review := &authorizationv1.SelfSubjectAccessReview{Spec: authorizationv1.SelfSubjectAccessReviewSpec{
+			ResourceAttributes: &authorizationv1.ResourceAttributes{
+				Namespace: check.Namespace,
+				Verb:      verb,
+				Group:     check.Resource.Group,
+				Resource:  check.Resource.Resource,
+			},
+		}}
+		response, err := c.Clients.Kubernetes.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s %s in namespace %s: %v", verb, check.Resource.Resource, check.Namespace, err))
+			continue
+		}
+		if response.Status.Allowed {
+			continue
+		}
+		reason := strings.TrimSpace(response.Status.Reason)
+		if reason == "" {
+			reason = "no reason reported"
+		}
+		failure := fmt.Sprintf("%s %s in namespace %s denied: %s", verb, check.Resource.Resource, check.Namespace, reason)
+		if evaluationError := strings.TrimSpace(response.Status.EvaluationError); evaluationError != "" {
+			failure += fmt.Sprintf(" (evaluation error: %s)", evaluationError)
+		}
+		failures = append(failures, failure)
+	}
+	if len(failures) == 0 {
+		return ""
+	}
+	return withGuidance(strings.Join(failures, "; "), check.Guidance)
+}
+
+// withGuidance appends actionable guidance to a check failure.
+func withGuidance(details, guidance string) string {
+	if strings.TrimSpace(guidance) == "" {
+		return details
+	}
+	return details + "; " + guidance
 }
 
 // CheckScheduling verifies controller readiness and host-config coverage for each platform.

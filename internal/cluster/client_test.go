@@ -1,13 +1,22 @@
 package cluster
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	authorizationv1 "k8s.io/api/authorization/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	fakediscovery "k8s.io/client-go/discovery/fake"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	kubetesting "k8s.io/client-go/testing"
 )
 
 var _ = Describe("NewClientSetFromConfig", func() {
@@ -83,6 +92,95 @@ var _ = Describe("NewClientSet", func() {
 		It("should fail", func() {
 			_, err := NewClientSet(filepath.Join(GinkgoT().TempDir(), "absent"))
 			Expect(err).Should(MatchError(ContainSubstring("load kubeconfig")))
+		})
+	})
+})
+
+// accessTestCluster builds a cluster whose discovery serves each resource.
+func accessTestCluster(resources ...schema.GroupVersionResource) (*RealCluster, *fake.Clientset) {
+	clientset := fake.NewSimpleClientset()
+	discovery := clientset.Discovery().(*fakediscovery.FakeDiscovery)
+	for _, resource := range resources {
+		discovery.Resources = append(discovery.Resources, &metav1.APIResourceList{
+			GroupVersion: resource.GroupVersion().String(),
+			APIResources: []metav1.APIResource{{Name: resource.Resource, Namespaced: true}},
+		})
+	}
+	return &RealCluster{Clients: &ClientSet{Kubernetes: clientset, Discovery: clientset.Discovery()}}, clientset
+}
+
+// respondSSAR makes every SelfSubjectAccessReview create return status or err.
+func respondSSAR(clientset *fake.Clientset, status authorizationv1.SubjectAccessReviewStatus, err error) {
+	clientset.PrependReactor("create", "selfsubjectaccessreviews", func(kubetesting.Action) (bool, runtime.Object, error) {
+		if err != nil {
+			return true, nil, err
+		}
+		return true, &authorizationv1.SelfSubjectAccessReview{Status: status}, nil
+	})
+}
+
+var _ = Describe("CheckAccess", func() {
+	secrets := schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+
+	When("every requested verb is allowed", func() {
+		It("should pass the check", func() {
+			cluster, clientset := accessTestCluster(secrets)
+			respondSSAR(clientset, authorizationv1.SubjectAccessReviewStatus{Allowed: true}, nil)
+
+			results := cluster.CheckAccess(context.Background(), []AccessCheck{{
+				Name: "gitlab SCM Secret", Resource: secrets, Namespace: "tenant",
+				Verbs: []string{"get", "create", "update"}, Guidance: "grant Secret access in the tenant namespace",
+			}})
+
+			Expect(results).Should(HaveLen(1))
+			Expect(results[0].Passed).Should(BeTrue())
+			Expect(results[0].Details).Should(BeEmpty())
+		})
+	})
+
+	When("a requested verb is denied", func() {
+		It("should report the denial reason and guidance", func() {
+			cluster, clientset := accessTestCluster(secrets)
+			respondSSAR(clientset, authorizationv1.SubjectAccessReviewStatus{Reason: "rbac denied", EvaluationError: "no matching policy"}, nil)
+
+			results := cluster.CheckAccess(context.Background(), []AccessCheck{{
+				Name: "gitlab SCM Secret", Resource: secrets, Namespace: "tenant",
+				Verbs: []string{"update"}, Guidance: "grant Secret access in the tenant namespace",
+			}})
+
+			Expect(results[0].Passed).Should(BeFalse())
+			Expect(results[0].Details).Should(ContainSubstring("update secrets in namespace tenant denied: rbac denied"))
+			Expect(results[0].Details).Should(ContainSubstring("evaluation error: no matching policy"))
+			Expect(results[0].Details).Should(ContainSubstring("grant Secret access in the tenant namespace"))
+		})
+	})
+
+	When("the authorization review fails", func() {
+		It("should surface the error and guidance", func() {
+			cluster, clientset := accessTestCluster(secrets)
+			respondSSAR(clientset, authorizationv1.SubjectAccessReviewStatus{}, errors.New("admission webhook unavailable"))
+
+			results := cluster.CheckAccess(context.Background(), []AccessCheck{{
+				Name: "gitlab SCM Secret", Resource: secrets, Namespace: "tenant",
+				Verbs: []string{"get"}, Guidance: "grant Secret access in the tenant namespace",
+			}})
+
+			Expect(results[0].Passed).Should(BeFalse())
+			Expect(results[0].Details).Should(ContainSubstring("get secrets in namespace tenant: admission webhook unavailable"))
+			Expect(results[0].Details).Should(ContainSubstring("grant Secret access in the tenant namespace"))
+		})
+	})
+
+	When("no verbs are requested", func() {
+		It("should only require discovery", func() {
+			cluster, _ := accessTestCluster(secrets)
+			cluster.Clients.Kubernetes = nil
+
+			results := cluster.CheckAccess(context.Background(), []AccessCheck{{Name: "secrets", Resource: secrets}})
+
+			Expect(results).Should(HaveLen(1))
+			Expect(results[0].Passed).Should(BeTrue())
+			Expect(results[0].Details).Should(BeEmpty())
 		})
 	})
 })

@@ -3,16 +3,20 @@ package cluster
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/redhat-appstudio/lkmabt/internal/cleanup"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
+	kubetesting "k8s.io/client-go/testing"
 )
 
 // testFixtureSpec builds a fixture specification with three components for a provider.
@@ -37,6 +41,13 @@ func fixtureTestClient(objects ...runtime.Object) *fake.FakeDynamicClient {
 	return fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		SecretGVR: "SecretList",
 	}, objects...)
+}
+
+// forbidSecretList makes every Secret list fail with Forbidden.
+func forbidSecretList(client *fake.FakeDynamicClient) {
+	client.PrependReactor("list", "secrets", func(kubetesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "secrets", fmt.Errorf("not allowed"))
+	})
 }
 
 var _ = Describe("FixtureService", func() {
@@ -123,7 +134,7 @@ var _ = Describe("FixtureService", func() {
 				"apiVersion": "v1", "kind": "Secret",
 				"metadata": map[string]any{
 					"name": GitLabCredentialSecretName, "namespace": "tenant",
-					"labels":      map[string]any{scmCredentialsLabel: "scm", scmHostnameLabel: "gitlab.com"},
+					"labels":      map[string]any{scmCredentialsLabel: "scm", scmHostnameLabel: "gitlab.com", cleanup.ManagedByLabel: cleanup.ManagedByValue, cleanup.RunIDLabel: "old-run"},
 					"annotations": map[string]any{scmSecretRepositoryAnnotation: "o/r"},
 				},
 				"type": "kubernetes.io/basic-auth", "data": map[string]any{"password": "old-token"},
@@ -155,7 +166,7 @@ var _ = Describe("FixtureService", func() {
 		}
 		Expect(found).To(BeTrue())
 		Expect(password).To(Equal(base64.StdEncoding.EncodeToString([]byte("new-token"))))
-		Expect(secret.GetLabels()).To(SatisfyAll(HaveKeyWithValue(scmCredentialsLabel, "scm"), HaveKeyWithValue(scmHostnameLabel, "gitlab.com")))
+		Expect(secret.GetLabels()).To(SatisfyAll(HaveKeyWithValue(scmCredentialsLabel, "scm"), HaveKeyWithValue(scmHostnameLabel, "gitlab.com"), HaveKeyWithValue(cleanup.ManagedByLabel, cleanup.ManagedByValue), HaveKeyWithValue(cleanup.RunIDLabel, "run-1")))
 		Expect(secret.GetAnnotations()).To(HaveKeyWithValue(scmSecretRepositoryAnnotation, "o/r"))
 
 		repositoryScoped, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), "repo-gitlab-secret", metav1.GetOptions{})
@@ -315,5 +326,87 @@ var _ = Describe("FixtureService", func() {
 			Expect(err).NotTo(HaveOccurred())
 		}
 		Expect(namespace.GetLabels()).To(SatisfyAll(HaveKeyWithValue("app.konflux-ci.org/managed-by", "lkmabt"), HaveKeyWithValue("app.konflux.org/run-id", "run-1"), HaveKeyWithValue("konflux-ci.dev/type", "tenant"), HaveKeyWithValue("cost-center", "670")))
+	})
+})
+
+var _ = Describe("GitLab Secret management", func() {
+	DescribeTable("creates the managed Secret when listing is forbidden",
+		func(ephemeral bool) {
+			client := fixtureTestClient()
+			forbidSecretList(client)
+			spec := testFixtureSpec("gitlab", "new-token")
+			spec.GitLabTokenEphemeral = ephemeral
+
+			_, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), spec)
+			Expect(err).ShouldNot(HaveOccurred())
+
+			secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})
+			Expect(err).ShouldNot(HaveOccurred())
+			password, found, err := unstructured.NestedString(secret.Object, "stringData", "password")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(found).Should(BeTrue())
+			Expect(password).Should(Equal("new-token"))
+			Expect(secret.GetLabels()).Should(SatisfyAll(
+				HaveKeyWithValue(scmCredentialsLabel, "scm"),
+				HaveKeyWithValue(scmHostnameLabel, "gitlab.com"),
+				HaveKeyWithValue(cleanup.ManagedByLabel, cleanup.ManagedByValue),
+				HaveKeyWithValue(cleanup.RunIDLabel, "run-1"),
+			))
+			Expect(secret.GetAnnotations()).Should(HaveKeyWithValue(scmSecretRepositoryAnnotation, "o/r"))
+		},
+		Entry("for an ephemeral token", true),
+		Entry("for a long-lived token", false),
+	)
+
+	When("a Secret with the managed name belongs to someone else", func() {
+		It("should fail without touching it", func() {
+			client := fixtureTestClient(&unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "v1", "kind": "Secret",
+				"metadata": map[string]any{"name": GitLabCredentialSecretName, "namespace": "tenant"},
+				"type":     "kubernetes.io/basic-auth", "data": map[string]any{"password": "foreign-token"},
+			}})
+
+			_, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token"))
+
+			Expect(err).Should(MatchError(ContainSubstring("is not managed by lkmabt")))
+			Expect(err.Error()).Should(ContainSubstring(GitLabCredentialSecretName))
+			Expect(err.Error()).Should(ContainSubstring("tenant"))
+			secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})
+			Expect(err).ShouldNot(HaveOccurred())
+			password, _, _ := unstructured.NestedString(secret.Object, "data", "password")
+			Expect(password).Should(Equal("foreign-token"))
+			Expect(secret.GetLabels()).ShouldNot(HaveKey(cleanup.ManagedByLabel))
+		})
+	})
+
+	When("the managed Secret already exists for an earlier run", func() {
+		It("should update the token, repository annotation, and run ID", func() {
+			client := fixtureTestClient(&unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "v1", "kind": "Secret",
+				"metadata": map[string]any{
+					"name": GitLabCredentialSecretName, "namespace": "tenant",
+					"labels":      map[string]any{scmCredentialsLabel: "scm", scmHostnameLabel: "gitlab.com", cleanup.ManagedByLabel: cleanup.ManagedByValue, cleanup.RunIDLabel: "old-run"},
+					"annotations": map[string]any{scmSecretRepositoryAnnotation: "old/repo"},
+				},
+				"type": "kubernetes.io/basic-auth", "data": map[string]any{"password": "old-token"},
+			}})
+
+			_, err := (FixtureService{Dynamic: client}).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token"))
+			Expect(err).ShouldNot(HaveOccurred())
+
+			secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})
+			Expect(err).ShouldNot(HaveOccurred())
+			password, found, err := unstructured.NestedString(secret.Object, "data", "password")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(found).Should(BeTrue())
+			Expect(password).Should(Equal(base64.StdEncoding.EncodeToString([]byte("new-token"))))
+			Expect(secret.GetLabels()).Should(SatisfyAll(
+				HaveKeyWithValue(scmCredentialsLabel, "scm"),
+				HaveKeyWithValue(scmHostnameLabel, "gitlab.com"),
+				HaveKeyWithValue(cleanup.ManagedByLabel, cleanup.ManagedByValue),
+				HaveKeyWithValue(cleanup.RunIDLabel, "run-1"),
+			))
+			Expect(secret.GetAnnotations()).Should(HaveKeyWithValue(scmSecretRepositoryAnnotation, "o/r"))
+		})
 	})
 })
