@@ -275,14 +275,30 @@ to `.lkmabt-clusters.yaml`.
 - `github` and `gitlab` test one fixture; `both` tests both.
 - Clusters run one at a time in clusters-file order. Each cluster finishes or
   fails before the next one starts. `both` runs the two providers concurrently
-  inside a cluster, and console lines from each provider carry a
-  `github run - ` or `gitlab run - ` prefix.
+  inside a cluster; each provider gets its own live status line, and durable
+  notices carry a `github run - ` or `gitlab run - ` prefix. Single-provider
+  runs are unlabeled.
 - Each run uses one tenant namespace per provider it tests:
   `mathwizz-test-github` for GitHub and `mathwizz-test-gitlab` for GitLab.
   Single-provider runs accept `--tenant-namespace`.
-- The console prints `cluster <name>: started`, `cluster <name>: finished
-  (<n> passed, <n> failed)`, one result line per provider and cluster, and the
-  report paths.
+- In a terminal, each active workflow phase is a live line with a spinner,
+  action, and emoji, such as `⣎⡱ Verify builds (github) 🏗️`. Periodic PaC and
+  build heartbeats update that line instead of adding output, and a completed
+  step is replaced by a green `✓` line. `both` shows one live line per provider.
+  Non-interactive output (redirected streams or CI) prints every heartbeat as a
+  plain ` • <action>  ...` / ` ✓ <action>` / ` ✗ <action>` line with no ANSI
+  codes, and `run.log` always records the full heartbeat line. Heartbeat
+  details wider than the terminal are printed once as a durable line above the
+  live region; the live row shows a clipped summary.
+- Instructions that need action — GitHub App installation steps, the GitLab
+  token page and scopes, and login output — are durable blocks printed above the
+  live lines. Animation is suspended while `gh`/`glab` or a hidden token prompt
+  owns the terminal. Warnings, failures, and confirmation prompts are also
+  durable and never overwritten.
+- The console prints a `cluster <name>` heading per cluster,
+  `cluster <name>: finished (<n> passed, <n> failed)`, one result line per
+  provider and cluster, and the report paths. A cluster that fails
+  authentication prints ` ✗ Authenticate cluster <name> 🔐` and the reason.
 - Reports and evidence are stored under `.lkmabt-runs/`; see
   [Run logs and artifact retention](#run-logs-and-artifact-retention).
 

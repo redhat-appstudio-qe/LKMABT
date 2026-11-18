@@ -41,6 +41,10 @@ type Options struct {
 	FixtureNamespace  string
 	Application       string
 	Timeouts          PhaseTimeouts
+	// OnPhaseStart and OnPhaseEnd report each executed phase to a progress
+	// view. OnPhaseEnd receives the phase error, nil on success.
+	OnPhaseStart func(model.Phase)
+	OnPhaseEnd   func(model.Phase, error)
 }
 
 type PhaseTimeouts struct {
@@ -96,17 +100,29 @@ func (r Runner) Run(ctx context.Context, options Options) (model.RunManifest, er
 			continue
 		}
 		stepContext, cancel := contextWithTimeout(ctx, step.timeout)
+		if options.OnPhaseStart != nil {
+			options.OnPhaseStart(step.phase)
+		}
 		err := step.run(stepContext, &manifest)
 		cancel()
 		if err != nil {
+			if options.OnPhaseEnd != nil {
+				options.OnPhaseEnd(step.phase, err)
+			}
 			manifest.Failure = &model.Failure{Phase: step.phase, Reason: failureReason(step.phase), Message: err.Error()}
 			_ = r.Store.Transition(&manifest, model.PhaseFailed)
 			return manifest, err
 		}
 		if step.phase != manifest.Phase {
-			if err := r.Store.Transition(&manifest, step.phase); err != nil {
-				return manifest, err
+			if transitionErr := r.Store.Transition(&manifest, step.phase); transitionErr != nil {
+				if options.OnPhaseEnd != nil {
+					options.OnPhaseEnd(step.phase, transitionErr)
+				}
+				return manifest, transitionErr
 			}
+		}
+		if options.OnPhaseEnd != nil {
+			options.OnPhaseEnd(step.phase, nil)
 		}
 	}
 	return manifest, nil

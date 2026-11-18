@@ -98,6 +98,88 @@ var _ = Describe("NewLiveRunner", func() {
 	})
 })
 
+var _ = Describe("providerLabel", func() {
+	It("should label a both split", func() {
+		Expect(providerLabel(config.Request{Provider: config.ProviderGitHub, MultiProvider: true})).Should(Equal(config.ProviderGitHub))
+	})
+
+	It("should leave a single-provider run unlabeled", func() {
+		Expect(providerLabel(config.Request{Provider: config.ProviderGitHub})).Should(BeEmpty())
+	})
+})
+
+var _ = Describe("requestForProvider", func() {
+	It("should mark both-provider splits", func() {
+		request := requestForProvider(config.Request{Provider: config.ProviderBoth}, config.ProviderGitLab)
+
+		Expect(request.Provider).Should(Equal(config.ProviderGitLab))
+		Expect(request.MultiProvider).Should(BeTrue())
+	})
+
+	It("should keep a single-provider request unlabeled", func() {
+		request := requestForProvider(config.Request{Provider: config.ProviderGitHub}, config.ProviderGitHub)
+
+		Expect(request.MultiProvider).Should(BeFalse())
+	})
+})
+
+var _ = Describe("promptFor", func() {
+	When("the output is a console and the runner has a prompt", func() {
+		It("should preserve the caller's confirmation policy", func() {
+			consolePrompt := &recordingPrompt{approved: true}
+			runnerPrompt := &recordingPrompt{approved: false}
+			console := &Console{Out: io.Discard, Prompt: consolePrompt}
+			runner := LiveRunner{Prompt: runnerPrompt, Out: console}
+
+			prompt := promptFor(runner)
+			Expect(prompt).ShouldNot(BeIdenticalTo(console))
+			approved, err := prompt.Confirm(context.Background(), "delete tenant")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(approved).Should(BeFalse())
+			Expect(runnerPrompt.calls).Should(Equal(1))
+			Expect(consolePrompt.calls).Should(BeZero())
+		})
+
+		It("should not fall back to the console prompt when the runner has none", func() {
+			runner := LiveRunner{Prompt: nil, Out: &Console{Out: io.Discard, Prompt: &recordingPrompt{approved: true}}}
+
+			Expect(promptFor(runner)).Should(BeNil())
+		})
+	})
+
+	When("the runner prompt is the output console", func() {
+		It("should return the console without wrapping it", func() {
+			console := &Console{Out: io.Discard, Prompt: &recordingPrompt{approved: true}}
+			runner := LiveRunner{Prompt: console, Out: console}
+
+			Expect(promptFor(runner)).Should(BeIdenticalTo(console))
+		})
+	})
+
+	When("the output is not a console", func() {
+		It("should keep the runner prompt", func() {
+			prompt := &recordingPrompt{}
+			runner := LiveRunner{Prompt: prompt, Out: io.Discard}
+
+			Expect(promptFor(runner)).Should(BeIdenticalTo(prompt))
+		})
+	})
+
+	When("the console has no prompt", func() {
+		It("should still route the runner prompt through the console", func() {
+			prompt := &recordingPrompt{approved: true}
+			runner := LiveRunner{Prompt: prompt, Out: &Console{Out: io.Discard}}
+
+			routed := promptFor(runner)
+			Expect(routed).ShouldNot(BeIdenticalTo(prompt))
+			approved, err := routed.Confirm(context.Background(), "delete tenant")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(approved).Should(BeTrue())
+			Expect(prompt.calls).Should(Equal(1))
+		})
+	})
+})
+
 var _ = Describe("LiveRunner.Run", func() {
 	When("the provider run log cannot be attached", func() {
 		It("should report the attachment failure in the run error", func() {

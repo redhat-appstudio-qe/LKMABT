@@ -47,6 +47,8 @@ type LiveStage struct {
 	FailedBuildCollector *collector.FailedBuildCollector
 	Interactive          bool
 	Out                  io.Writer
+	NoticePrefix         string
+	Progress             func(string)
 	OpenURL              func(string) error
 	// ParentContext is the run context without the preflight deadline. An
 	// interactive installation wait uses it to continue after that deadline.
@@ -250,10 +252,10 @@ func (s *LiveStage) pollGitHubAppInstallation(ctx context.Context, checker clust
 			return false, waitError(ctx.Err())
 		case <-statusTicker.C:
 			if lastCheckError != "" {
-				s.notice("Still waiting for GitHub App %s installation after %s; last check: %s", required.AppSlug, time.Since(started).Round(time.Second), lastCheckError)
+				s.progress("Still waiting for GitHub App %s installation after %s; last check: %s", required.AppSlug, time.Since(started).Round(time.Second), lastCheckError)
 				continue
 			}
-			s.notice("Still waiting for GitHub App %s installation after %s; install it from %s", required.AppSlug, time.Since(started).Round(time.Second), required.InstallURL)
+			s.progress("Still waiting for GitHub App %s installation after %s; install it from %s", required.AppSlug, time.Since(started).Round(time.Second), required.InstallURL)
 		case <-pollTicker.C:
 			if !checking {
 				startCheck()
@@ -284,11 +286,26 @@ func (s *LiveStage) pollGitHubAppInstallation(ctx context.Context, checker clust
 	}
 }
 
-// notice writes one human-facing progress line to the console and the run log.
+// notice writes one durable human-facing line to the console and the run log.
 func (s *LiveStage) notice(format string, args ...any) {
 	line := fmt.Sprintf(format, args...)
 	if s.Out != nil {
-		fmt.Fprintln(s.Out, line)
+		fmt.Fprintln(s.Out, s.NoticePrefix+line)
+	}
+	if s.Log != nil {
+		fmt.Fprintln(s.Log, line)
+	}
+}
+
+// progress reports a repeatable status heartbeat. The console updates the
+// active step in a terminal and prints a plain line otherwise; the run log
+// always receives the full line.
+func (s *LiveStage) progress(format string, args ...any) {
+	line := fmt.Sprintf(format, args...)
+	if s.Progress != nil {
+		s.Progress(line)
+	} else if s.Out != nil {
+		fmt.Fprintln(s.Out, s.NoticePrefix+line)
 	}
 	if s.Log != nil {
 		fmt.Fprintln(s.Log, line)
@@ -445,7 +462,7 @@ func (s *LiveStage) TriggerComponents(ctx context.Context, manifest *model.RunMa
 			}
 		}
 		return list.Items, nil
-	}, s.notice); err != nil {
+	}, s.progress); err != nil {
 		return fmt.Errorf("wait for PaC onboarding: %w", err)
 	}
 	for index, component := range components {
@@ -525,7 +542,7 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 			return nil, nil, err
 		}
 		return pipelineRuns.Items, taskRuns.Items, nil
-	}, s.notice)
+	}, s.progress)
 	if err != nil {
 		var pipelineRunError *PipelineRunFailedError
 		if errors.As(err, &pipelineRunError) && s.FailedBuildCollector != nil && manifest.ArtifactDirectory != "" {

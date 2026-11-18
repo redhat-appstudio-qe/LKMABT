@@ -69,11 +69,6 @@ func providerNames(provider string) []string {
 	return []string{provider}
 }
 
-// prefixedRunner lets runProviders label concurrent provider output.
-type prefixedRunner interface {
-	withPrefix(prefix string) Runner
-}
-
 // runProviders runs every selected provider concurrently and returns one result per provider in fixed order.
 func runProviders(ctx context.Context, request config.Request, runner Runner) []ProviderResult {
 	names := providerNames(request.Provider)
@@ -85,13 +80,7 @@ func runProviders(ctx context.Context, request config.Request, runner Runner) []
 			defer waitGroup.Done()
 			log := newRunLog()
 			defer log.Close()
-			providerRunner := runner
-			if len(names) > 1 {
-				if prefixed, ok := runner.(prefixedRunner); ok {
-					providerRunner = prefixed.withPrefix(name + " run - ")
-				}
-			}
-			outcome, err := providerRunner.Run(ctx, requestForProvider(request, name), log)
+			outcome, err := runner.Run(ctx, requestForProvider(request, name), log)
 			results[index] = providerResult(name, outcome, err)
 		}(index, name)
 	}
@@ -114,6 +103,7 @@ func requestForProvider(request config.Request, provider string) config.Request 
 	// a single-provider request already carries the namespace the caller asked for.
 	both := request.Provider == config.ProviderBoth
 	request.Provider = provider
+	request.MultiProvider = both
 	request.RunID = "run-" + uuid.NewString()
 	switch provider {
 	case config.ProviderGitHub:

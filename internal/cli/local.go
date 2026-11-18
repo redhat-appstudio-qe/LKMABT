@@ -43,6 +43,58 @@ func NewLiveRunner(prompt workflow.Confirmation, out io.Writer, interactive bool
 	return LiveRunner{Prompt: prompt, Out: out, Interactive: interactive}
 }
 
+// promptFor routes prompts through the console when it owns the output, so the
+// spinner is cleared and concurrent progress is buffered until the prompt ends.
+// The caller's confirmation policy is preserved: a nil prompt stays nil.
+func promptFor(runner LiveRunner) workflow.Confirmation {
+	console, ok := runner.Out.(*Console)
+	if !ok || console == nil || runner.Prompt == nil {
+		return runner.Prompt
+	}
+	// A console prompt already owns buffering; wrapping it would recurse.
+	if promptConsole, ok := runner.Prompt.(*Console); ok && promptConsole == console {
+		return runner.Prompt
+	}
+	return consolePrompt{console: console, prompt: runner.Prompt}
+}
+
+// consolePrompt runs the caller's prompt through the console's buffering.
+type consolePrompt struct {
+	console *Console
+	prompt  workflow.Confirmation
+}
+
+// Confirm delegates to the caller's prompt while progress is buffered.
+func (p consolePrompt) Confirm(ctx context.Context, message string) (bool, error) {
+	return p.console.confirm(ctx, p.prompt, message)
+}
+
+// providerLabel returns the step label for a split both run and "" otherwise.
+func providerLabel(request config.Request) string {
+	if request.MultiProvider {
+		return request.Provider
+	}
+	return ""
+}
+
+// stepFor starts a console step when out is a console and otherwise returns a
+// nil step whose methods are no-ops.
+func stepFor(out io.Writer, description string) *Step {
+	if console, ok := out.(*Console); ok && console != nil {
+		return console.StartStep(description)
+	}
+	return nil
+}
+
+// suspendOutput pauses console animation while a subprocess writes directly to
+// the terminal. Writers that are not consoles need no suspension.
+func suspendOutput(out io.Writer) func() {
+	if console, ok := out.(*Console); ok && console != nil {
+		return console.Suspend()
+	}
+	return func() {}
+}
+
 // Run executes a provider workflow against the request's cluster, writing its output to log.
 func (runner LiveRunner) Run(ctx context.Context, request config.Request, log RunLog) (RunOutcome, error) {
 	clients, err := cluster.NewClientSet(request.Kubeconfig)
@@ -57,7 +109,7 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	if err != nil {
 		return RunOutcome{Provider: request.Provider}, err
 	}
-	stage.Prompt = runner.Prompt
+	stage.Prompt = promptFor(runner)
 	stage.Interactive = runner.Interactive
 	stage.Out = runner.Out
 	stage.ParentContext = ctx
@@ -70,6 +122,13 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	}
 	defer releaseNamespace()
 	store := evidence.NewManifestStore(request.StateDir)
+	observer := newPhaseObserver(runner.Out, providerLabel(request))
+	if observer != nil {
+		stage.Progress = observer.progress
+	}
+	if label := providerLabel(request); label != "" {
+		stage.NoticePrefix = label + " run - "
+	}
 	var logAttachErr error
 	manifest, runErr := (workflow.Runner{Store: store, Stage: stage}).Run(ctx, workflow.Options{
 		RunID:            request.RunID,
@@ -79,6 +138,8 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 		FixtureNamespace: request.TenantNamespace,
 		Application:      request.ApplicationName,
 		Timeouts:         workflow.PhaseTimeouts{Preflight: request.Timeouts.Preflight, Build: request.Timeouts.Build},
+		OnPhaseStart:     observer.start,
+		OnPhaseEnd:       observer.end,
 		OnManifestCreated: func(created model.RunManifest) {
 			// The provider run directory only exists after Store.Create, so attach the log there.
 			logAttachErr = log.Attach(filepath.Join(request.StateDir, created.ArtifactDirectory, "run.log"))
@@ -100,13 +161,6 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	return outcome, nil
 }
 
-// withPrefix returns a runner whose console output carries the provider label.
-// The per-provider run log keeps unlabeled lines.
-func (runner LiveRunner) withPrefix(prefix string) Runner {
-	runner.Out = &providerPrefixWriter{prefix: prefix, out: runner.Out}
-	return runner
-}
-
 // Cleanup resolves the named cluster, locates its run, and prompts before deleting the tenant namespace.
 func (runner LiveRunner) Cleanup(ctx context.Context, request config.Request) error {
 	if request.Command != config.CommandCleanup {
@@ -120,7 +174,12 @@ func (runner LiveRunner) Cleanup(ctx context.Context, request config.Request) er
 	if err != nil {
 		return err
 	}
-	if failure := (clusterauth.Ladder{Runner: clusterauth.ExecRunner{Log: os.Stdout}}).Authenticate(ctx, []clusterfile.Entry{entry})[entry.Name]; failure != nil {
+	authStep := stepFor(runner.Out, fmt.Sprintf("Authenticate cluster %s 🔐", entry.Name))
+	resume := suspendOutput(runner.Out)
+	failure := (clusterauth.Ladder{Runner: clusterauth.ExecRunner{Log: os.Stdout}}).Authenticate(ctx, []clusterfile.Entry{entry})[entry.Name]
+	resume()
+	authStep.End(failure == nil)
+	if failure != nil {
 		return failure
 	}
 	clients, err := cluster.NewClientSet(entry.Kubeconfig)
@@ -133,13 +192,15 @@ func (runner LiveRunner) Cleanup(ctx context.Context, request config.Request) er
 		return fmt.Errorf("cluster %s: kubeconfig server %s does not match configured server %s", entry.Name, connected, configured)
 	}
 	request.ClusterServer = connected
+	locateStep := stepFor(runner.Out, fmt.Sprintf("Locate run %s 🔎", request.RunID))
 	stateRoot, err := locateRunStateRoot(request.StateDir, entry.Name, request.RunID)
+	locateStep.End(err == nil)
 	if err != nil {
 		return err
 	}
 	// Provider artifacts live under the located cluster root, so verification must resolve there.
 	request.StateDir = stateRoot
-	return cleanupRun(ctx, request, evidence.NewManifestStore(stateRoot), cleanup.NamespaceService{Dynamic: clients.Dynamic}, runner.Prompt, runner.Out)
+	return cleanupRun(ctx, request, evidence.NewManifestStore(stateRoot), cleanup.NamespaceService{Dynamic: clients.Dynamic}, promptFor(runner), runner.Out)
 }
 
 // locateRunStateRoot finds the single <stateDir>/<aggregate>/<cluster> directory holding runID.
@@ -191,6 +252,13 @@ func cleanupRun(ctx context.Context, request config.Request, store evidence.Mani
 	if strings.TrimSpace(request.RunID) == "" {
 		return fmt.Errorf("cleanup requires an exact run ID")
 	}
+	verifyStep := stepFor(out, fmt.Sprintf("Verify run %s 🧾", request.RunID))
+	verified := false
+	defer func() {
+		if !verified {
+			verifyStep.End(false)
+		}
+	}()
 	manifest, err := store.Load(request.RunID)
 	if err != nil {
 		return fmt.Errorf("load run %s: %w", request.RunID, err)
@@ -215,6 +283,8 @@ func cleanupRun(ctx context.Context, request config.Request, store evidence.Mani
 	if info.Name != namespace || info.Labels[cleanup.ManagedByLabel] != cleanup.ManagedByValue || info.RunID != request.RunID {
 		return fmt.Errorf("refusing to clean namespace %s without exact LKMABT ownership for run %s", namespace, request.RunID)
 	}
+	verified = true
+	verifyStep.End(true)
 	// A live run holding this namespace is using the resources cleanup would delete.
 	releaseNamespace, err := acquireTenantNamespaceLock(request.ClusterServer, namespace, tenantLockHolder(request.RunID, time.Now()))
 	if err != nil {
@@ -233,12 +303,18 @@ func cleanupRun(ctx context.Context, request config.Request, store evidence.Mani
 		fmt.Fprintf(out, "retained tenant namespace %s\n", namespace)
 		return nil
 	}
-	if uid, err := namespaceService.Delete(ctx, namespace, request.RunID); err != nil {
-		return err
-	} else if err := waitForNamespaceDeletion(ctx, namespaceService, namespace, uid); err != nil {
+	deleteStep := stepFor(out, fmt.Sprintf("Delete tenant namespace %s 🧹", namespace))
+	uid, err := namespaceService.Delete(ctx, namespace, request.RunID)
+	if err != nil {
+		deleteStep.End(false)
 		return err
 	}
-	fmt.Printf("deleted tenant namespace %s from run %s\n", namespace, request.RunID)
+	if err := waitForNamespaceDeletion(ctx, namespaceService, namespace, uid); err != nil {
+		deleteStep.End(false)
+		return err
+	}
+	deleteStep.End(true)
+	fmt.Fprintf(out, "deleted tenant namespace %s from run %s\n", namespace, request.RunID)
 	return nil
 }
 
