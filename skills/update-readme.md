@@ -25,17 +25,20 @@ why an implementation changed.
 Keep the existing section order. Add content to the section that answers the
 reader's question; do not append a second list.
 
-1. **Intro** — what the tool does, fixed fixtures, the no-repository-mutation
-   boundary.
-2. **Prerequisites** — local tools, account access, cluster requirements. Only
-   things the user must have or obtain.
-3. **Setup** — ordered steps: build, copy and rename configuration files, edit
-   the clusters file, verify fixture access.
-4. **Running LKMABT** — commands, run shape (cluster order, namespaces,
-   reports), then the "what to expect" subsections: authentication without
-   provider tokens, GitHub App not installed, behavior during the run.
-5. **Environment configuration** — variable table, precedence, token lifetime.
-6. **Artifact retention** — directory layout and stored evidence.
+1. **Intro** — what the tool does in five steps, and the
+   no-repository-mutation boundary.
+2. **Contents** — links to every section and subsection. Keep it complete when
+   adding, renaming, or removing a heading.
+3. **Prerequisites** — local tools, accounts and access (including links to
+   both fixture repositories), cluster requirements, network access.
+4. **Setup** — ordered steps: build, copy and edit the clusters file, verify
+   fixture access.
+5. **Authentication methods** — browser authentication and configured tokens.
+   Provider credential behavior belongs here, not under Running LKMABT.
+6. **Running LKMABT** — commands, the cluster GitHub App flow, and run
+   behavior.
+7. **Run logs and artifact retention** — a commented directory tree for
+   `.lkmabt-runs/`, followed by the behaviors a tree cannot show.
 
 Rules:
 
@@ -43,9 +46,12 @@ Rules:
   Running LKMABT; a new flag belongs in the command or setup section that uses
   it.
 - One idea per bullet. Use a table for tool, flag, or variable mappings.
-- Fence commands as `bash`, configuration as `yaml`, and exact output as
-  `text`.
-- Preserve heading text where possible; anchors and links point at it.
+- Prefer a directory tree with inline comments over a bullet list for artifact
+  layouts.
+- Fence commands as `bash`, configuration as `yaml`, directory trees and exact
+  output as `text`.
+- Preserve heading text where possible; the Contents list and links point at
+  it.
 - Do not renumber prerequisites or reorder sections to insert a note.
 
 ## Parallel Edits
