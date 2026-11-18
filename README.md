@@ -275,7 +275,8 @@ to `.lkmabt-clusters.yaml`.
 - `github` and `gitlab` test one fixture; `both` tests both.
 - Clusters run one at a time in clusters-file order. Each cluster finishes or
   fails before the next one starts. `both` runs the two providers concurrently
-  inside a cluster.
+  inside a cluster, and console lines from each provider carry a
+  `github run - ` or `gitlab run - ` prefix.
 - Each run uses one tenant namespace per provider it tests:
   `mathwizz-test-github` for GitHub and `mathwizz-test-gitlab` for GitLab.
   Single-provider runs accept `--tenant-namespace`.

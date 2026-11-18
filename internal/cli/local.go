@@ -99,6 +99,13 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	return outcome, nil
 }
 
+// withPrefix returns a runner whose console output carries the provider label.
+// The per-provider run log keeps unlabeled lines.
+func (runner LiveRunner) withPrefix(prefix string) Runner {
+	runner.Out = &providerPrefixWriter{prefix: prefix, out: runner.Out}
+	return runner
+}
+
 // Cleanup resolves the named cluster, locates its run, and prompts before deleting the tenant namespace.
 func (runner LiveRunner) Cleanup(ctx context.Context, request config.Request) error {
 	if request.Command != config.CommandCleanup {

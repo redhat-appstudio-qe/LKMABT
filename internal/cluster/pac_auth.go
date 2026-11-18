@@ -44,7 +44,7 @@ func (e *MissingPacAuthSecretError) Error() string {
 	case e.Created:
 		return fmt.Sprintf("%s was deleted after PaC created it; PaC deletes that Secret with its PipelineRun, so check for a concurrent LKMABT run using namespace %s", state, e.Namespace)
 	case !e.Reconciled:
-		return fmt.Sprintf("%s was never created: PaC did not reconcile the PipelineRun (no %s finalizer), so check the PaC watcher and retry the run", state, PacFinalizer)
+		return fmt.Sprintf("%s was never created: PaC did not reconcile the PipelineRun (no %s), so check the PaC watcher and retry the run", state, PacFinalizer)
 	default:
 		return fmt.Sprintf("%s was not created: the PaC reconciler has not finished creating it, so check the PaC watcher logs and retry the run", state)
 	}
