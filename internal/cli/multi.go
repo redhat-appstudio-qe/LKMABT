@@ -155,6 +155,7 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 		}
 		request.Credentials.GitHubToken = token
 	}
+	var revokeEphemeralGitLab func() error
 	if len(entries) > 0 && gitlabTokenNeeded {
 		if !console.Interactive() {
 			return fmt.Errorf("GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to paste a personal access token")
@@ -175,12 +176,23 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 		}
 		request.Credentials.GitLabToken = token
 		request.Credentials.GitLabTokenEphemeral = true
-		defer func() {
+		revoked := false
+		revokeEphemeralGitLab = func() error {
+			if revoked {
+				return nil
+			}
+			revoked = true
 			revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
 			defer cancel()
-			if revokeErr := revokeGitLabToken(revokeCtx, request.Credentials.GitLabToken, request.Credentials.GitLabAPIURL); revokeErr != nil {
-				runErr = errors.Join(runErr, fmt.Errorf("revoke GitLab token: %w", revokeErr))
+			if err := revokeGitLabToken(revokeCtx, request.Credentials.GitLabToken, request.Credentials.GitLabAPIURL); err != nil {
+				return fmt.Errorf("revoke GitLab token: %w", err)
 			}
+			return nil
+		}
+		// Early returns before the report exists still revoke; the finalization
+		// path calls the closure first so its failure lands in the report.
+		defer func() {
+			runErr = errors.Join(runErr, revokeEphemeralGitLab())
 		}()
 	}
 	aggregate, err := newAggregateRun(request.StateDir)
@@ -194,12 +206,15 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 		return err
 	}
 	runs := scheduleClusters(ctx, request, entries, authFailures, aggregate, runner, console)
-	var credentialErr error
+	var cleanupErr error
 	if store != nil {
-		credentialErr = destroyCredentials(store)
+		cleanupErr = destroyCredentials(store)
 		store = nil
 	}
-	return finishAggregateRun(aggregate, request, runs, console, credentialErr)
+	if revokeEphemeralGitLab != nil {
+		cleanupErr = errors.Join(cleanupErr, revokeEphemeralGitLab())
+	}
+	return finishAggregateRun(aggregate, request, runs, console, cleanupErr)
 }
 
 // validateInteractiveGitLabURL rejects the token-page prompt for API endpoints
@@ -325,10 +340,10 @@ func resultSummary(results []ProviderResult) string {
 }
 
 // finishAggregateRun renders both reports, prints the summary, and reports the aggregate failure.
-func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []clusterRun, console *Console, credentialErr error) error {
+func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []clusterRun, console *Console, cleanupErr error) error {
 	rows := reportRows(aggregate.Directory, runs, providerNames(request.Provider))
-	if credentialErr != nil {
-		rows = append(rows, report.Row{Cluster: "credentials", Provider: "auth", Stage: report.StageCleanup, Error: credentialErr.Error(), Links: report.Links(aggregate.Directory, "", "")})
+	if cleanupErr != nil {
+		rows = append(rows, report.Row{Cluster: "credentials", Provider: "auth", Stage: report.StageCleanup, Error: cleanupErr.Error(), Links: report.Links(aggregate.Directory, "", "")})
 	}
 	document := report.Document{RunID: aggregate.RunID, ClustersFile: request.ClustersFile, StartedAt: aggregate.StartedAt, EndedAt: time.Now().UTC(), Passed: allPassed(rows), Rows: rows}
 	writeErr := report.Write(aggregate.Directory, document)
@@ -338,7 +353,7 @@ func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []
 	markdownPath, htmlPath := aggregate.reportPaths()
 	console.Printf("report: %s", markdownPath)
 	console.Printf("report: %s", htmlPath)
-	return errors.Join(aggregateError(runs), credentialErr, writeErr)
+	return errors.Join(aggregateError(runs), cleanupErr, writeErr)
 }
 
 // aggregateError joins every cluster and provider failure, preserving clusters-file order.

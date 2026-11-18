@@ -968,7 +968,7 @@ var _ = Describe("RunClusters credential authentication", func() {
 			Expect(defaultGitLabRevoke.calls).Should(Equal(0))
 		})
 
-		It("should report a revocation failure after the clusters ran", func() {
+		It("should report a revocation failure in the aggregate report and revoke once", func() {
 			defaultGitLabRevoke.err = errors.New("revoke denied")
 			request, runner := runClustersFixture(2)
 			request.Provider = config.ProviderGitLab
@@ -976,7 +976,11 @@ var _ = Describe("RunClusters credential authentication", func() {
 			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})
 
 			Expect(err).Should(MatchError(ContainSubstring("revoke GitLab token: revoke denied")))
+			Expect(defaultGitLabRevoke.calls).Should(Equal(1))
 			Expect(runner.requests).Should(HaveLen(2))
+			markdown := readFile(filepath.Join(singleAggregateDirectory(request.StateDir), "report.md"))
+			Expect(markdown).Should(ContainSubstring("- Result: **failed**"))
+			Expect(markdown).Should(ContainSubstring("revoke GitLab token: revoke denied"))
 		})
 
 		It("should prompt once, reuse the token, and revoke it", func() {
