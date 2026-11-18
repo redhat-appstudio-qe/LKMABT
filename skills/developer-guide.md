@@ -370,3 +370,10 @@ check can prove it happened beforehand.
 If the checkout sits inside an unrelated parent `go.work`, `./...` patterns fail
 with "directory prefix . does not contain modules listed in go.work". Run
 commands with `GOWORK=off`.
+
+## Documentation Updates
+
+Read `skills/update-readme.md` only when a change requires editing `README.md`.
+It defines the required user-facing section structure and how to merge parallel
+documentation edits. It is not general architecture context, and no other task
+needs it.
