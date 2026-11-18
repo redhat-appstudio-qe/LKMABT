@@ -381,7 +381,7 @@ Runtime evidence is stored under `.lkmabt-runs/`.
 │           ├── workload/taskruns/                   # TaskRun YAML artifacts
 │           ├── workload/pods.json                   # Workload snapshot: Pods
 │           ├── logs/<namespace>/<pod>/<container>.log  # Available pod logs
-│           ├── failed-builds/                       # Buildah logs when a build fails
+│           ├── failed-builds/                       # Logs from failed TaskRun steps
 │           └── collection-report.json               # Artifact collection outcome
 ├── latest -> multi-run-...                          # Most recently started aggregate run
 └── <older aggregate directories>/
