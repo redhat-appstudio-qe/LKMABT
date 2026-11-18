@@ -44,7 +44,6 @@ resources.
 | `kflux` | `ocp` clusters whose kubeconfig is missing or rejected; LKMABT installs it when absent. |
 | `ibmcloud` with the `kubernetes-service` plug-in | `type: roks` clusters. |
 | `gh` | GitHub runs with an empty `GITHUB_TOKEN`. |
-| `glab` | Optional; verifies GitLab fixture access. LKMABT does not invoke it. |
 
 ### Accounts and access
 
