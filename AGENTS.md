@@ -62,7 +62,7 @@ resolve against the working directory.
 - **PipelineRun overshoot** for one component/commit fails the run; it is a regression alarm for STONEINTG-1732
 - **Every kubeconfig is verified** with `oc whoami` before cluster work; a readable file with an expired token is not authenticated. A rejected `ocp` kubeconfig is refreshed through kflux (default path) or `oc login`, and otherwise fails at `authentication`, never at `preflight`
 - **ROKS login is opt-in** with `type: roks`; those entries never use kflux or `oc login`. `ibmcloud ks cluster config` merges into the kubeconfig named by `KUBECONFIG`, and the ladder verifies the file with `oc whoami` on every run (a rejected file stays readable), so a developer who never opened the cluster's web console fails at `authentication` with instructions instead of at `preflight`
-- **Namespace cleanup** deletes only namespaces labeled `app.konflux-ci.org/managed-by=lkmabt` with the matching run ID; anything else is prompted and re-inspected
+- **Namespace cleanup** deletes only namespaces labeled `app.konflux-ci.org/managed-by=lkmabt` with the matching run ID; anything else is prompted and re-inspected. Deletion waits at most five minutes, re-strips finalizers that controllers re-add, and on timeout fails with the namespace name plus the namespace controller's remaining resources/finalizers instead of hanging.
 - **A parent `go.work` that omits this module** breaks `./...` patterns; run commands with `GOWORK=off`
 
 ## Skills

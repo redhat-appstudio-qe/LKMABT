@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -19,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -330,5 +332,35 @@ var _ = Describe("Lifecycle GitLab token revocation", func() {
 
 		Expect(lifecycle.Finalize(context.Background(), manifest, errors.New("preflight failed"))).Should(MatchError(ContainSubstring("revoke GitLab token: revoke denied")))
 		Expect(revoked).Should(Equal(1))
+	})
+})
+
+var _ = Describe("Namespace deletion timeout", func() {
+	It("fails instead of hanging when the namespace never disappears", func() {
+		stateDir := GinkgoT().TempDir()
+		client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+			cleanup.NamespaceGVR:   "NamespaceList",
+			cluster.ApplicationGVR: "ApplicationList",
+			cluster.ComponentGVR:   "ComponentList",
+			{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "imagerepositories"}: "ImageRepositoryList",
+			{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "releases"}:          "ReleaseList",
+			{Group: "tekton.dev", Version: "v1", Resource: "pipelineruns"}:                      "PipelineRunList",
+		}, namespaceObject("tenant", "run-1"))
+		client.PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, namespaceObject("tenant", "run-1"), nil
+		})
+		previous := namespaceDeletionTimeout
+		namespaceDeletionTimeout = 50 * time.Millisecond
+		DeferCleanup(func() { namespaceDeletionTimeout = previous })
+		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseCompleted, Fixture: model.FixtureIdentity{TenantNamespace: "tenant"}}
+		lifecycle := Lifecycle{
+			Store: evidence.NewManifestStore(stateDir), Namespace: cleanup.NamespaceService{Dynamic: client},
+			Collector: collector.Collector{StateDir: stateDir}, Prompt: &fakePrompt{approved: true}, Sources: lifecycleTestSources(),
+		}
+
+		err := lifecycle.Finalize(context.Background(), manifest, nil)
+
+		Expect(err).Should(MatchError(ContainSubstring("wait for namespace tenant deletion")))
+		Expect(err.Error()).Should(ContainSubstring("deadline exceeded"))
 	})
 })

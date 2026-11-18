@@ -172,6 +172,10 @@ that cluster at `preflight`.
 After success, the harness prompts before deleting the current owned tenant
 namespace. A declined prompt retains the namespace and successful result.
 After failure, it saves and verifies required artifacts before prompting.
+Every deletion wait is bounded to five minutes and re-strips finalizers that
+controllers re-add; a namespace that never disappears fails the run or cleanup
+with its name and the remaining resources or finalizers reported by the
+namespace controller.
 
 Long waits are never silent: PaC onboarding reports enabled/total and pending
 components at most once per minute, and build waits name each component's

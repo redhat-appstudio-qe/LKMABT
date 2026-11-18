@@ -116,7 +116,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/cleanup/`** — Namespace lifecycle management
 - Creates namespaces labeled with `app.konflux-ci.org/managed-by=lkmabt`
 - Prompts before deletion (retains namespace on user decline or failure-artifact collection errors)
-- Strips finalizers from known deadlock-prone resources before namespace deletion
+- Strips finalizers from known deadlock-prone resources before namespace deletion and re-strips them while waiting for deletion
 
 **`skills/`** — Deep-dive reference files for agents.
 
@@ -415,7 +415,9 @@ run fails with an overshoot error. This is a regression alarm for STONEINTG-1732
 Check PaC configuration if this occurs.
 
 ### Cleanup Hangs
-If cleanup hangs despite finalizer stripping, check:
+Namespace deletion waits are bounded to five minutes and re-strip finalizers
+that controllers re-add; a timeout reports the namespace controller's remaining
+resources and finalizers. If cleanup still fails, check:
 - Controller pod health (PaC, image-controller, multi-platform-controller)
 - Namespace events for webhook denial or admission errors
 - `kubectl describe namespace <tenant>` for stuck finalizers from other sources

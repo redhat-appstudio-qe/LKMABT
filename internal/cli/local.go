@@ -228,7 +228,7 @@ func cleanupRun(ctx context.Context, request config.Request, store evidence.Mani
 	if err := namespaceService.Delete(ctx, namespace, request.RunID); err != nil {
 		return err
 	}
-	if err := namespaceService.WaitDeleted(ctx, namespace); err != nil {
+	if err := waitForNamespaceDeletion(ctx, namespaceService, namespace); err != nil {
 		return err
 	}
 	fmt.Printf("deleted tenant namespace %s from run %s\n", namespace, request.RunID)
@@ -254,6 +254,25 @@ type Lifecycle struct {
 
 // finalizationTimeout bounds cleanup work after the workflow context is done.
 const finalizationTimeout = 5 * time.Minute
+
+// namespaceDeletionTimeout bounds waiting for an approved namespace deletion.
+var namespaceDeletionTimeout = 5 * time.Minute
+
+// waitForNamespaceDeletion bounds the deletion wait so a lingering finalizer or
+// stuck API call fails with the namespace name instead of hanging the process.
+func waitForNamespaceDeletion(ctx context.Context, service cleanup.NamespaceService, name string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, namespaceDeletionTimeout)
+	defer cancel()
+	if err := service.WaitDeleted(waitCtx, name); err != nil {
+		statusCtx, statusCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer statusCancel()
+		if blocker := service.DeletionBlocker(statusCtx, name); blocker != "" {
+			return fmt.Errorf("%w (%s)", err, blocker)
+		}
+		return err
+	}
+	return nil
+}
 
 // Finalize collects and verifies run artifacts, then prompts before optionally deleting the owned namespace.
 // Inspection, credential deletion, and artifact collection use a fresh bounded context so a canceled
@@ -330,7 +349,7 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 	if err := l.Namespace.Delete(ctx, namespace, manifest.RunID); err != nil {
 		return errors.Join(secretErr, err)
 	}
-	return errors.Join(secretErr, l.Namespace.WaitDeleted(ctx, namespace))
+	return errors.Join(secretErr, waitForNamespaceDeletion(ctx, l.Namespace, namespace))
 }
 
 // deleteGitLabCredentialSecret removes the run-scoped GitLab SCM Secret after
