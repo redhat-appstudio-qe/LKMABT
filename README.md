@@ -225,12 +225,9 @@ and can push to the fixture. A token GitHub rejects is replaced by an existing
 `gh` login when that login passes the same checks, and otherwise by the `gh`
 browser login. Transient failures, rate limits, and timeouts abort the run
 without replacing the token. Classic or OAuth tokens need `read:org`. Cluster
-preflight additionally lists installation repositories for Apps installed for
-selected repositories; add `read:user` so that check can succeed:
-
-```bash
-gh auth refresh -h github.com -s read:user
-```
+preflight also lists installation repositories for Apps installed for selected
+repositories; when the token cannot list them, preflight logs a warning and
+continues, and the trigger-stage PaC wait remains the backstop.
 
 **Configured `GITLAB_BOT_TOKEN`.** The token is used as-is and is never
 revoked. It needs `api` access to the fixture repository.
@@ -271,8 +268,7 @@ repositories.
 
 **Token cannot list installation repositories.** Preflight logs a warning and
 continues; the PaC wait during triggering remains the backstop for a missing
-selection. A `gh` OAuth user token (`gho_`) cannot list installation
-repositories, so GitHub logins keep this warning path.
+selection. This applies to configured tokens and browser logins.
 
 ### During the run
 
@@ -303,7 +299,7 @@ repositories, so GitHub logins keep this warning path.
 
 | Variable | Required | Notes |
 | --- | --- | --- |
-| `GITHUB_TOKEN` | No | Needs `repo` and `read:org`; `read:user` when an App is installed for selected repositories. Leave empty for the browser login. |
+| `GITHUB_TOKEN` | No | Needs `repo` and `read:org`. Leave empty for the browser login. |
 | `GITLAB_BOT_TOKEN` | No | Needs `api` access. Leave empty for the `glab` Web login on `gitlab.com`. Never revoked. |
 | `GITLAB_API_URL` | No | Defaults to `https://gitlab.com/api/v4`. |
 
