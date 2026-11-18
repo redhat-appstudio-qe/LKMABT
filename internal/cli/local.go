@@ -25,6 +25,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/workflow"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 )
 
@@ -61,6 +62,13 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	stage.Out = runner.Out
 	stage.ParentContext = ctx
 	stage.Log = log
+	// Reserve the tenant namespace across processes before any artifact exists,
+	// so a concurrent run cannot delete resources this run owns.
+	releaseNamespace, err := acquireTenantNamespaceLock(tenantLockServer(request.ClusterServer, clients), request.TenantNamespace, tenantLockHolder(request.RunID, time.Now()))
+	if err != nil {
+		return RunOutcome{Provider: request.Provider}, err
+	}
+	defer releaseNamespace()
 	store := evidence.NewManifestStore(request.StateDir)
 	var logAttachErr error
 	manifest, runErr := (workflow.Runner{Store: store, Stage: stage}).Run(ctx, workflow.Options{
@@ -90,6 +98,13 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	}
 	fmt.Fprintf(log, "completed run %s at phase %s\n", manifest.RunID, manifest.Phase)
 	return outcome, nil
+}
+
+// withPrefix returns a runner whose console output carries the provider label.
+// The per-provider run log keeps unlabeled lines.
+func (runner LiveRunner) withPrefix(prefix string) Runner {
+	runner.Out = &providerPrefixWriter{prefix: prefix, out: runner.Out}
+	return runner
 }
 
 // Cleanup resolves the named cluster, locates its run, and prompts before deleting the tenant namespace.
@@ -200,6 +215,12 @@ func cleanupRun(ctx context.Context, request config.Request, store evidence.Mani
 	if info.Name != namespace || info.Labels[cleanup.ManagedByLabel] != cleanup.ManagedByValue || info.RunID != request.RunID {
 		return fmt.Errorf("refusing to clean namespace %s without exact LKMABT ownership for run %s", namespace, request.RunID)
 	}
+	// A live run holding this namespace is using the resources cleanup would delete.
+	releaseNamespace, err := acquireTenantNamespaceLock(request.ClusterServer, namespace, tenantLockHolder(request.RunID, time.Now()))
+	if err != nil {
+		return err
+	}
+	defer releaseNamespace()
 	if prompt == nil {
 		return fmt.Errorf("cleanup requires explicit confirmation")
 	}
@@ -212,10 +233,9 @@ func cleanupRun(ctx context.Context, request config.Request, store evidence.Mani
 		fmt.Fprintf(out, "retained tenant namespace %s\n", namespace)
 		return nil
 	}
-	if err := namespaceService.Delete(ctx, namespace, request.RunID); err != nil {
+	if uid, err := namespaceService.Delete(ctx, namespace, request.RunID); err != nil {
 		return err
-	}
-	if err := namespaceService.WaitDeleted(ctx, namespace); err != nil {
+	} else if err := waitForNamespaceDeletion(ctx, namespaceService, namespace, uid); err != nil {
 		return err
 	}
 	fmt.Printf("deleted tenant namespace %s from run %s\n", namespace, request.RunID)
@@ -239,17 +259,36 @@ type Lifecycle struct {
 // finalizationTimeout bounds cleanup work after the workflow context is done.
 const finalizationTimeout = 5 * time.Minute
 
+// namespaceDeletionTimeout bounds waiting for an approved namespace deletion.
+var namespaceDeletionTimeout = 5 * time.Minute
+
+// waitForNamespaceDeletion bounds the deletion wait so a lingering finalizer or
+// stuck API call fails with the namespace name instead of hanging the process.
+func waitForNamespaceDeletion(ctx context.Context, service cleanup.NamespaceService, name string, uid types.UID) error {
+	waitCtx, cancel := context.WithTimeout(ctx, namespaceDeletionTimeout)
+	defer cancel()
+	if err := service.WaitDeleted(waitCtx, name, uid); err != nil {
+		statusCtx, statusCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer statusCancel()
+		if blocker := service.DeletionBlocker(statusCtx, name); blocker != "" {
+			return fmt.Errorf("%w (%s)", err, blocker)
+		}
+		return err
+	}
+	return nil
+}
+
 // Finalize collects and verifies run artifacts, then prompts before optionally deleting the owned namespace.
 // Inspection, credential deletion, and artifact collection use a fresh bounded context so a canceled
 // run still removes the ephemeral GitLab Secret. The prompt and namespace deletion keep the run context,
 // so a canceled run retains the namespace.
 func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, runErr error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+	defer cancel()
 	namespace := manifest.Fixture.TenantNamespace
 	if namespace == "" {
 		return nil
 	}
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
-	defer cancel()
 	info, err := l.Namespace.Inspect(cleanupCtx, namespace)
 	if apierrors.IsNotFound(err) {
 		return nil
@@ -265,7 +304,7 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 	}
 	var secretErr error
 	if manifest.Fixture.EphemeralGitLabAuth {
-		secretErr = deleteGitLabCredentialSecret(cleanupCtx, l.Namespace.Dynamic, namespace)
+		secretErr = deleteGitLabCredentialSecret(cleanupCtx, l.Namespace.Dynamic, namespace, manifest.RunID)
 	}
 	if runErr != nil {
 		sources := l.Sources
@@ -304,22 +343,36 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 		fmt.Fprintf(l.logWriter(), "retained tenant namespace %s\n", namespace)
 		return secretErr
 	}
-	if err := l.Namespace.Delete(ctx, namespace, manifest.RunID); err != nil {
+	uid, err := l.Namespace.Delete(ctx, namespace, manifest.RunID)
+	if err != nil {
 		return errors.Join(secretErr, err)
 	}
-	return errors.Join(secretErr, l.Namespace.WaitDeleted(ctx, namespace))
+	return errors.Join(secretErr, waitForNamespaceDeletion(ctx, l.Namespace, namespace, uid))
 }
 
-// deleteGitLabCredentialSecret removes the run-scoped GitLab SCM Secret.
-func deleteGitLabCredentialSecret(ctx context.Context, client dynamic.Interface, namespace string) error {
+// deleteGitLabCredentialSecret removes the run-scoped GitLab SCM Secret after
+// confirming the harness owns it for runID. A missing Secret is already cleaned up.
+func deleteGitLabCredentialSecret(ctx context.Context, client dynamic.Interface, namespace, runID string) error {
 	if client == nil {
 		return fmt.Errorf("dynamic client is required to delete the ephemeral GitLab SCM Secret")
 	}
-	err := client.Resource(cluster.SecretGVR).Namespace(namespace).Delete(ctx, cluster.GitLabCredentialSecretName, metav1.DeleteOptions{})
+	secrets := client.Resource(cluster.SecretGVR).Namespace(namespace)
+	secret, err := secrets.Get(ctx, cluster.GitLabCredentialSecretName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
 	if err != nil {
+		return fmt.Errorf("get ephemeral GitLab SCM Secret: %w", err)
+	}
+	labels := secret.GetLabels()
+	if labels[cleanup.ManagedByLabel] != cleanup.ManagedByValue || labels[cleanup.RunIDLabel] != runID {
+		return fmt.Errorf("refusing to delete GitLab SCM Secret %q in namespace %s: not owned by run %s (%s=%q, %s=%q)", cluster.GitLabCredentialSecretName, namespace, runID, cleanup.ManagedByLabel, labels[cleanup.ManagedByLabel], cleanup.RunIDLabel, labels[cleanup.RunIDLabel])
+	}
+	options := metav1.DeleteOptions{}
+	if uid := secret.GetUID(); uid != "" {
+		options.Preconditions = &metav1.Preconditions{UID: &uid}
+	}
+	if err := secrets.Delete(ctx, cluster.GitLabCredentialSecretName, options); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete ephemeral GitLab SCM Secret: %w", err)
 	}
 	return nil
@@ -348,6 +401,16 @@ func runErrorWithLogFailure(runErr, attachErr error) error {
 		return runErr
 	}
 	return errors.Join(runErr, fmt.Errorf("attach run log: %w", attachErr))
+}
+
+// revokeGitLabToken revokes a run-acquired GitLab personal access token once,
+// after every cluster has finished using it.
+var revokeGitLabToken = func(ctx context.Context, token, apiURL string) error {
+	adapter, err := gitlab.NewFromCredentials(token, apiURL)
+	if err != nil {
+		return err
+	}
+	return adapter.RevokeToken(ctx)
 }
 
 // finalizeRun collects artifacts and finalizes the tenant namespace for one completed or failed run.

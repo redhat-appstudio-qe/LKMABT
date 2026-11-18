@@ -101,6 +101,9 @@ func (c apiClient) ListUserInstallationRepositories(ctx context.Context, id int6
 type Adapter struct {
 	client client
 	retry  providers.RetryPolicy
+	// oauthToken is true for gh OAuth user tokens (gho_*). The installation
+	// repository endpoint rejects them, so that capability is not required.
+	oauthToken bool
 }
 
 // New creates a GitHub adapter with the default retry policy.
@@ -121,7 +124,9 @@ func NewFromCredentials(token string) (*Adapter, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("GITHUB_TOKEN is required")
 	}
-	return New(apiClient{client: gh.NewClient(nil).WithAuthToken(token)}), nil
+	adapter := New(apiClient{client: gh.NewClient(nil).WithAuthToken(token)})
+	adapter.oauthToken = strings.HasPrefix(token, "gho_")
+	return adapter, nil
 }
 
 // ValidateFixture confirms the repository is the canonical GitHub test fixture.
@@ -147,16 +152,64 @@ func (a *Adapter) ValidateFixture(ctx context.Context, fixture providers.Fixture
 	return providers.FixtureRepository{Owner: canonicalOwner, Name: canonicalName, URL: CanonicalFixtureURL}, nil
 }
 
+// listInstallations fetches the App installations for the fixture organization,
+// marking credential rejections as insufficient access.
+func (a *Adapter) listInstallations(ctx context.Context) ([]*gh.Installation, error) {
+	installations, err := a.client.ListOrganizationInstallations(ctx, canonicalOwner)
+	if err != nil {
+		if isAccessRejection(err) {
+			return nil, fmt.Errorf("%w: list GitHub App installations for %s: %v (the GitHub token needs the read:org scope and an owner who administers the organization)", providers.ErrInsufficientGitHubAccess, canonicalOwner, err)
+		}
+		return nil, fmt.Errorf("list GitHub App installations for %s: %w", canonicalOwner, err)
+	}
+	return installations, nil
+}
+
 // CheckOrganizationAccess confirms the token can list App installations for the fixture organization.
 func (a *Adapter) CheckOrganizationAccess(ctx context.Context) error {
 	if a == nil || a.client == nil {
 		return fmt.Errorf("github client is required")
 	}
-	if _, err := a.client.ListOrganizationInstallations(ctx, canonicalOwner); err != nil {
-		if isAccessRejection(err) {
-			return fmt.Errorf("%w: list GitHub App installations for %s: %v (the GitHub token needs the read:org scope and an owner who administers the organization)", providers.ErrInsufficientGitHubAccess, canonicalOwner, err)
+	_, err := a.listInstallations(ctx)
+	return err
+}
+
+// CheckInstallationRepositoryAccess confirms the token can list the repositories
+// of every selected-repository App installation in the fixture organization. The
+// cluster app slug is unknown at acquisition, so it checks every such
+// installation without requiring the fixture in any of them.
+func (a *Adapter) CheckInstallationRepositoryAccess(ctx context.Context) error {
+	if a == nil || a.client == nil {
+		return fmt.Errorf("github client is required")
+	}
+	// GitHub rejects gh OAuth user tokens (gho_*) for the installation
+	// repositories endpoint even with read:user, requiring a GitHub App user
+	// token, personal access token, or basic auth. Keep the gh login usable and
+	// leave fixture-selection verification to preflight's warning path.
+	if a.oauthToken {
+		return nil
+	}
+	installations, err := a.listInstallations(ctx)
+	if err != nil {
+		return err
+	}
+	for _, installation := range installations {
+		if installation.SuspendedAt != nil || installation.GetRepositorySelection() != "selected" {
+			continue
 		}
-		return fmt.Errorf("list GitHub App installations for %s: %w", canonicalOwner, err)
+		if _, err := a.client.ListUserInstallationRepositories(ctx, installation.GetID()); err != nil {
+			if isAccessRejection(err) {
+				var response *gh.ErrorResponse
+				if errors.As(err, &response) && response.Response != nil && response.Response.StatusCode == http.StatusNotFound {
+					// GitHub hides installations the token cannot see. The cluster App
+					// is verified against the fixture at preflight, so one invisible
+					// installation must not reject an otherwise usable token.
+					continue
+				}
+				return fmt.Errorf("%w: list repositories for GitHub App installation %d in %s: %v (the GitHub token needs the read:user scope to list installation repositories)", providers.ErrInsufficientGitHubAccess, installation.GetID(), canonicalOwner, err)
+			}
+			return fmt.Errorf("list repositories for GitHub App installation %d in %s: %w", installation.GetID(), canonicalOwner, err)
+		}
 	}
 	return nil
 }

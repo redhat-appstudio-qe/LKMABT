@@ -111,55 +111,69 @@ func (s *githubAuthStub) authenticate(_ context.Context, _ clusterauth.CommandRu
 	return s.token, s.err
 }
 
-type gitlabAuthStub struct {
-	token  string
-	err    error
-	calls  int
-	apiURL string
-}
-
-// authenticate records the call and returns the configured token or error.
-func (s *gitlabAuthStub) authenticate(_ context.Context, _ clusterauth.CommandRunner, _ *auth.Store, _ bool, apiURL string) (string, error) {
-	s.calls++
-	s.apiURL = apiURL
-	return s.token, s.err
-}
-
-type gitlabRefreshStub struct {
+type gitlabPromptStub struct {
 	token string
 	err   error
 	calls int
 }
 
-// refresh records the call and returns the configured token or error.
-func (s *gitlabRefreshStub) refresh(_ context.Context, _ clusterauth.CommandRunner, _ *auth.Store, _ string) (string, error) {
+// read records the call and returns the configured token or error.
+func (s *gitlabPromptStub) read() (string, error) {
 	s.calls++
 	return s.token, s.err
 }
 
+type tokenPageStub struct {
+	url   string
+	err   error
+	calls int
+}
+
+// open records the URL and returns the configured error.
+func (s *tokenPageStub) open(rawURL string) error {
+	s.calls++
+	s.url = rawURL
+	return s.err
+}
+
+type gitlabRevokeStub struct {
+	err   error
+	calls int
+}
+
+// revoke records the call and returns the configured error.
+func (s *gitlabRevokeStub) revoke(context.Context, string, string) error {
+	s.calls++
+	return s.err
+}
+
 var (
-	defaultGitHubAuth  *githubAuthStub
-	defaultGitLabAuth  *gitlabAuthStub
-	defaultGitLabToken *gitlabRefreshStub
+	defaultGitHubAuth   *githubAuthStub
+	defaultGitLabPrompt *gitlabPromptStub
+	defaultGitLabRevoke *gitlabRevokeStub
+	defaultTokenPage    *tokenPageStub
 )
 
 var _ = BeforeEach(func() {
 	defaultGitHubAuth = &githubAuthStub{token: "test-github-token"}
-	defaultGitLabAuth = &gitlabAuthStub{token: "test-gitlab-token"}
-	defaultGitLabToken = &gitlabRefreshStub{token: "test-gitlab-token"}
-	originalGitHub, originalGitLab, originalRefresh, originalDestroy, originalCheck := authenticateGitHub, authenticateGitLab, refreshGitLabToken, destroyCredentials, checkGitHubAccess
+	defaultGitLabPrompt = &gitlabPromptStub{token: "glpat-test-token"}
+	defaultGitLabRevoke = &gitlabRevokeStub{}
+	defaultTokenPage = &tokenPageStub{}
+	originalGitHub, originalPrompt, originalRevoke, originalPage, originalDestroy, originalCheck := authenticateGitHub, readGitLabToken, revokeGitLabToken, openGitLabTokenPage, destroyCredentials, checkGitHubAccess
 	originalRead := readExistingGitHubToken
 	authenticateGitHub = defaultGitHubAuth.authenticate
-	authenticateGitLab = defaultGitLabAuth.authenticate
-	refreshGitLabToken = defaultGitLabToken.refresh
+	readGitLabToken = defaultGitLabPrompt.read
+	revokeGitLabToken = defaultGitLabRevoke.revoke
+	openGitLabTokenPage = defaultTokenPage.open
 	readExistingGitHubToken = func(context.Context, clusterauth.CommandRunner) (string, error) {
 		return "", errors.New("no existing gh login")
 	}
 	checkGitHubAccess = func(context.Context, string) error { return nil }
 	DeferCleanup(func() {
 		authenticateGitHub = originalGitHub
-		authenticateGitLab = originalGitLab
-		refreshGitLabToken = originalRefresh
+		readGitLabToken = originalPrompt
+		revokeGitLabToken = originalRevoke
+		openGitLabTokenPage = originalPage
 		readExistingGitHubToken = originalRead
 		destroyCredentials = originalDestroy
 		checkGitHubAccess = originalCheck
@@ -252,7 +266,7 @@ var _ = Describe("scheduleClusters", func() {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				runs = scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console, nil)
+				runs = scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
 			}()
 
 			Eventually(runner.started, time.Second).Should(Receive())
@@ -285,7 +299,7 @@ var _ = Describe("scheduleClusters", func() {
 			console := &Console{Out: &bytes.Buffer{}}
 			aggregate := &aggregateRun{Directory: GinkgoT().TempDir()}
 
-			runs := scheduleClusters(context.Background(), request, entries, authFailures, aggregate, runner, console, nil)
+			runs := scheduleClusters(context.Background(), request, entries, authFailures, aggregate, runner, console)
 
 			Expect(runs[1].AuthErr).ShouldNot(BeNil())
 			Expect(runs[1].Results).Should(BeEmpty())
@@ -308,7 +322,7 @@ var _ = Describe("scheduleClusters", func() {
 			console := &Console{Out: &bytes.Buffer{}}
 			aggregate := &aggregateRun{Directory: GinkgoT().TempDir()}
 
-			runs := scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console, nil)
+			runs := scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
 			Expect(runs).Should(HaveLen(1))
 
 			output := console.Out.(*bytes.Buffer).String()
@@ -470,6 +484,24 @@ var _ = Describe("finishAggregateRun", func() {
 			Expect(statErr).ShouldNot(HaveOccurred())
 		})
 	})
+	When("a failed row also reports a finalization error", func() {
+		It("should print the row without repeating the error", func() {
+			stateDir := GinkgoT().TempDir()
+			aggregate, err := newAggregateRun(stateDir)
+			Expect(err).ShouldNot(HaveOccurred())
+			request := config.Request{Provider: config.ProviderGitHub}
+			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Err: errors.New("build failed; finalization failed: delete denied")}}}}
+			console := &Console{Out: &bytes.Buffer{}}
+
+			err = finishAggregateRun(aggregate, request, runs, console, nil)
+			Expect(err).Should(MatchError(ContainSubstring("build failed; finalization failed: delete denied")))
+			output := console.Out.(*bytes.Buffer).String()
+			Expect(output).Should(ContainSubstring("c1 github: failed (completed)"))
+			Expect(output).ShouldNot(ContainSubstring("finalization failed"))
+			markdown := readFile(filepath.Join(aggregate.Directory, "report.md"))
+			Expect(markdown).Should(ContainSubstring("finalization failed: delete denied"))
+		})
+	})
 })
 
 var _ = Describe("RunClusters", func() {
@@ -485,7 +517,7 @@ var _ = Describe("RunClusters", func() {
 				{Name: "c2", Kubeconfig: writeKubeconfig(dir, "c2"), Server: "https://api.c2.example"},
 			}
 			clustersPath := writeClustersFile(dir, entries...)
-			request := config.Request{Command: config.CommandRun, Provider: config.ProviderBoth, StateDir: stateDir, ClustersFile: clustersPath, Timeouts: config.Defaults().Timeouts}
+			request := config.Request{Command: config.CommandRun, Provider: config.ProviderBoth, StateDir: stateDir, ClustersFile: clustersPath, Timeouts: config.Defaults().Timeouts, Credentials: config.Credentials{GitLabToken: "glpat-configured-token"}}
 			runner := &artifactWritingRunner{}
 
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
@@ -537,7 +569,7 @@ var _ = Describe("RunClusters", func() {
 				{Name: "c2", Kubeconfig: writeKubeconfig(dir, "c2"), Server: "https://api.c2.example"},
 			}
 			clustersPath := writeClustersFile(dir, entries...)
-			request := config.Request{Command: config.CommandRun, Provider: config.ProviderBoth, StateDir: stateDir, ClustersFile: clustersPath, Timeouts: config.Defaults().Timeouts}
+			request := config.Request{Command: config.CommandRun, Provider: config.ProviderBoth, StateDir: stateDir, ClustersFile: clustersPath, Timeouts: config.Defaults().Timeouts, Credentials: config.Credentials{GitLabToken: "glpat-configured-token"}}
 			runner := &artifactWritingRunner{fail: map[string]error{"c2/gitlab": errors.New("gitlab failed")}}
 
 			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
@@ -649,7 +681,7 @@ var _ = Describe("RunClusters under the aggregate layout", func() {
 				{Name: "c2", Kubeconfig: writeKubeconfig(dir, "c2"), Server: "https://api.c2.example"},
 			}
 			clustersPath := writeClustersFile(dir, entries...)
-			request := config.Request{Command: config.CommandRun, Provider: config.ProviderBoth, StateDir: stateDir, ClustersFile: clustersPath, Timeouts: config.Defaults().Timeouts}
+			request := config.Request{Command: config.CommandRun, Provider: config.ProviderBoth, StateDir: stateDir, ClustersFile: clustersPath, Timeouts: config.Defaults().Timeouts, Credentials: config.Credentials{GitLabToken: "glpat-configured-token"}}
 			runner := &artifactWritingRunner{}
 			output := &bytes.Buffer{}
 
@@ -677,8 +709,6 @@ var _ = Describe("RunClusters credential authentication", func() {
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
 
 			Expect(defaultGitHubAuth.calls).Should(Equal(1))
-			Expect(defaultGitLabAuth.calls).Should(Equal(0))
-			Expect(defaultGitLabToken.calls).Should(Equal(0))
 			Expect(runner.requests).Should(HaveLen(2))
 			for _, runRequest := range runner.requests {
 				Expect(runRequest.Credentials.GitHubToken).Should(Equal("test-github-token"))
@@ -717,6 +747,31 @@ var _ = Describe("RunClusters credential authentication", func() {
 			checkGitHubAccess = func(_ context.Context, token string) error {
 				if token == "bad-token" {
 					return fmt.Errorf("%w: 404 Not Found", providers.ErrInsufficientGitHubAccess)
+				}
+				Expect(token).Should(Equal("existing-token"))
+				return nil
+			}
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: output, interactive: true})).Should(Succeed())
+
+			Expect(defaultGitHubAuth.calls).Should(Equal(0))
+			Expect(runner.requests).Should(HaveLen(1))
+			Expect(runner.requests[0].Credentials.GitHubToken).Should(Equal("existing-token"))
+			Expect(output.String()).Should(ContainSubstring("github: using the existing gh login"))
+		})
+	})
+
+	When("a configured GitHub token cannot list a selected installation's repositories but the existing gh login can", func() {
+		It("should reuse the existing login without a browser flow", func() {
+			request, runner := runClustersFixture(1)
+			request.Credentials.GitHubToken = "bad-token"
+			output := &bytes.Buffer{}
+			readExistingGitHubToken = func(context.Context, clusterauth.CommandRunner) (string, error) {
+				return "existing-token", nil
+			}
+			checkGitHubAccess = func(_ context.Context, token string) error {
+				if token == "bad-token" {
+					return fmt.Errorf("%w: list repositories for GitHub App installation 7: 403 (the GitHub token needs the read:user scope)", providers.ErrInsufficientGitHubAccess)
 				}
 				Expect(token).Should(Equal("existing-token"))
 				return nil
@@ -860,22 +915,86 @@ var _ = Describe("RunClusters credential authentication", func() {
 	})
 
 	When("the provider is GitLab without a token", func() {
-		It("should prompt once, reuse the token, and delete the credentials", func() {
+		It("should open the prefilled token page and explain the one-day PAT", func() {
 			request, runner := runClustersFixture(1)
 			request.Provider = config.ProviderGitLab
-			request.Credentials.GitLabAPIURL = "https://gitlab.example/api/v4"
-			tempRoot := credentialTempRoot()
+			_ = credentialTempRoot()
+			out := &bytes.Buffer{}
 
-			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: out, interactive: true})).Should(Succeed())
 
-			Expect(defaultGitLabAuth.calls).Should(Equal(1))
-			Expect(defaultGitLabAuth.apiURL).Should(Equal("https://gitlab.example/api/v4"))
+			Expect(defaultTokenPage.calls).Should(Equal(1))
+			Expect(defaultTokenPage.url).Should(Equal(GitLabTokenURL))
+			Expect(defaultTokenPage.url).Should(ContainSubstring("personal_access_tokens/legacy/new"))
+			Expect(defaultTokenPage.url).Should(ContainSubstring("scopes=api%2Cwrite_repository"))
+			Expect(out.String()).Should(ContainSubstring("personal access token page"))
+			Expect(out.String()).Should(ContainSubstring("expiration to 1 day"))
+			Expect(defaultGitLabPrompt.calls).Should(Equal(1))
+		})
+
+		It("should print the token page URL when the browser cannot open", func() {
+			defaultTokenPage.err = errors.New("no browser")
+			request, runner := runClustersFixture(1)
+			request.Provider = config.ProviderGitLab
+			_ = credentialTempRoot()
+			out := &bytes.Buffer{}
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: out, interactive: true})).Should(Succeed())
+
+			Expect(out.String()).Should(ContainSubstring("could not open the token page: no browser"))
+			Expect(out.String()).Should(ContainSubstring(GitLabTokenURL))
+		})
+
+		It("should revoke the acquired token once after every cluster", func() {
+			request, runner := runClustersFixture(2)
+			request.Provider = config.ProviderGitLab
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})).Should(Succeed())
+
+			Expect(defaultGitLabRevoke.calls).Should(Equal(1))
+			Expect(runner.requests).Should(HaveLen(2))
+		})
+
+		It("should fail before prompting for a GitLab token when GitHub authentication fails", func() {
+			defaultGitHubAuth.err = errors.New("gh failed")
+			request, runner := runClustersFixture(1)
+			request.Provider = config.ProviderBoth
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})
+
+			Expect(err).Should(MatchError(ContainSubstring("gh failed")))
+			Expect(defaultTokenPage.calls).Should(Equal(0))
+			Expect(defaultGitLabPrompt.calls).Should(Equal(0))
+			Expect(defaultGitLabRevoke.calls).Should(Equal(0))
+		})
+
+		It("should report a revocation failure in the aggregate report and revoke once", func() {
+			defaultGitLabRevoke.err = errors.New("revoke denied")
+			request, runner := runClustersFixture(2)
+			request.Provider = config.ProviderGitLab
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})
+
+			Expect(err).Should(MatchError(ContainSubstring("revoke GitLab token: revoke denied")))
+			Expect(defaultGitLabRevoke.calls).Should(Equal(1))
+			Expect(runner.requests).Should(HaveLen(2))
+			markdown := readFile(filepath.Join(singleAggregateDirectory(request.StateDir), "report.md"))
+			Expect(markdown).Should(ContainSubstring("- Result: **failed**"))
+			Expect(markdown).Should(ContainSubstring("revoke GitLab token: revoke denied"))
+		})
+
+		It("should prompt once, reuse the token, and revoke it", func() {
+			request, runner := runClustersFixture(1)
+			request.Provider = config.ProviderGitLab
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})).Should(Succeed())
+
+			Expect(defaultGitLabPrompt.calls).Should(Equal(1))
 			Expect(defaultGitHubAuth.calls).Should(Equal(0))
-			Expect(defaultGitLabToken.calls).Should(Equal(1))
 			Expect(runner.requests).Should(HaveLen(1))
-			Expect(runner.requests[0].Credentials.GitLabToken).Should(Equal("test-gitlab-token"))
+			Expect(runner.requests[0].Credentials.GitLabToken).Should(Equal("glpat-test-token"))
 			Expect(runner.requests[0].Credentials.GitLabTokenEphemeral).Should(BeTrue())
-			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
+			Expect(defaultGitLabRevoke.calls).Should(Equal(1))
 		})
 	})
 
@@ -887,8 +1006,8 @@ var _ = Describe("RunClusters credential authentication", func() {
 
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
 
-			Expect(defaultGitLabAuth.calls).Should(Equal(0))
-			Expect(defaultGitLabToken.calls).Should(Equal(0))
+			Expect(defaultGitLabPrompt.calls).Should(Equal(0))
+			Expect(defaultGitLabRevoke.calls).Should(Equal(0))
 			Expect(runner.requests[0].Credentials.GitLabToken).Should(Equal("configured-gitlab-token"))
 			Expect(runner.requests[0].Credentials.GitLabTokenEphemeral).Should(BeFalse())
 		})
@@ -900,15 +1019,14 @@ var _ = Describe("RunClusters credential authentication", func() {
 			request.Provider = config.ProviderBoth
 			tempRoot := credentialTempRoot()
 
-			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})).Should(Succeed())
 
 			Expect(defaultGitHubAuth.calls).Should(Equal(1))
-			Expect(defaultGitLabAuth.calls).Should(Equal(1))
-			Expect(defaultGitLabToken.calls).Should(Equal(1))
+			Expect(defaultGitLabPrompt.calls).Should(Equal(1))
 			Expect(runner.requests).Should(HaveLen(2))
 			for _, runRequest := range runner.requests {
 				Expect(runRequest.Credentials.GitHubToken).Should(Equal("test-github-token"))
-				Expect(runRequest.Credentials.GitLabToken).Should(Equal("test-gitlab-token"))
+				Expect(runRequest.Credentials.GitLabToken).Should(Equal("glpat-test-token"))
 			}
 			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
 		})
@@ -928,38 +1046,58 @@ var _ = Describe("RunClusters credential authentication", func() {
 		})
 	})
 
-	When("GitLab authentication fails", func() {
-		It("should stop before running any cluster", func() {
+	When("GitLab token entry fails", func() {
+		It("should stop before running any cluster and not revoke", func() {
 			request, runner := runClustersFixture(1)
 			request.Provider = config.ProviderGitLab
-			tempRoot := credentialTempRoot()
-			defaultGitLabAuth.err = errors.New("token entry cancelled")
+			defaultGitLabPrompt.err = errors.New("token entry cancelled")
 
-			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
-			Expect(err).Should(MatchError(ContainSubstring("token entry cancelled")))
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})
+			Expect(err).Should(MatchError(ContainSubstring("read GitLab personal access token: token entry cancelled")))
 			Expect(runner.requests).Should(BeEmpty())
-			Expect(defaultGitLabToken.calls).Should(Equal(0))
-			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
+			Expect(defaultGitLabRevoke.calls).Should(Equal(0))
 			Expect(os.ReadDir(request.StateDir)).Should(BeEmpty())
 		})
 	})
 
-	When("the GitLab token refresh fails", func() {
-		It("should fail the cluster at authentication and still report", func() {
-			request, runner := runClustersFixture(2)
+	When("GitLab authentication is non-interactive", func() {
+		It("should require GITLAB_BOT_TOKEN without opening the browser", func() {
+			request, runner := runClustersFixture(1)
 			request.Provider = config.ProviderGitLab
-			tempRoot := credentialTempRoot()
-			defaultGitLabToken.err = errors.New("refresh denied")
 
 			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
-			Expect(err).Should(MatchError(ContainSubstring("refresh denied")))
-			Expect(defaultGitLabToken.calls).Should(Equal(2))
+			Expect(err).Should(MatchError(ContainSubstring("set GITLAB_BOT_TOKEN")))
+			Expect(defaultTokenPage.calls).Should(Equal(0))
+			Expect(defaultGitLabPrompt.calls).Should(Equal(0))
 			Expect(runner.requests).Should(BeEmpty())
-			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
-			aggregateDirectory := singleAggregateDirectory(request.StateDir)
-			markdown := readFile(filepath.Join(aggregateDirectory, "report.md"))
-			Expect(markdown).Should(ContainSubstring("| c1 | gitlab | failed | authentication | refresh denied"))
-			Expect(markdown).Should(ContainSubstring("| c2 | gitlab | failed | authentication | refresh denied"))
+		})
+	})
+
+	When("the GitLab API URL is self-managed", func() {
+		It("should require GITLAB_BOT_TOKEN before opening the token page", func() {
+			request, runner := runClustersFixture(1)
+			request.Provider = config.ProviderGitLab
+			request.Credentials.GitLabAPIURL = "https://gitlab.example.com/api/v4"
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})
+
+			Expect(err).Should(MatchError(ContainSubstring("set GITLAB_BOT_TOKEN")))
+			Expect(defaultTokenPage.calls).Should(Equal(0))
+			Expect(defaultGitLabPrompt.calls).Should(Equal(0))
+		})
+	})
+
+	When("a non-PAT value is entered", func() {
+		It("should reject it before running any cluster", func() {
+			defaultGitLabPrompt.token = "oauth-token"
+			request, runner := runClustersFixture(1)
+			request.Provider = config.ProviderGitLab
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})
+
+			Expect(err).Should(MatchError(ContainSubstring("requires a personal access token")))
+			Expect(runner.requests).Should(BeEmpty())
+			Expect(defaultGitLabRevoke.calls).Should(Equal(0))
 		})
 	})
 

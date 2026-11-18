@@ -74,7 +74,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/auth/`** — Provider credential acquisition
 - Creates one run-scoped `lkmabt-auth-*` directory with 0700 credentials written as 0600 files
 - GitHub: runs `gh auth login --web` with an isolated `GH_CONFIG_DIR` and `--insecure-storage`
-- GitLab: runs `glab auth login` (choose Web) with an isolated `GLAB_CONFIG_DIR`, keeps that directory for OAuth refresh, and deletes the ephemeral SCM Secret during finalization
+- GitLab: opens a prefilled PAT page (1-day expiration, `api` and `write_repository`), prompts for the token without echo, and deletes the ephemeral SCM Secret during finalization; the run-acquired token is revoked once after the last cluster
 - `RunClusters` deletes the directory after the last cluster; non-interactive runs must provide the provider tokens
 
 **`internal/report/`** — Aggregate reports
@@ -116,7 +116,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/cleanup/`** — Namespace lifecycle management
 - Creates namespaces labeled with `app.konflux-ci.org/managed-by=lkmabt`
 - Prompts before deletion (retains namespace on user decline or failure-artifact collection errors)
-- Strips finalizers from known deadlock-prone resources before namespace deletion
+- Strips finalizers from known deadlock-prone resources before namespace deletion and re-strips them while waiting for deletion
 
 **`skills/`** — Deep-dive reference files for agents.
 
@@ -154,6 +154,32 @@ definitions via import when the same GVR is needed across packages.
 On failure, transition to **Failed** phase and collect artifacts. Clusters run
 sequentially in clusters-file order; each completes or fails before the next
 starts.
+
+### Build Wait Progress and Deadlock Detection
+PaC onboarding and build waits emit at most one progress line per minute: PaC
+shows enabled/total plus pending component names; build waits name each
+component's matching PipelineRun, pending/running age, and Buildah TaskRun
+counts, with milestone lines at each phase entry. `VerifyBuilds` inspects the
+`pipelinesascode.tekton.dev/git-auth-secret` annotation on pending
+PipelineRuns: when the referenced Secret is absent for more than two minutes it
+fails with `MissingPacAuthSecretError`, which names the run, component, Secret,
+and pending duration. The diagnostic reads PaC's `secret-created` annotation
+and finalizer: a Secret PaC created and then lost points at a concurrent run, a
+PipelineRun without the `pipelinesascode.tekton.dev/finalizer` was never
+reconciled by the PaC watcher, and a reconciled run with
+`secret-created=false` has not finished Secret creation. A Secret read
+that fails for any other reason warns once and keeps waiting. A matched
+PipelineRun with a `Succeeded=False` condition fails the wait immediately
+instead of waiting for Buildah TaskRuns.
+
+### Tenant Namespace Locking
+`LiveRunner.Run` and `cleanupRun` take a non-blocking `flock` on
+`<user cache>/lkmabt/locks/<sha256(server + namespace)>.lock` before mutating
+cluster resources. A contended call fails immediately with the namespace,
+server, and recorded holder (run ID, pid, start time), before any artifact is
+created. The lock is per Unix user and host; it does not protect against runs
+from other machines or users, and prefixed `<tenant>-*` namespaces are outside
+its key.
 
 ## Testing Structure
 
@@ -220,27 +246,75 @@ deadline, the remaining preflight steps continue on the run context.
 When `GITHUB_TOKEN` is empty, GitHub runs call `gh auth login --web` with a
 private `GH_CONFIG_DIR` and `--insecure-storage`, then read the token with
 `gh auth token`. GitLab API requests use `Authorization: Bearer`, which accepts
-both the OAuth token from glab's Web login and a `GITLAB_BOT_TOKEN` access
-token; GitLab rejects OAuth tokens sent as `PRIVATE-TOKEN`. A configured
-`GITHUB_TOKEN` is checked against the organization's App
-installations and the fixture repository's push permission; an interactive run
+a personal access token; GitLab rejects OAuth tokens sent as `PRIVATE-TOKEN`. A configured
+`GITHUB_TOKEN` is checked against the organization's App installations, the
+fixture repository's push permission, and the repositories of each
+non-suspended installation that covers selected repositories; an interactive run
 replaces a token that fails those checks for credential reasons with
 the token from the existing `gh` login when it passes them, and otherwise
 with the `gh` browser login. Transient, rate-limit, and timeout check failures
-abort the run without replacing the token. When `GITLAB_BOT_TOKEN` is empty, GitLab runs
-`glab auth login` (choose Web) with a private `GLAB_CONFIG_DIR`, then reads the
-token with `glab config get token --host`; the glab directory stays in the
-store so `glab api user` can refresh the OAuth token before each cluster. Each
-acquired token is kept in a 0600 file inside one run-scoped `lkmabt-auth-*`
-temporary directory and reused for every cluster. The ephemeral GitLab token is
-also written to the tenant SCM Secret for PaC, and finalization deletes that
-Secret.
+abort the run without replacing the token. A 404 for a selected installation the token cannot see is skipped; preflight
+verifies the cluster App against the fixture. A classic or OAuth token may need
+the `read:user` scope to list selected-installation repositories; add it with
+`gh auth refresh -h github.com -s read:user`. GitHub rejects a `gh` OAuth user
+token (`gho_`) for that endpoint even with the scope, so the acquisition check
+skips it and preflight keeps the warning path. The acquisition check does not
+require the fixture in every installation because the cluster app slug is
+unknown there; a listing that remains unverifiable after the browser login still
+only produces the preflight warning. When `GITLAB_BOT_TOKEN` is empty, GitLab opens the prefilled PAT page (1-day
+expiration, `api` and `write_repository`) and prompts for the token without
+echo; the token is used directly and is never written to the credential store.
+The ephemeral GitLab token is also written to the tenant SCM Secret for PaC;
+each cluster's finalization deletes that Secret, and the run-acquired token is
+revoked once after the last cluster with `DELETE /personal_access_tokens/self`.
+A configured `GITLAB_BOT_TOKEN` is never revoked.
 
 The directory is removed when the run ends, including after failures and
 cancellations, and a removal failure fails the run. Authentication requires an
 interactive terminal; non-interactive runs must provide the tokens. A
-configured `GITHUB_TOKEN` needs the `read:org` scope and an owner who
-administers the fixture organization.
+configured `GITHUB_TOKEN` needs the `read:org` scope, an owner who
+administers the fixture organization, push access to the fixture repository,
+and `read:user` when an App installation is limited to selected repositories.
+
+### GitLab SCM Secret Lifecycle
+Fixture setup creates the tenant namespace before writing the GitLab Secret.
+When the namespace is absent, it first requests one through the OpenShift
+`ProjectRequest` API (`project.openshift.io/v1`, resource `projectrequests`),
+which binds the requester as project admin. A NotFound or Forbidden
+ProjectRequest API falls back to creating a bare Namespace, which surfaces the
+cluster's own namespace RBAC error. A ProjectRequest does not guarantee label
+copying, so setup applies the ownership labels after the controller creates the
+Namespace. That update is cluster-scoped: the run identity needs `update` on
+`namespaces`, and a denial fails setup with an error naming the namespace to
+delete manually. The namespace is labeled only when its UID matches the project
+returned by the ProjectRequest, so a namespace created by another actor during
+the request is refused rather than adopted.
+
+After the namespace exists, setup runs one `SelfSubjectAccessReview` per verb:
+`get`, `create`, and `update` on `secrets` in the tenant namespace; ephemeral
+tokens also require `delete`. A denial or review error fails fixture setup with
+the namespace and an example `oc adm policy add-role-to-user edit <user> -n
+<namespace>` grant, before the Secret is written.
+
+Fixtures own exactly one Secret, `gitlab-build-secret`, and label it
+`app.konflux-ci.org/managed-by=lkmabt` plus `app.konflux.org/run-id=<run-id>`.
+The Secret carries the GitLab SCM labels and repository annotation that
+build-service matches. Both labels mark harness ownership: a Secret carrying
+them may be updated and adopted by the current run, which refreshes the run ID.
+Deletion additionally requires the run ID to equal the current run. A Secret
+with that name but missing either label is never updated or deleted; the run
+fails with an error naming the Secret and namespace, and a legacy unowned
+Secret must be deleted once after access is granted. Secret listing is
+opportunistic: a configured token may reuse another repository-scoped Secret
+when the API allows it, and a `Forbidden` list falls back to managing the owned
+Secret. A run-acquired token is never written into another repository-scoped
+Secret, because that Secret would outlive the token's revocation.
+
+Finalization deletes the Secret only for ephemeral tokens and only after
+confirming the managed-by and run-ID labels, using a UID precondition when the
+Secret has one. A missing Secret is treated as already cleaned up. A failed
+ownership check or API call is joined into the returned error while failure
+evidence is still collected and saved, so the report retains its artifacts.
 
 ### Sequential Cluster Execution
 Clusters run one at a time in clusters-file order so run-scoped credentials are
@@ -345,7 +419,9 @@ run fails with an overshoot error. This is a regression alarm for STONEINTG-1732
 Check PaC configuration if this occurs.
 
 ### Cleanup Hangs
-If cleanup hangs despite finalizer stripping, check:
+Namespace deletion waits are bounded to five minutes and re-strip finalizers
+that controllers re-add; a timeout reports the namespace controller's remaining
+resources and finalizers. If cleanup still fails, check:
 - Controller pod health (PaC, image-controller, multi-platform-controller)
 - Namespace events for webhook denial or admission errors
 - `kubectl describe namespace <tenant>` for stuck finalizers from other sources

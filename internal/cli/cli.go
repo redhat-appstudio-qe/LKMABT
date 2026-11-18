@@ -69,6 +69,11 @@ func providerNames(provider string) []string {
 	return []string{provider}
 }
 
+// prefixedRunner lets runProviders label concurrent provider output.
+type prefixedRunner interface {
+	withPrefix(prefix string) Runner
+}
+
 // runProviders runs every selected provider concurrently and returns one result per provider in fixed order.
 func runProviders(ctx context.Context, request config.Request, runner Runner) []ProviderResult {
 	names := providerNames(request.Provider)
@@ -80,7 +85,13 @@ func runProviders(ctx context.Context, request config.Request, runner Runner) []
 			defer waitGroup.Done()
 			log := newRunLog()
 			defer log.Close()
-			outcome, err := runner.Run(ctx, requestForProvider(request, name), log)
+			providerRunner := runner
+			if len(names) > 1 {
+				if prefixed, ok := runner.(prefixedRunner); ok {
+					providerRunner = prefixed.withPrefix(name + " run - ")
+				}
+			}
+			outcome, err := providerRunner.Run(ctx, requestForProvider(request, name), log)
 			results[index] = providerResult(name, outcome, err)
 		}(index, name)
 	}

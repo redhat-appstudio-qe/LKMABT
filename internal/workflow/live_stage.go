@@ -31,6 +31,9 @@ var githubAppPollInterval = 10 * time.Second
 // githubAppStatusInterval bounds how often the wait reports progress to the user.
 var githubAppStatusInterval = 5 * time.Minute
 
+// buildStatusInterval bounds how often a build wait reports progress to the user.
+var buildStatusInterval = time.Minute
+
 type LiveStage struct {
 	Request              config.Request
 	Clients              *cluster.ClientSet
@@ -69,7 +72,7 @@ func NewLiveStage(request config.Request, clients *cluster.ClientSet, provider p
 		Fixture:              providers.FixtureRepository{Owner: source.Owner, Name: source.Name, URL: source.URL},
 		Namespace:            cleanup.NamespaceService{Dynamic: clients.Dynamic, NameLister: cleanup.OCNamespaceNameLister{Kubeconfig: request.Kubeconfig}},
 		FailedBuildCollector: &collector.FailedBuildCollector{Dynamic: clients.Dynamic, Kubernetes: clients.Kubernetes},
-		OpenURL:              openBrowser,
+		OpenURL:              OpenBrowser,
 		Log:                  io.Discard,
 	}
 	return stage, nil
@@ -77,12 +80,7 @@ func NewLiveStage(request config.Request, clients *cluster.ClientSet, provider p
 
 // Preflight validates the cluster, required APIs, platform scheduling, and tenant namespace.
 func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) error {
-	spec := cluster.PreflightSpec{ExpectedServer: s.Request.ClusterServer, AccessChecks: []cluster.AccessCheck{
-		{Name: "pipelineruns", Resource: PipelineRunGVR, Namespace: s.Request.TenantNamespace},
-		{Name: "taskruns", Resource: cluster.TaskRunGVR, Namespace: s.Request.TenantNamespace},
-		{Name: "applications", Resource: cluster.ApplicationGVR, Namespace: s.Request.TenantNamespace},
-		{Name: "components", Resource: cluster.ComponentGVR, Namespace: s.Request.TenantNamespace},
-	}, Scheduling: cluster.SchedulingSpec{
+	spec := cluster.PreflightSpec{ExpectedServer: s.Request.ClusterServer, AccessChecks: s.accessChecks(), Scheduling: cluster.SchedulingSpec{
 		Namespace:  cluster.MultiPlatformControllerNamespace,
 		Deployment: cluster.MultiPlatformControllerDeployment,
 		ConfigMap:  cluster.MultiPlatformControllerConfigMap,
@@ -114,6 +112,16 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 	}
 	manifest.TargetClusterServer = s.Request.ClusterServer
 	return nil
+}
+
+// accessChecks lists the API versions preflight must verify.
+func (s *LiveStage) accessChecks() []cluster.AccessCheck {
+	return []cluster.AccessCheck{
+		{Name: "pipelineruns", Resource: PipelineRunGVR, Namespace: s.Request.TenantNamespace},
+		{Name: "taskruns", Resource: cluster.TaskRunGVR, Namespace: s.Request.TenantNamespace},
+		{Name: "applications", Resource: cluster.ApplicationGVR, Namespace: s.Request.TenantNamespace},
+		{Name: "components", Resource: cluster.ComponentGVR, Namespace: s.Request.TenantNamespace},
+	}
 }
 
 // githubAppVerification reports the context remaining valid for preflight and
@@ -172,7 +180,7 @@ func (s *LiveStage) waitForGitHubAppInstallation(ctx context.Context, checker cl
 	s.notice("  4. Return to this terminal; LKMABT checks every %s and continues automatically.", githubAppPollInterval)
 	open := s.OpenURL
 	if open == nil {
-		open = openBrowser
+		open = OpenBrowser
 	}
 	if err := open(required.InstallURL); err != nil {
 		s.notice("Could not open a browser: %v", err)
@@ -287,9 +295,9 @@ func (s *LiveStage) notice(format string, args ...any) {
 	}
 }
 
-// openBrowser starts the platform's default browser opener and returns without
+// OpenBrowser starts the platform's default browser opener and returns without
 // waiting for it to exit; xdg-open can live as long as the opened application.
-func openBrowser(rawURL string) error {
+func OpenBrowser(rawURL string) error {
 	name := "xdg-open"
 	if runtime.GOOS == "darwin" {
 		name = "open"
@@ -330,7 +338,7 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 	}
 	manifest.Fixture.TenantNamespace = namespace
 	manifest.Fixture.EphemeralGitLabAuth = s.Request.Credentials.GitLabTokenEphemeral
-	result, err := (cluster.FixtureService{Dynamic: s.Clients.Dynamic}).EnsureFixture(ctx, cluster.FixtureSpec{
+	result, err := (cluster.FixtureService{Dynamic: s.Clients.Dynamic, Kubernetes: s.Clients.Kubernetes}).EnsureFixture(ctx, cluster.FixtureSpec{
 		Namespace:            namespace,
 		RunID:                manifest.RunID,
 		Application:          application,
@@ -381,13 +389,14 @@ func (s *LiveStage) ensureTenantNamespaceAvailable(ctx context.Context, manifest
 	return nil
 }
 
-// deleteOwnedNamespace removes a stale LKMABT namespace without prompting and logs the removal.
+// deleteOwnedNamespace removes a stale LKMABT namespace without prompting and reports the removal.
 func (s *LiveStage) deleteOwnedNamespace(ctx context.Context, info cleanup.NamespaceInfo) error {
-	fmt.Fprintf(s.Log, "deleting stale owned tenant namespace %s from run %s\n", info.Name, info.RunID)
-	if err := s.Namespace.Delete(ctx, info.Name, info.RunID); err != nil {
+	s.notice("deleting stale owned tenant namespace %s from run %s", info.Name, info.RunID)
+	uid, err := s.Namespace.Delete(ctx, info.Name, info.RunID)
+	if err != nil {
 		return err
 	}
-	return s.Namespace.WaitDeleted(ctx, info.Name)
+	return s.Namespace.WaitDeleted(ctx, info.Name, uid)
 }
 
 // deleteUnownedNamespace asks per namespace before deleting a scoped namespace that lacks exact ownership labels.
@@ -405,7 +414,7 @@ func (s *LiveStage) deleteUnownedNamespace(ctx context.Context, info cleanup.Nam
 	if err := s.Namespace.DeleteApproved(ctx, info); err != nil {
 		return err
 	}
-	return s.Namespace.WaitDeleted(ctx, info.Name)
+	return s.Namespace.WaitDeleted(ctx, info.Name, info.UID)
 }
 
 // TriggerComponents waits for PaC onboarding, updates fixture files, and records trigger commits.
@@ -436,7 +445,7 @@ func (s *LiveStage) TriggerComponents(ctx context.Context, manifest *model.RunMa
 			}
 		}
 		return list.Items, nil
-	}); err != nil {
+	}, s.notice); err != nil {
 		return fmt.Errorf("wait for PaC onboarding: %w", err)
 	}
 	for index, component := range components {
@@ -479,6 +488,8 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 	if namespace == "" {
 		return fmt.Errorf("run manifest does not contain a tenant namespace")
 	}
+	inspector := cluster.PacAuthInspector{Kubernetes: s.Clients.Kubernetes}
+	inspectionWarned := false
 	identities, err := waitForBuildTaskRuns(ctx, s.Request.Timeouts.Trigger, s.Request.Timeouts.Build, 10*time.Second, namespace, manifest.TriggerCommits, func(ctx context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error) {
 		components, err := s.Clients.Dynamic.Resource(cluster.ComponentGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
@@ -493,12 +504,28 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 		if err != nil {
 			return nil, nil, err
 		}
+		// A matched failed PipelineRun wins over a missing PaC Secret so the
+		// failed-build log collection still runs.
+		if failed := matchedFailedPipelineRun(pipelineRuns.Items, manifest.TriggerCommits); failed != nil {
+			return nil, nil, failed
+		}
+		// Fail fast when PaC already removed the Secret a pending build needs; a
+		// transient read failure only warns, because the build wait still works.
+		missing, inspectErr := inspector.Missing(ctx, namespace, candidatePipelineRunsForCommits(pipelineRuns.Items, manifest.TriggerCommits))
+		if inspectErr != nil {
+			if !inspectionWarned {
+				inspectionWarned = true
+				s.notice("warning: cannot inspect PaC git authentication Secrets: %v", inspectErr)
+			}
+		} else if missing != nil {
+			return nil, nil, missing
+		}
 		taskRuns, err := s.Clients.Dynamic.Resource(cluster.TaskRunGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, nil, err
 		}
 		return pipelineRuns.Items, taskRuns.Items, nil
-	})
+	}, s.notice)
 	if err != nil {
 		var pipelineRunError *PipelineRunFailedError
 		if errors.As(err, &pipelineRunError) && s.FailedBuildCollector != nil && manifest.ArtifactDirectory != "" {
@@ -539,7 +566,7 @@ func paCStatusError(object *unstructured.Unstructured) error {
 }
 
 // waitForPaCEnabled polls components until each named component reports enabled PaC status.
-func waitForPaCEnabled(ctx context.Context, timeout, interval time.Duration, names []string, list func(context.Context) ([]unstructured.Unstructured, error)) error {
+func waitForPaCEnabled(ctx context.Context, timeout, interval time.Duration, names []string, list func(context.Context) ([]unstructured.Unstructured, error), notice func(string, ...any)) error {
 	if timeout <= 0 {
 		return fmt.Errorf("PaC timeout must be positive")
 	}
@@ -548,6 +575,9 @@ func waitForPaCEnabled(ctx context.Context, timeout, interval time.Duration, nam
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	heartbeat := time.NewTicker(buildStatusInterval)
+	defer heartbeat.Stop()
+	notify(notice, "waiting for PaC onboarding of %d components", len(names))
 	for {
 		objects, err := list(waitCtx)
 		if err != nil {
@@ -559,30 +589,15 @@ func waitForPaCEnabled(ctx context.Context, timeout, interval time.Duration, nam
 		}
 		pending := false
 		for _, name := range names {
-			object, found := byName[name]
-			if !found {
-				pending = true
-				continue
-			}
-			status := object.GetAnnotations()["build.appstudio.openshift.io/status"]
-			var annotation struct {
-				PaC struct {
-					State string `json:"state"`
-				} `json:"pac"`
-			}
-			if err := json.Unmarshal([]byte(status), &annotation); err != nil || annotation.PaC.State != "enabled" {
+			if componentPaCState(byName[name]) != "enabled" {
 				pending = true
 			}
 		}
 		if !pending {
 			return nil
 		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-waitCtx.Done():
-			timer.Stop()
+		if !awaitPoll(waitCtx, interval, heartbeat, func() { notify(notice, "%s", paCWaitStatus(names, objects)) }) {
 			return fmt.Errorf("timed out waiting for PaC onboarding: %w", waitCtx.Err())
-		case <-timer.C:
 		}
 	}
 }
@@ -660,7 +675,7 @@ func waitForBuildMatches(ctx context.Context, triggerTimeout, buildTimeout, inte
 }
 
 // waitForBuildTaskRuns polls for matching PipelineRuns and successful Buildah TaskRuns.
-func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, interval time.Duration, namespace string, commits []model.TriggerCommit, list func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error)) ([]model.PipelineRunIdentity, error) {
+func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, interval time.Duration, namespace string, commits []model.TriggerCommit, list func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error), notice func(string, ...any)) ([]model.PipelineRunIdentity, error) {
 	if triggerTimeout <= 0 {
 		return nil, fmt.Errorf("trigger timeout must be positive")
 	}
@@ -670,8 +685,11 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 	if interval <= 0 {
 		return nil, fmt.Errorf("build polling interval must be positive")
 	}
+	notify(notice, "waiting for PipelineRuns for %d triggered components", len(commits))
 	triggerCtx, cancelTrigger := context.WithTimeout(ctx, triggerTimeout)
 	defer cancelTrigger()
+	triggerHeartbeat := time.NewTicker(buildStatusInterval)
+	defer triggerHeartbeat.Stop()
 	for {
 		pipelineRuns, taskRuns, err := list(triggerCtx)
 		if err != nil {
@@ -687,17 +705,18 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 		if allBuildsAppeared(pipelineRuns, commits) {
 			break
 		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-triggerCtx.Done():
-			timer.Stop()
+		if !awaitPoll(triggerCtx, interval, triggerHeartbeat, func() {
+			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now()))
+		}) {
 			return nil, noPipelineRunError(namespace, commits, pipelineRuns)
-		case <-timer.C:
 		}
 	}
 
+	notify(notice, "PipelineRuns appeared for all %d components; waiting for Buildah TaskRuns", len(commits))
 	buildCtx, cancelBuild := context.WithTimeout(ctx, buildTimeout)
 	defer cancelBuild()
+	buildHeartbeat := time.NewTicker(buildStatusInterval)
+	defer buildHeartbeat.Stop()
 	for {
 		pipelineRuns, taskRuns, err := list(buildCtx)
 		if err != nil {
@@ -710,19 +729,35 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 		if !pending {
 			return identities, nil
 		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-buildCtx.Done():
-			timer.Stop()
+		if !awaitPoll(buildCtx, interval, buildHeartbeat, func() {
+			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now()))
+		}) {
 			return nil, fmt.Errorf("timed out waiting for Buildah TaskRuns after trigger: %w", buildCtx.Err())
-		case <-timer.C:
 		}
 	}
+}
+
+// matchedFailedPipelineRun returns the first matched PipelineRun reporting
+// failure, so callers can fail before other checks hide it.
+func matchedFailedPipelineRun(pipelineRuns []unstructured.Unstructured, commits []model.TriggerCommit) *PipelineRunFailedError {
+	for _, commit := range commits {
+		candidates := matchingPipelineRuns(pipelineRuns, commit)
+		if len(candidates) == 1 && pipelineRunConditionStatus(candidates[0]) == "False" {
+			return &PipelineRunFailedError{Namespace: candidates[0].GetNamespace(), Name: candidates[0].GetName(), Component: commit.Component}
+		}
+	}
+	return nil
 }
 
 // matchBuildTaskRuns matches each commit to one PipelineRun and its successful Buildah TaskRuns.
 func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, commits []model.TriggerCommit) ([]model.PipelineRunIdentity, bool, error) {
 	identities := make([]model.PipelineRunIdentity, 0, len(commits))
+	// Fail on any matched failed PipelineRun before reporting another component as
+	// pending; otherwise a later component's failure can hide behind an earlier
+	// component that never produces a PipelineRun.
+	if failed := matchedFailedPipelineRun(pipelineRuns, commits); failed != nil {
+		return nil, false, failed
+	}
 	for _, commit := range commits {
 		candidates := matchingPipelineRuns(pipelineRuns, commit)
 		if len(candidates) == 0 {

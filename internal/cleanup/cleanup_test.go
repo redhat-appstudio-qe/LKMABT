@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -21,12 +22,14 @@ import (
 
 var _ = Describe("NamespaceService", func() {
 	It("deletes only exact owned namespace", func() {
-		client := cleanupClient(namespace("tenant", "run-1", true))
+		tenant := namespace("tenant", "run-1", true)
+		tenant.SetUID("uid-1")
+		client := cleanupClient(tenant)
 		service := NamespaceService{Dynamic: client}
-		if err := service.Delete(context.Background(), "tenant", "run-1"); err != nil {
-			Expect(err).NotTo(HaveOccurred())
-		}
-		Expect(service.WaitDeleted(context.Background(), "tenant")).To(Succeed())
+		uid, err := service.Delete(context.Background(), "tenant", "run-1")
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(string(uid)).Should(Equal("uid-1"))
+		Expect(service.WaitDeleted(context.Background(), "tenant", uid)).To(Succeed())
 	})
 
 	It("strips finalizers before delete", func() {
@@ -42,19 +45,16 @@ var _ = Describe("NamespaceService", func() {
 			}},
 		)
 
-		if err := (NamespaceService{Dynamic: client}).Delete(context.Background(), "tenant", "run-1"); err != nil {
-			Expect(err).NotTo(HaveOccurred())
-		}
+		_, err := (NamespaceService{Dynamic: client}).Delete(context.Background(), "tenant", "run-1")
+		Expect(err).ShouldNot(HaveOccurred())
 		updated, err := client.Resource(appGVR).Namespace("tenant").Get(context.Background(), "app-1", metav1.GetOptions{})
-		if err != nil {
-			Expect(err).NotTo(HaveOccurred())
-		}
+		Expect(err).ShouldNot(HaveOccurred())
 		Expect(updated.GetFinalizers()).To(BeEmpty())
 	})
 
 	It("refuses unowned namespace", func() {
 		client := cleanupClient(namespace("tenant", "run-1", false))
-		err := (NamespaceService{Dynamic: client}).Delete(context.Background(), "tenant", "run-1")
+		_, err := (NamespaceService{Dynamic: client}).Delete(context.Background(), "tenant", "run-1")
 		Expect(err).To(MatchError(ContainSubstring("refusing")))
 		if _, err := client.Resource(NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{}); err != nil {
 			Fail("namespace was deleted")
@@ -63,7 +63,7 @@ var _ = Describe("NamespaceService", func() {
 
 	It("requires run ID for deletion", func() {
 		client := cleanupClient(namespace("tenant", "run-1", true))
-		err := (NamespaceService{Dynamic: client}).Delete(context.Background(), "tenant", "")
+		_, err := (NamespaceService{Dynamic: client}).Delete(context.Background(), "tenant", "")
 		Expect(err).To(HaveOccurred())
 	})
 
@@ -340,3 +340,85 @@ func cleanupClient(objects ...runtime.Object) *fake.FakeDynamicClient {
 		{Group: "tekton.dev", Version: "v1", Resource: "pipelineruns"}:                      "PipelineRunList",
 	}, objects...)
 }
+
+var _ = Describe("WaitDeleted timeout", func() {
+	It("names the namespace when the deletion wait times out", func() {
+		service := NamespaceService{Dynamic: cleanupClient(namespace("tenant", "run-1", true)), PollInterval: time.Millisecond}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+
+		err := service.WaitDeleted(ctx, "tenant", "")
+
+		Expect(err).Should(MatchError(ContainSubstring("wait for namespace tenant deletion")))
+		Expect(err.Error()).Should(ContainSubstring("deadline exceeded"))
+	})
+})
+
+var _ = Describe("DeletionBlocker", func() {
+	It("summarizes remaining resources and finalizers", func() {
+		object := namespace("tenant", "run-1", true)
+		Expect(unstructured.SetNestedSlice(object.Object, []any{
+			map[string]any{"type": "NamespaceContentRemaining", "status": "True", "message": "Some resources are remaining: pipelineruns.tekton.dev has 3 resource instances"},
+			map[string]any{"type": "NamespaceFinalizersRemaining", "status": "True", "message": "Some content in the namespace has finalizers remaining: chains.tekton.dev/pipelinerun in 3 resource instances"},
+			map[string]any{"type": "NamespaceContentRemaining", "status": "False", "message": "already resolved"},
+			map[string]any{"type": "NamespaceDeletionDiscoveryFailure", "status": "False", "message": "ignored"},
+		}, "status", "conditions")).Should(Succeed())
+		service := NamespaceService{Dynamic: cleanupClient(object)}
+
+		blocker := service.DeletionBlocker(context.Background(), "tenant")
+
+		Expect(blocker).Should(ContainSubstring("pipelineruns.tekton.dev has 3 resource instances"))
+		Expect(blocker).Should(ContainSubstring("chains.tekton.dev/pipelinerun in 3 resource instances"))
+		Expect(blocker).ShouldNot(ContainSubstring("already resolved"))
+		Expect(blocker).ShouldNot(ContainSubstring("ignored"))
+	})
+
+	It("returns empty for a missing namespace", func() {
+		Expect((NamespaceService{Dynamic: cleanupClient()}).DeletionBlocker(context.Background(), "absent")).Should(BeEmpty())
+	})
+})
+
+var _ = Describe("WaitDeleted finalizer re-strip", func() {
+	It("removes finalizers re-added after the initial strip", func() {
+		pipelineRun := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "tekton.dev/v1", "kind": "PipelineRun",
+			"metadata": map[string]any{"name": "run-1", "namespace": "tenant", "finalizers": []any{"chains.tekton.dev/pipelinerun"}},
+		}}
+		tenant := namespace("tenant", "run-1", true)
+		tenant.SetUID("uid-1")
+		client := cleanupClient(tenant, pipelineRun)
+		previous := finalizerStripInterval
+		finalizerStripInterval = 10 * time.Millisecond
+		DeferCleanup(func() { finalizerStripInterval = previous })
+		service := NamespaceService{Dynamic: client, PollInterval: time.Millisecond}
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		_ = service.WaitDeleted(ctx, "tenant", "uid-1")
+
+		got, err := client.Resource(finalizerGVRs[4]).Namespace("tenant").Get(context.Background(), "run-1", metav1.GetOptions{})
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(got.GetFinalizers()).Should(BeEmpty())
+	})
+})
+
+var _ = Describe("WaitDeleted replaced namespace", func() {
+	It("should refuse to strip finalizers from a namespace with a different UID", func() {
+		replacement := namespace("tenant", "run-1", true)
+		replacement.SetUID("uid-2")
+		pipelineRun := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "tekton.dev/v1", "kind": "PipelineRun",
+			"metadata": map[string]any{"name": "run-1", "namespace": "tenant", "finalizers": []any{"chains.tekton.dev/pipelinerun"}},
+		}}
+		client := cleanupClient(replacement, pipelineRun)
+		service := NamespaceService{Dynamic: client, PollInterval: time.Millisecond}
+
+		err := service.WaitDeleted(context.Background(), "tenant", "uid-1")
+
+		Expect(err).Should(MatchError(ContainSubstring("was replaced after deletion")))
+		Expect(err.Error()).Should(ContainSubstring("uid-2"))
+		got, getErr := client.Resource(finalizerGVRs[4]).Namespace("tenant").Get(context.Background(), "run-1", metav1.GetOptions{})
+		Expect(getErr).ShouldNot(HaveOccurred())
+		Expect(got.GetFinalizers()).ShouldNot(BeEmpty())
+	})
+})

@@ -20,13 +20,13 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	"github.com/redhat-appstudio/lkmabt/internal/providers/github"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
+	"github.com/redhat-appstudio/lkmabt/internal/workflow"
+	"golang.org/x/term"
 )
 
 // Credential acquisition and destruction are replaceable in tests.
 var (
 	authenticateGitHub      = auth.GitHubToken
-	authenticateGitLab      = auth.GitLabToken
-	refreshGitLabToken      = auth.RefreshGitLabToken
 	readExistingGitHubToken = auth.ExistingGitHubToken
 	destroyCredentials      = (*auth.Store).Destroy
 	checkGitHubAccess       = func(ctx context.Context, token string) error {
@@ -37,7 +37,10 @@ var (
 		if err := adapter.CheckOrganizationAccess(ctx); err != nil {
 			return err
 		}
-		return adapter.CheckFixtureWriteAccess(ctx)
+		if err := adapter.CheckFixtureWriteAccess(ctx); err != nil {
+			return err
+		}
+		return adapter.CheckInstallationRepositoryAccess(ctx)
 	}
 )
 
@@ -45,7 +48,8 @@ var (
 var githubAccessCheckTimeout = 30 * time.Second
 
 // checkGitHubToken verifies, under a bounded context, that a token can list App
-// installations and update the fixture repository. It falls back to the existing
+// installations, update the fixture repository, and list the repositories of
+// selected App installations. It falls back to the existing
 // gh login and then to a browser login only when GitHub rejects the credential;
 // transient, rate-limit, timeout, and cancellation errors abort the run without
 // replacing a usable token.
@@ -62,7 +66,7 @@ func checkGitHubToken(ctx context.Context, request *config.Request, console *Con
 	if !errors.Is(err, providers.ErrInsufficientGitHubAccess) {
 		return false, fmt.Errorf("check the configured GitHub token: %w", err)
 	}
-	console.Printf("github: configured token cannot access the fixture repository: %v", err)
+	console.Printf("github: configured token is not usable: %v", err)
 	readCtx, cancelRead := context.WithTimeout(ctx, githubAccessCheckTimeout)
 	token, readErr := readExistingGitHubToken(readCtx, clusterauth.ExecRunner{})
 	readEnded := readCtx.Err() != nil
@@ -85,6 +89,23 @@ func checkGitHubToken(ctx context.Context, request *config.Request, console *Con
 	}
 	console.Printf("github: existing gh login is not usable: %v; starting the gh browser login", readErr)
 	return true, nil
+}
+
+// GitLabTokenURL is the prefilled personal access token page for a GitLab run.
+const GitLabTokenURL = "https://gitlab.com/-/user_settings/personal_access_tokens/legacy/new?scopes=api%2Cwrite_repository&name=lkmabt-live-run"
+
+// openGitLabTokenPage opens the token page; tests replace it.
+var openGitLabTokenPage = workflow.OpenBrowser
+
+// readGitLabToken reads a personal access token without echoing it; tests replace it.
+var readGitLabToken = func() (string, error) {
+	fmt.Fprint(os.Stderr, "Paste the personal access token: ")
+	data, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 type clusterRun struct {
@@ -113,11 +134,8 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 			githubTokenNeeded = true
 		}
 	}
-	var (
-		store           *auth.Store
-		gitlabEphemeral bool
-	)
-	if len(entries) > 0 && (githubTokenNeeded || gitlabTokenNeeded) {
+	var store *auth.Store
+	if len(entries) > 0 && githubTokenNeeded {
 		store, err = auth.NewStore()
 		if err != nil {
 			return err
@@ -128,28 +146,54 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 				store = nil
 			}
 		}()
-		if gitlabTokenNeeded {
-			if console.Interactive() {
-				console.Printf("gitlab: authentication required; choose Web in the glab login prompt")
-			}
-			token, err := authenticateGitLab(ctx, clusterauth.ExecRunner{}, store, console.Interactive(), request.Credentials.GitLabAPIURL)
-			if err != nil {
-				return err
-			}
-			request.Credentials.GitLabToken = token
-			request.Credentials.GitLabTokenEphemeral = true
-			gitlabEphemeral = true
+		if console.Interactive() {
+			console.Printf("github: authentication required; starting the gh browser login")
 		}
-		if githubTokenNeeded {
-			if console.Interactive() {
-				console.Printf("github: authentication required; starting the gh browser login")
-			}
-			token, err := authenticateGitHub(ctx, clusterauth.ExecRunner{}, store, console.Interactive())
-			if err != nil {
-				return err
-			}
-			request.Credentials.GitHubToken = token
+		token, err := authenticateGitHub(ctx, clusterauth.ExecRunner{}, store, console.Interactive())
+		if err != nil {
+			return err
 		}
+		request.Credentials.GitHubToken = token
+	}
+	var revokeEphemeralGitLab func() error
+	if len(entries) > 0 && gitlabTokenNeeded {
+		if !console.Interactive() {
+			return fmt.Errorf("GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to paste a personal access token")
+		}
+		if err := validateInteractiveGitLabURL(request.Credentials.GitLabAPIURL); err != nil {
+			return err
+		}
+		console.Printf("gitlab: authentication required\nA browser window is opening at GitLab's personal access token page.\nSet the expiration to 1 day, keep the api and write_repository scopes, and create the token.")
+		if err := openGitLabTokenPage(GitLabTokenURL); err != nil {
+			console.Printf("could not open the token page: %v\nOpen it manually: %s", err, GitLabTokenURL)
+		}
+		token, err := readGitLabToken()
+		if err != nil {
+			return fmt.Errorf("read GitLab personal access token: %w", err)
+		}
+		if !strings.HasPrefix(token, "glpat-") {
+			return fmt.Errorf("GitLab requires a personal access token with api and write_repository; create one at %s or set GITLAB_BOT_TOKEN", GitLabTokenURL)
+		}
+		request.Credentials.GitLabToken = token
+		request.Credentials.GitLabTokenEphemeral = true
+		revoked := false
+		revokeEphemeralGitLab = func() error {
+			if revoked {
+				return nil
+			}
+			revoked = true
+			revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+			defer cancel()
+			if err := revokeGitLabToken(revokeCtx, request.Credentials.GitLabToken, request.Credentials.GitLabAPIURL); err != nil {
+				return fmt.Errorf("revoke GitLab token: %w", err)
+			}
+			return nil
+		}
+		// Early returns before the report exists still revoke; the finalization
+		// path calls the closure first so its failure lands in the report.
+		defer func() {
+			runErr = errors.Join(runErr, revokeEphemeralGitLab())
+		}()
 	}
 	aggregate, err := newAggregateRun(request.StateDir)
 	if err != nil {
@@ -161,24 +205,33 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 	if err := rejectDuplicateServers(entries, authFailures); err != nil {
 		return err
 	}
-	var refresh func(context.Context, *config.Request) error
-	if gitlabEphemeral {
-		refresh = func(ctx context.Context, request *config.Request) error {
-			token, err := refreshGitLabToken(ctx, clusterauth.ExecRunner{Log: aggregate.Log}, store, request.Credentials.GitLabAPIURL)
-			if err != nil {
-				return err
-			}
-			request.Credentials.GitLabToken = token
-			return nil
-		}
-	}
-	runs := scheduleClusters(ctx, request, entries, authFailures, aggregate, runner, console, refresh)
-	var credentialErr error
+	runs := scheduleClusters(ctx, request, entries, authFailures, aggregate, runner, console)
+	var cleanupErr error
 	if store != nil {
-		credentialErr = destroyCredentials(store)
+		cleanupErr = destroyCredentials(store)
 		store = nil
 	}
-	return finishAggregateRun(aggregate, request, runs, console, credentialErr)
+	if revokeEphemeralGitLab != nil {
+		cleanupErr = errors.Join(cleanupErr, revokeEphemeralGitLab())
+	}
+	return finishAggregateRun(aggregate, request, runs, console, cleanupErr)
+}
+
+// validateInteractiveGitLabURL rejects the token-page prompt for API endpoints
+// other than gitlab.com, because the page issues gitlab.com tokens.
+func validateInteractiveGitLabURL(apiURL string) error {
+	apiURL = strings.TrimSpace(apiURL)
+	if apiURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(apiURL)
+	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("invalid GitLab API URL %q", apiURL)
+	}
+	if parsed.Scheme != "https" || parsed.Port() != "" || parsed.Hostname() != "gitlab.com" {
+		return fmt.Errorf("interactive GitLab authentication is only supported for gitlab.com; set GITLAB_BOT_TOKEN for %s", apiURL)
+	}
+	return nil
 }
 
 // providerNeedsGitHub reports whether the selected provider includes GitHub.
@@ -259,20 +312,13 @@ func rejectDuplicateServers(entries []clusterfile.Entry, authFailures map[string
 }
 
 // scheduleClusters runs authenticated clusters one at a time in clusters-file order.
-func scheduleClusters(ctx context.Context, request config.Request, entries []clusterfile.Entry, authFailures map[string]error, aggregate *aggregateRun, runner Runner, console *Console, refresh func(context.Context, *config.Request) error) []clusterRun {
+func scheduleClusters(ctx context.Context, request config.Request, entries []clusterfile.Entry, authFailures map[string]error, aggregate *aggregateRun, runner Runner, console *Console) []clusterRun {
 	runs := make([]clusterRun, len(entries))
 	for index, entry := range entries {
 		runs[index] = clusterRun{Entry: entry, AuthErr: authFailures[entry.Name]}
 		if runs[index].AuthErr != nil {
 			console.Printf("cluster %s: authentication failed: %v", entry.Name, runs[index].AuthErr)
 			continue
-		}
-		if refresh != nil {
-			if err := refresh(ctx, &request); err != nil {
-				runs[index].AuthErr = err
-				console.Printf("cluster %s: authentication failed: %v", entry.Name, err)
-				continue
-			}
 		}
 		console.Printf("cluster %s: authenticated", entry.Name)
 		console.Printf("cluster %s: started", entry.Name)
@@ -294,20 +340,20 @@ func resultSummary(results []ProviderResult) string {
 }
 
 // finishAggregateRun renders both reports, prints the summary, and reports the aggregate failure.
-func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []clusterRun, console *Console, credentialErr error) error {
+func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []clusterRun, console *Console, cleanupErr error) error {
 	rows := reportRows(aggregate.Directory, runs, providerNames(request.Provider))
-	if credentialErr != nil {
-		rows = append(rows, report.Row{Cluster: "credentials", Provider: "auth", Stage: report.StageCleanup, Error: credentialErr.Error(), Links: report.Links(aggregate.Directory, "", "")})
+	if cleanupErr != nil {
+		rows = append(rows, report.Row{Cluster: "credentials", Provider: "auth", Stage: report.StageCleanup, Error: cleanupErr.Error(), Links: report.Links(aggregate.Directory, "", "")})
 	}
 	document := report.Document{RunID: aggregate.RunID, ClustersFile: request.ClustersFile, StartedAt: aggregate.StartedAt, EndedAt: time.Now().UTC(), Passed: allPassed(rows), Rows: rows}
 	writeErr := report.Write(aggregate.Directory, document)
 	for _, row := range rows {
-		console.Printf("%s %s: %s (%s) %s", row.Cluster, row.Provider, row.Result(), row.Stage, row.Error)
+		console.Printf("%s %s: %s (%s)", row.Cluster, row.Provider, row.Result(), row.Stage)
 	}
 	markdownPath, htmlPath := aggregate.reportPaths()
 	console.Printf("report: %s", markdownPath)
 	console.Printf("report: %s", htmlPath)
-	return errors.Join(aggregateError(runs), credentialErr, writeErr)
+	return errors.Join(aggregateError(runs), cleanupErr, writeErr)
 }
 
 // aggregateError joins every cluster and provider failure, preserving clusters-file order.

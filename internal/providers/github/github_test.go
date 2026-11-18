@@ -14,17 +14,18 @@ import (
 )
 
 type fakeClient struct {
-	repository            *gh.Repository
-	getRepositoryErrors   []error
-	updateErrors          []error
-	installations         []*gh.Installation
-	installationErr       error
-	installationRepos     []*gh.Repository
-	installationRepoErr   error
-	getCalls              int
-	updateCalls           int
-	installationCalls     int
-	installationRepoCalls []int64
+	repository             *gh.Repository
+	getRepositoryErrors    []error
+	updateErrors           []error
+	installations          []*gh.Installation
+	installationErr        error
+	installationRepos      []*gh.Repository
+	installationRepoErr    error
+	installationRepoErrors []error
+	getCalls               int
+	updateCalls            int
+	installationCalls      int
+	installationRepoCalls  []int64
 }
 
 // GetRepository returns the configured fake repository or the next queued error.
@@ -66,6 +67,11 @@ func (f *fakeClient) ListOrganizationInstallations(context.Context, string) ([]*
 // ListUserInstallationRepositories returns the configured fake installation repositories or error.
 func (f *fakeClient) ListUserInstallationRepositories(_ context.Context, id int64) ([]*gh.Repository, error) {
 	f.installationRepoCalls = append(f.installationRepoCalls, id)
+	if len(f.installationRepoErrors) > 0 {
+		err := f.installationRepoErrors[0]
+		f.installationRepoErrors = f.installationRepoErrors[1:]
+		return nil, err
+	}
 	return f.installationRepos, f.installationRepoErr
 }
 
@@ -141,6 +147,108 @@ var _ = Describe("CheckOrganizationAccess", func() {
 
 			err := New(client).CheckOrganizationAccess(context.Background())
 			Expect(err).Should(MatchError(ContainSubstring("list GitHub App installations for redhat-appstudio-qe")))
+		})
+	})
+})
+
+var _ = Describe("CheckInstallationRepositoryAccess", func() {
+	When("a selected installation's repositories can be listed", func() {
+		It("should pass and list exactly that installation", func() {
+			client := &fakeClient{installations: []*gh.Installation{
+				{ID: gh.Int64(7), AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("selected")},
+				{ID: gh.Int64(8), AppSlug: gh.String("other-app"), RepositorySelection: gh.String("selected")},
+			}}
+
+			Expect(New(client).CheckInstallationRepositoryAccess(context.Background())).Should(Succeed())
+			Expect(client.installationRepoCalls).Should(Equal([]int64{7, 8}))
+		})
+	})
+
+	When("one selected installation is not visible to the token", func() {
+		It("should skip the 404 and check the remaining installations", func() {
+			client := &fakeClient{
+				installations: []*gh.Installation{
+					{ID: gh.Int64(7), RepositorySelection: gh.String("selected")},
+					{ID: gh.Int64(8), RepositorySelection: gh.String("selected")},
+				},
+				installationRepoErrors: []error{&gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}},
+			}
+
+			Expect(New(client).CheckInstallationRepositoryAccess(context.Background())).Should(Succeed())
+			Expect(client.installationRepoCalls).Should(Equal([]int64{7, 8}))
+		})
+	})
+
+	When("the token cannot list a selected installation's repositories", func() {
+		It("should reject the credential and name the read:user scope", func() {
+			client := &fakeClient{
+				installations:       []*gh.Installation{{ID: gh.Int64(7), AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("selected")}},
+				installationRepoErr: &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusForbidden}},
+			}
+
+			err := New(client).CheckInstallationRepositoryAccess(context.Background())
+			Expect(errors.Is(err, providers.ErrInsufficientGitHubAccess)).Should(BeTrue())
+			Expect(err).Should(MatchError(ContainSubstring("read:user")))
+			Expect(err).Should(MatchError(ContainSubstring("installation 7")))
+		})
+	})
+
+	When("listing a selected installation's repositories fails transiently", func() {
+		It("should not reject the credential on a 5xx response", func() {
+			client := &fakeClient{
+				installations:       []*gh.Installation{{ID: gh.Int64(7), RepositorySelection: gh.String("selected")}},
+				installationRepoErr: &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusBadGateway}},
+			}
+
+			err := New(client).CheckInstallationRepositoryAccess(context.Background())
+			Expect(err).Should(HaveOccurred())
+			Expect(errors.Is(err, providers.ErrInsufficientGitHubAccess)).Should(BeFalse())
+		})
+
+		It("should not reject the credential on a rate limit", func() {
+			client := &fakeClient{
+				installations:       []*gh.Installation{{ID: gh.Int64(7), RepositorySelection: gh.String("selected")}},
+				installationRepoErr: &gh.RateLimitError{},
+			}
+
+			err := New(client).CheckInstallationRepositoryAccess(context.Background())
+			Expect(err).Should(HaveOccurred())
+			Expect(errors.Is(err, providers.ErrInsufficientGitHubAccess)).Should(BeFalse())
+		})
+	})
+
+	When("the credential is a gh OAuth user token", func() {
+		It("should skip the installation repository listing", func() {
+			client := &fakeClient{installations: []*gh.Installation{
+				{ID: gh.Int64(7), RepositorySelection: gh.String("selected")},
+			}}
+			adapter := New(client)
+			adapter.oauthToken = true
+
+			Expect(adapter.CheckInstallationRepositoryAccess(context.Background())).Should(Succeed())
+			Expect(client.installationRepoCalls).Should(BeEmpty())
+		})
+	})
+
+	When("a selected installation is suspended", func() {
+		It("should skip it without listing repositories", func() {
+			client := &fakeClient{installations: []*gh.Installation{
+				{ID: gh.Int64(7), RepositorySelection: gh.String("selected"), SuspendedAt: &gh.Timestamp{}},
+			}}
+
+			Expect(New(client).CheckInstallationRepositoryAccess(context.Background())).Should(Succeed())
+			Expect(client.installationRepoCalls).Should(BeEmpty())
+		})
+	})
+
+	When("an installation covers all repositories", func() {
+		It("should not list repositories", func() {
+			client := &fakeClient{installations: []*gh.Installation{
+				{ID: gh.Int64(7), RepositorySelection: gh.String("all")},
+			}}
+
+			Expect(New(client).CheckInstallationRepositoryAccess(context.Background())).Should(Succeed())
+			Expect(client.installationRepoCalls).Should(BeEmpty())
 		})
 	})
 })

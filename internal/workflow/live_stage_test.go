@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
+	kubetesting "k8s.io/client-go/testing"
 )
 
 type confirmationStub struct {
@@ -60,14 +63,18 @@ func (b *syncBuffer) String() string {
 
 // fakePreflightCluster satisfies cluster.Cluster for Preflight tests.
 type fakePreflightCluster struct {
-	server string
+	server       string
+	accessChecks *[]cluster.AccessCheck
 }
 
 // Server returns the configured API server.
 func (f fakePreflightCluster) Server(context.Context) (string, error) { return f.server, nil }
 
-// CheckAccess passes every access check.
-func (f fakePreflightCluster) CheckAccess(context.Context, []cluster.AccessCheck) []cluster.CheckResult {
+// CheckAccess records the requested checks and passes them.
+func (f fakePreflightCluster) CheckAccess(_ context.Context, checks []cluster.AccessCheck) []cluster.CheckResult {
+	if f.accessChecks != nil {
+		*f.accessChecks = checks
+	}
 	return nil
 }
 
@@ -853,7 +860,7 @@ var _ = Describe("LiveStage", func() {
 		GinkgoT().Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 		start := time.Now()
-		Expect(openBrowser("https://github.com/apps/cluster-app/installations/new")).Should(Succeed())
+		Expect(OpenBrowser("https://github.com/apps/cluster-app/installations/new")).Should(Succeed())
 		Expect(time.Since(start)).Should(BeNumerically("<", time.Second))
 	})
 
@@ -871,7 +878,13 @@ var _ = Describe("LiveStage", func() {
 				"url": "https://gitlab.com/other/repo", "revision": "main", "context": "web-server", "dockerfileUrl": "Dockerfile",
 			}}},
 		}}
-		dynamic := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, wrongComponent)
+		dynamic := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": "tenant"},
+		}}, wrongComponent)
+		kubernetes := kubernetesfake.NewSimpleClientset()
+		kubernetes.PrependReactor("create", "selfsubjectaccessreviews", func(kubetesting.Action) (bool, runtime.Object, error) {
+			return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true}}, nil
+		})
 		fixture := providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl", URL: "https://gitlab.com/konflux-qe/dr_test_mathwizz_gl"}
 		stage := &LiveStage{
 			Request: config.Request{
@@ -879,7 +892,7 @@ var _ = Describe("LiveStage", func() {
 				SourceBranch: "main", ComponentPaths: config.DefaultComponentPaths,
 				Credentials: config.Credentials{GitLabToken: "token", GitLabTokenEphemeral: true},
 			},
-			Clients:  &cluster.ClientSet{Dynamic: dynamic},
+			Clients:  &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetes},
 			Provider: &githubAppProviderStub{fixture: fixture},
 			Fixture:  fixture,
 			Log:      io.Discard,
@@ -948,6 +961,23 @@ var _ = Describe("LiveStage", func() {
 		Expect(err).Should(HaveOccurred())
 	})
 
+	It("rejects a later failed PipelineRun while an earlier component is still pending", func() {
+		commits := []model.TriggerCommit{
+			{Component: "mathwizz-web-server", SHA: "sha-web"},
+			{Component: "mathwizz-frontend", SHA: "sha-frontend"},
+		}
+		pipelineRuns := []unstructured.Unstructured{
+			pipelineRun("run-frontend", "mathwizz-frontend", "sha-frontend", "uid-frontend", "False"),
+		}
+
+		_, pending, err := matchBuildTaskRuns(pipelineRuns, nil, commits)
+
+		var failed *PipelineRunFailedError
+		Expect(errors.As(err, &failed)).Should(BeTrue())
+		Expect(failed.Name).Should(Equal("run-frontend"))
+		Expect(pending).Should(BeFalse())
+	})
+
 	It("fails with component, namespace, trigger SHA, and observed count when no PipelineRun appears", func() {
 		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "trigger-sha", CreatedAt: time.Now().UTC().Add(-time.Second)}
 		_, err := waitForBuildMatches(context.Background(), 10*time.Millisecond, time.Second, time.Millisecond, "mathwizz-test", []model.TriggerCommit{commit}, func(context.Context) ([]unstructured.Unstructured, error) {
@@ -995,7 +1025,7 @@ var _ = Describe("LiveStage", func() {
 		validation := buildTaskRunForWorkflow("validation-task", "uid-build", "False", "sast-shell-check")
 		identities, err := waitForBuildTaskRuns(context.Background(), time.Second, time.Second, time.Millisecond, "mathwizz-test", []model.TriggerCommit{commit}, func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error) {
 			return []unstructured.Unstructured{pipeline}, []unstructured.Unstructured{build, validation}, nil
-		})
+		}, nil)
 		Expect(err).ShouldNot(HaveOccurred())
 		Expect(identities).Should(HaveLen(1))
 		Expect(identities[0].Name).Should(Equal("run-build"))
@@ -1072,7 +1102,7 @@ var _ = Describe("LiveStage", func() {
 				objects = append(objects, componentWithPaCStatus(component, state))
 			}
 			return objects, nil
-		})
+		}, nil)
 		Expect(err).ShouldNot(HaveOccurred())
 		Expect(calls).Should(BeNumerically(">=", 2))
 	})
@@ -1087,6 +1117,185 @@ var _ = Describe("LiveStage", func() {
 			},
 		}}
 		Expect(paCStatusError(&object)).Should(HaveOccurred())
+	})
+
+	Describe("LiveStage build progress", func() {
+		When("PaC onboarding is pending", func() {
+			It("should report the entry line and heartbeats with enabled counts and pending names", func() {
+				previous := buildStatusInterval
+				buildStatusInterval = 10 * time.Millisecond
+				DeferCleanup(func() { buildStatusInterval = previous })
+				out := &syncBuffer{}
+				stage := &LiveStage{Out: out}
+				names := []string{"mathwizz-web-server", "mathwizz-frontend"}
+				started := time.Now()
+				err := waitForPaCEnabled(context.Background(), 5*time.Second, 2*time.Millisecond, names, func(context.Context) ([]unstructured.Unstructured, error) {
+					state := "pending"
+					if time.Since(started) > 100*time.Millisecond {
+						state = "enabled"
+					}
+					objects := make([]unstructured.Unstructured, 0, len(names))
+					for _, name := range names {
+						objects = append(objects, componentWithPaCStatus(name, state))
+					}
+					return objects, nil
+				}, stage.notice)
+				Expect(err).ShouldNot(HaveOccurred())
+				text := out.String()
+				Expect(text).Should(ContainSubstring("waiting for PaC onboarding of 2 components"))
+				Expect(text).Should(ContainSubstring("PaC onboarding: 0/2 enabled; pending mathwizz-web-server, mathwizz-frontend"))
+			})
+		})
+
+		When("PipelineRuns and Buildah TaskRuns are pending", func() {
+			It("should report the wait entry, the Buildah transition, and per-component heartbeats", func() {
+				previous := buildStatusInterval
+				buildStatusInterval = 10 * time.Millisecond
+				DeferCleanup(func() { buildStatusInterval = previous })
+				out := &syncBuffer{}
+				stage := &LiveStage{Out: out}
+				started := time.Now()
+				commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "sha-1"}
+				pipeline := pipelineRunAt("run-build", "mathwizz-web-server", "sha-1", "uid-build", "Unknown", started.Add(-2*time.Minute))
+				pendingTask := buildTaskRunForWorkflow("build-task", "uid-build", "Unknown", "buildah-oci-ta")
+				succeededTask := buildTaskRunForWorkflow("build-task", "uid-build", "True", "buildah-oci-ta")
+				_, err := waitForBuildTaskRuns(context.Background(), 5*time.Second, 5*time.Second, 2*time.Millisecond, "mathwizz-test", []model.TriggerCommit{commit}, func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error) {
+					switch elapsed := time.Since(started); {
+					case elapsed < 100*time.Millisecond:
+						return nil, nil, nil
+					case elapsed < 250*time.Millisecond:
+						return []unstructured.Unstructured{pipeline}, []unstructured.Unstructured{pendingTask}, nil
+					default:
+						return []unstructured.Unstructured{pipeline}, []unstructured.Unstructured{succeededTask}, nil
+					}
+				}, stage.notice)
+				Expect(err).ShouldNot(HaveOccurred())
+				text := out.String()
+				Expect(text).Should(ContainSubstring("waiting for PipelineRuns for 1 triggered components"))
+				Expect(text).Should(ContainSubstring("mathwizz-web-server: no PipelineRun"))
+				Expect(text).Should(ContainSubstring("PipelineRuns appeared for all 1 components; waiting for Buildah TaskRuns"))
+				Expect(text).Should(ContainSubstring("mathwizz-web-server: running for"))
+				Expect(text).Should(ContainSubstring("buildah 0/1 succeeded"))
+			})
+		})
+
+		When("a PipelineRun failed before creating Buildah TaskRuns", func() {
+			It("should fail immediately instead of waiting", func() {
+				calls := 0
+				_, err := waitForBuildTaskRuns(context.Background(), 5*time.Second, 5*time.Second, time.Millisecond, "mathwizz-test", []model.TriggerCommit{{Component: "mathwizz-web-server", SHA: "sha-1"}}, func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error) {
+					calls++
+					return []unstructured.Unstructured{pipelineRun("run-build", "mathwizz-web-server", "sha-1", "uid-build", "False")}, nil, nil
+				}, nil)
+				var failure *PipelineRunFailedError
+				Expect(errors.As(err, &failure)).Should(BeTrue())
+				Expect(failure.Component).Should(Equal("mathwizz-web-server"))
+				Expect(failure.Name).Should(Equal("run-build"))
+				Expect(calls).Should(Equal(1))
+			})
+		})
+
+		When("a stale owned tenant namespace is deleted", func() {
+			It("should report the deletion to the console", func() {
+				dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+				out := &bytes.Buffer{}
+				stage := &LiveStage{
+					Request:   config.Request{TenantNamespace: "tenant"},
+					Out:       out,
+					Log:       io.Discard,
+					Namespace: cleanup.NamespaceService{Dynamic: dynamic, PollInterval: time.Millisecond, NameLister: testNameLister{names: []string{"tenant"}}},
+				}
+				Expect(stage.ensureTenantNamespaceAvailable(context.Background(), &model.RunManifest{RunID: "run-2"})).Should(Succeed())
+				Expect(out.String()).Should(ContainSubstring("deleting stale owned tenant namespace tenant from run run-1"))
+			})
+		})
+
+		Describe("VerifyBuilds PaC Secret inspection", func() {
+			It("should fail with a typed error when a pending build's annotated Secret is missing", func() {
+				pipeline := annotatedPipelineRun("run-build", "mathwizz-web-server", "sha-1", "uid-build", "Unknown", "git-auth-secret", time.Now().Add(-5*time.Minute))
+				stage := &LiveStage{
+					Request: config.Request{Timeouts: config.Timeouts{Trigger: time.Second, Build: time.Second}},
+					Clients: &cluster.ClientSet{Dynamic: namespaceDynamicClient(&pipeline), Kubernetes: kubernetesfake.NewSimpleClientset()},
+					Out:     &bytes.Buffer{},
+				}
+				manifest := &model.RunManifest{Fixture: model.FixtureIdentity{TenantNamespace: "mathwizz-test"}, TriggerCommits: []model.TriggerCommit{{Component: "mathwizz-web-server", SHA: "sha-1"}}}
+
+				err := stage.VerifyBuilds(context.Background(), manifest)
+				var missing *cluster.MissingPacAuthSecretError
+				Expect(errors.As(err, &missing)).Should(BeTrue())
+				Expect(missing.PipelineRun).Should(Equal("run-build"))
+				Expect(missing.Component).Should(Equal("mathwizz-web-server"))
+				Expect(missing.Secret).Should(Equal("git-auth-secret"))
+				Expect(missing.Pending).Should(BeNumerically(">", cluster.PacAuthSecretGracePeriod))
+			})
+
+			It("should report a matched failed PipelineRun before a missing Secret", func() {
+				failed := pipelineRun("run-failed", "mathwizz-web-server", "sha-1", "uid-failed", "False")
+				pending := annotatedPipelineRun("run-pending", "mathwizz-history-worker", "sha-2", "uid-pending", "Unknown", "git-auth-secret", time.Now().Add(-5*time.Minute))
+				stage := &LiveStage{
+					Request: config.Request{Timeouts: config.Timeouts{Trigger: time.Second, Build: time.Second}},
+					Clients: &cluster.ClientSet{Dynamic: namespaceDynamicClient(&failed, &pending), Kubernetes: kubernetesfake.NewSimpleClientset()},
+					Out:     &bytes.Buffer{},
+				}
+				manifest := &model.RunManifest{Fixture: model.FixtureIdentity{TenantNamespace: "mathwizz-test"}, TriggerCommits: []model.TriggerCommit{
+					{Component: "mathwizz-web-server", SHA: "sha-1"},
+					{Component: "mathwizz-history-worker", SHA: "sha-2"},
+				}}
+
+				err := stage.VerifyBuilds(context.Background(), manifest)
+
+				var failure *PipelineRunFailedError
+				Expect(errors.As(err, &failure)).Should(BeTrue())
+				Expect(failure.Name).Should(Equal("run-failed"))
+				var missing *cluster.MissingPacAuthSecretError
+				Expect(errors.As(err, &missing)).Should(BeFalse())
+			})
+
+			It("should succeed when the annotated Secret exists", func() {
+				pipeline := annotatedPipelineRun("run-build", "mathwizz-web-server", "sha-1", "uid-build", "Unknown", "git-auth-secret", time.Now().Add(-5*time.Minute))
+				build := buildTaskRunForWorkflow("build-task", "uid-build", "True", "buildah-oci-ta")
+				stage := &LiveStage{
+					Request: config.Request{Timeouts: config.Timeouts{Trigger: time.Second, Build: time.Second}},
+					Clients: &cluster.ClientSet{
+						Dynamic:    namespaceDynamicClient(&pipeline, &build),
+						Kubernetes: kubernetesfake.NewSimpleClientset(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-auth-secret", Namespace: "mathwizz-test"}}),
+					},
+					Out: &bytes.Buffer{},
+				}
+				manifest := &model.RunManifest{Fixture: model.FixtureIdentity{TenantNamespace: "mathwizz-test"}, TriggerCommits: []model.TriggerCommit{{Component: "mathwizz-web-server", SHA: "sha-1"}}}
+
+				Expect(stage.VerifyBuilds(context.Background(), manifest)).Should(Succeed())
+				Expect(manifest.PipelineRuns).Should(HaveLen(1))
+				Expect(manifest.PipelineRuns[0].Name).Should(Equal("run-build"))
+			})
+
+			It("should warn once and keep waiting when the Secret read is forbidden", func() {
+				pipeline := annotatedPipelineRun("run-build", "mathwizz-web-server", "sha-1", "uid-build", "Unknown", "git-auth-secret", time.Now().Add(-5*time.Minute))
+				dynamic := namespaceDynamicClient(&pipeline)
+				var taskRunLists atomic.Int32
+				dynamic.PrependReactor("list", "taskruns", func(kubetesting.Action) (bool, runtime.Object, error) {
+					if taskRunLists.Add(1) == 1 {
+						return true, &unstructured.UnstructuredList{}, nil
+					}
+					build := buildTaskRunForWorkflow("build-task", "uid-build", "True", "buildah-oci-ta")
+					return true, &unstructured.UnstructuredList{Items: []unstructured.Unstructured{build}}, nil
+				})
+				kube := kubernetesfake.NewSimpleClientset()
+				kube.PrependReactor("get", "secrets", func(kubetesting.Action) (bool, runtime.Object, error) {
+					return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "git-auth-secret", errors.New("forbidden"))
+				})
+				out := &bytes.Buffer{}
+				stage := &LiveStage{
+					Request: config.Request{Timeouts: config.Timeouts{Trigger: time.Second, Build: time.Second}},
+					Clients: &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kube},
+					Out:     out,
+				}
+				manifest := &model.RunManifest{Fixture: model.FixtureIdentity{TenantNamespace: "mathwizz-test"}, TriggerCommits: []model.TriggerCommit{{Component: "mathwizz-web-server", SHA: "sha-1"}}}
+
+				Expect(stage.VerifyBuilds(context.Background(), manifest)).Should(Succeed())
+				Expect(manifest.PipelineRuns).Should(HaveLen(1))
+				Expect(strings.Count(out.String(), "warning: cannot inspect PaC git authentication Secrets")).Should(Equal(1))
+			})
+		})
 	})
 })
 
@@ -1132,6 +1341,20 @@ func pipelineRun(name, component, sha, uid, status string) unstructured.Unstruct
 			}},
 		},
 	}}
+}
+
+// pipelineRunAt creates a PipelineRun fixture with component, SHA, identity, status, and creation time.
+func pipelineRunAt(name, component, sha, uid, status string, created time.Time) unstructured.Unstructured {
+	object := pipelineRun(name, component, sha, uid, status)
+	object.SetCreationTimestamp(metav1.NewTime(created))
+	return object
+}
+
+// annotatedPipelineRun creates a PaC-annotated PipelineRun fixture with a creation time.
+func annotatedPipelineRun(name, component, sha, uid, status, secret string, created time.Time) unstructured.Unstructured {
+	object := pipelineRunAt(name, component, sha, uid, status, created)
+	object.SetAnnotations(map[string]string{cluster.PacGitAuthSecretAnnotation: secret})
+	return object
 }
 
 // buildTaskRunForWorkflow creates a PipelineRun-owned TaskRun fixture for a build or validation task.
@@ -1197,5 +1420,42 @@ func namespaceDynamicClient(objects ...runtime.Object) *dynamicfake.FakeDynamicC
 		{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "imagerepositories"}: "ImageRepositoryList",
 		{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "releases"}:          "ReleaseList",
 		{Group: "tekton.dev", Version: "v1", Resource: "pipelineruns"}:                      "PipelineRunList",
+		{Group: "tekton.dev", Version: "v1", Resource: "taskruns"}:                          "TaskRunList",
 	}, objects...)
 }
+
+var _ = Describe("LiveStage preflight access checks", func() {
+	It("checks the four pipeline resources and no GitLab Secret", func() {
+		stage := &LiveStage{Request: config.Request{
+			Provider:        config.ProviderGitLab,
+			TenantNamespace: "mathwizz-test-gitlab",
+			Credentials:     config.Credentials{GitLabTokenEphemeral: true},
+		}}
+
+		checks := stage.accessChecks()
+		Expect(checks).Should(HaveLen(4))
+		resources := make([]schema.GroupVersionResource, 0, len(checks))
+		for _, check := range checks {
+			Expect(check.Namespace).Should(Equal("mathwizz-test-gitlab"))
+			Expect(check.Verbs).Should(BeEmpty())
+			resources = append(resources, check.Resource)
+		}
+		Expect(resources).Should(ConsistOf(PipelineRunGVR, cluster.TaskRunGVR, cluster.ApplicationGVR, cluster.ComponentGVR))
+		Expect(resources).ShouldNot(ContainElement(cluster.SecretGVR))
+	})
+
+	It("sends only the four API checks to preflight", func() {
+		var checks []cluster.AccessCheck
+		stage := &LiveStage{
+			Request:          config.Request{Provider: config.ProviderGitLab, ClusterServer: "https://api.example", TenantNamespace: "tenant", Credentials: config.Credentials{GitLabTokenEphemeral: true}},
+			PreflightCluster: fakePreflightCluster{server: "https://api.example", accessChecks: &checks},
+			Namespace:        cleanup.NamespaceService{Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), NameLister: testNameLister{}},
+		}
+
+		Expect(stage.Preflight(context.Background(), &model.RunManifest{})).Should(Succeed())
+		Expect(checks).Should(HaveLen(4))
+		for _, check := range checks {
+			Expect(check.Resource).ShouldNot(Equal(cluster.SecretGVR))
+		}
+	})
+})

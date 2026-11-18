@@ -30,6 +30,8 @@ type client interface {
 	UpdateFile(project, path, content, branch, expectedSHA, message string) error
 	// GetBranchHead fetches the head commit of a branch.
 	GetBranchHead(project, branch string) (*gl.Commit, error)
+	// RevokeToken revokes the currently authenticated personal access token.
+	RevokeToken(context.Context) error
 }
 
 type apiClient struct{ client *gl.Client }
@@ -73,6 +75,12 @@ func (c apiClient) GetBranchHead(project, branch string) (*gl.Commit, error) {
 	return result.Commit, nil
 }
 
+// RevokeToken revokes the current personal access token.
+func (c apiClient) RevokeToken(ctx context.Context) error {
+	_, err := c.client.PersonalAccessTokens.RevokePersonalAccessTokenSelf(gl.WithContext(ctx))
+	return err
+}
+
 type Adapter struct {
 	client client
 	retry  providers.RetryPolicy
@@ -108,6 +116,16 @@ func NewFromCredentials(token, apiURL string) (*Adapter, error) {
 		return nil, err
 	}
 	return New(apiClient{client: gitlabClient}), nil
+}
+
+// RevokeToken revokes the run-scoped personal access token. A prompted token is
+// always a glpat- value, so a 404 or 400 is surfaced instead of being treated as
+// already revoked.
+func (a *Adapter) RevokeToken(ctx context.Context) error {
+	if a == nil || a.client == nil {
+		return fmt.Errorf("gitlab client is required")
+	}
+	return a.client.RevokeToken(ctx)
 }
 
 // ValidateFixture confirms the project is the canonical GitLab test fixture.

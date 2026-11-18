@@ -55,6 +55,19 @@ var _ = Describe("RunPreflight", func() {
 		Expect(err).To(HaveOccurred())
 	})
 
+	It("surfaces a failed access check with guidance", func() {
+		fake := &fakeCluster{server: "https://api.example", checks: []CheckResult{{
+			Name:    "gitlab SCM Secret",
+			Details: "create secrets in namespace tenant denied: rbac denied; grant Secret access in the tenant namespace",
+		}}}
+
+		_, err := RunPreflight(context.Background(), fake, PreflightSpec{ExpectedServer: "https://api.example"})
+
+		Expect(err).Should(HaveOccurred())
+		Expect(err.Error()).Should(ContainSubstring("preflight check \"gitlab SCM Secret\" failed"))
+		Expect(err.Error()).Should(ContainSubstring("grant Secret access in the tenant namespace"))
+	})
+
 	It("requires controller scheduling readiness", func() {
 		fake := &fakeCluster{
 			server:     "https://api.example",

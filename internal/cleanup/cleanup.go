@@ -160,26 +160,28 @@ func (s NamespaceService) FindScoped(ctx context.Context, target string) ([]Name
 	return scoped, nil
 }
 
-// Delete removes name only after confirming exact manager and run ID ownership labels.
-func (s NamespaceService) Delete(ctx context.Context, name, runID string) error {
+// Delete removes name only after confirming exact manager and run ID ownership
+// labels. It returns the UID it verified, so a later wait cannot strip
+// finalizers from a replacement namespace that reuses the name.
+func (s NamespaceService) Delete(ctx context.Context, name, runID string) (types.UID, error) {
 	if runID == "" {
-		return fmt.Errorf("run ID is required for namespace deletion")
+		return "", fmt.Errorf("run ID is required for namespace deletion")
 	}
 	info, err := s.Inspect(ctx, name)
 	if err != nil {
-		return fmt.Errorf("re-read namespace %s: %w", name, err)
+		return "", fmt.Errorf("re-read namespace %s: %w", name, err)
 	}
 	if info.Name != name {
-		return fmt.Errorf("namespace identity mismatch: expected %q, got %q", name, info.Name)
+		return "", fmt.Errorf("namespace identity mismatch: expected %q, got %q", name, info.Name)
 	}
 	if info.Labels[ManagedByLabel] != ManagedByValue || info.RunID != runID {
-		return fmt.Errorf("refusing to delete namespace %q without exact LKMABT ownership labels", name)
+		return "", fmt.Errorf("refusing to delete namespace %q without exact LKMABT ownership labels", name)
 	}
 	_, _ = StripAllFinalizers(ctx, s.Dynamic, name)
 	if err := s.Dynamic.Resource(NamespaceGVR).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete namespace %s: %w", name, err)
+		return "", fmt.Errorf("delete namespace %s: %w", name, err)
 	}
-	return nil
+	return info.UID, nil
 }
 
 // DeleteApproved removes an explicitly approved namespace after re-reading it and
@@ -209,8 +211,15 @@ func (s NamespaceService) DeleteApproved(ctx context.Context, approved Namespace
 	return nil
 }
 
-// WaitDeleted polls until name no longer exists or ctx is canceled.
-func (s NamespaceService) WaitDeleted(ctx context.Context, name string) error {
+// finalizerStripInterval bounds how often WaitDeleted re-strips finalizers that
+// controllers can re-add after Delete's initial strip.
+var finalizerStripInterval = 5 * time.Second
+
+// WaitDeleted polls until name no longer exists or ctx is canceled. It re-strips
+// finalizers because controllers can re-add them after Delete, which would
+// otherwise leave the namespace stuck terminating. A namespace whose UID no
+// longer matches the deleted one belongs to another actor and is never stripped.
+func (s NamespaceService) WaitDeleted(ctx context.Context, name string, uid types.UID) error {
 	if s.Dynamic == nil {
 		return fmt.Errorf("dynamic client is required")
 	}
@@ -218,22 +227,67 @@ func (s NamespaceService) WaitDeleted(ctx context.Context, name string) error {
 	if interval <= 0 {
 		interval = 250 * time.Millisecond
 	}
+	var stripErr error
+	lastStrip := time.Time{}
 	for {
-		_, err := s.Dynamic.Resource(NamespaceGVR).Get(ctx, name, metav1.GetOptions{})
+		object, err := s.Dynamic.Resource(NamespaceGVR).Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
 		if err != nil {
 			return fmt.Errorf("wait for namespace %s deletion: %w", name, err)
 		}
+		if uid != "" && object.GetUID() != uid {
+			return fmt.Errorf("namespace %s was replaced after deletion (current UID %q, expected %q); refusing to strip finalizers", name, object.GetUID(), uid)
+		}
+		if time.Since(lastStrip) >= finalizerStripInterval {
+			lastStrip = time.Now()
+			if _, err := StripAllFinalizers(ctx, s.Dynamic, name); err != nil {
+				stripErr = err
+			}
+		}
 		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			if stripErr != nil {
+				return fmt.Errorf("wait for namespace %s deletion: %w (last finalizer strip: %v)", name, ctx.Err(), stripErr)
+			}
+			return fmt.Errorf("wait for namespace %s deletion: %w", name, ctx.Err())
 		case <-timer.C:
 		}
 	}
+}
+
+// DeletionBlocker summarizes why a terminating namespace has not disappeared.
+// It returns an empty string when the namespace is gone or reports no blockers.
+func (s NamespaceService) DeletionBlocker(ctx context.Context, name string) string {
+	if s.Dynamic == nil {
+		return ""
+	}
+	object, err := s.Dynamic.Resource(NamespaceGVR).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return ""
+	}
+	conditions, _, _ := unstructured.NestedSlice(object.Object, "status", "conditions")
+	blockers := make([]string, 0, 2)
+	for _, entry := range conditions {
+		condition, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		conditionType, _ := condition["type"].(string)
+		if conditionType != "NamespaceContentRemaining" && conditionType != "NamespaceFinalizersRemaining" {
+			continue
+		}
+		if status, _ := condition["status"].(string); status != "True" {
+			continue
+		}
+		if message, _ := condition["message"].(string); strings.TrimSpace(message) != "" {
+			blockers = append(blockers, strings.TrimSpace(message))
+		}
+	}
+	return strings.Join(blockers, "; ")
 }
 
 // namespaceInfo copies namespace identity and labels into the service's value representation.

@@ -44,7 +44,6 @@ resources.
 | `kflux` | `ocp` clusters whose kubeconfig is missing or rejected; LKMABT installs it when absent. |
 | `ibmcloud` with the `kubernetes-service` plug-in | `type: roks` clusters. |
 | `gh` | GitHub runs with an empty `GITHUB_TOKEN`. |
-| `glab` | GitLab runs with an empty `GITLAB_BOT_TOKEN`. |
 
 ### Accounts and access
 
@@ -64,19 +63,20 @@ the organization; see [Cluster requirements](#cluster-requirements).
 
 **GitLab.** Your account needs at least Maintainer (access level 40) on
 [konflux-qe/dr_test_mathwizz_gl](https://gitlab.com/konflux-qe/dr_test_mathwizz_gl);
-the trigger commit lands on `main`. Verify it after `glab auth login`:
+the trigger commit lands on `main`. Verify it in GitLab or with `glab api`:
 
 ```bash
 glab api projects/konflux-qe%2Fdr_test_mathwizz_gl --jq '[.permissions.project_access.access_level, .permissions.group_access.access_level] | map(. // 0) | max'
 # 40 (Maintainer) or 50 (Owner), including access inherited from konflux-qe
 ```
 
-**Cluster.** Your identity needs cluster-scoped permission to create the
-tenant namespace, and to delete it during cleanup. Inside that namespace the
-run needs access to `pipelineruns`, `taskruns`, `applications`, and
-`components`. GitLab runs also need `list`, `get`, `create`, and `update` on
-Secrets there, plus `delete` when the run acquires its own GitLab token. If you
-administer an existing namespace, grant the Secret access with:
+**Cluster.** Your identity needs permission to create the tenant namespace
+through an OpenShift `ProjectRequest`, cluster-scoped `update` on `namespaces`
+to label it for cleanup, and permission to delete it during cleanup. Inside
+the namespace the run needs access to `pipelineruns`, `taskruns`,
+`applications`, and `components`. GitLab runs also need `get`, `create`, and
+`update` on Secrets there, plus `delete` when the run acquires its own GitLab
+token. If you administer an existing namespace, grant the Secret access with:
 
 ```bash
 oc adm policy add-role-to-user edit <user> -n mathwizz-test-gitlab
@@ -186,9 +186,11 @@ written. Checking now avoids a failed run.
 
 LKMABT needs a GitHub token for GitHub runs and a GitLab token for GitLab runs.
 Choose either method; `run both` uses both credentials. Values in the process
-environment take precedence over `.lkmabt.env`. Tokens acquired through browser
-authentication are written to a private temporary directory as `0600` files and
-deleted when the last cluster finishes.
+environment take precedence over `.lkmabt.env`. A GitHub token acquired through
+browser authentication is written to a private temporary directory as a `0600`
+file and deleted when the last cluster finishes. A prompted GitLab PAT is kept
+for the run and revoked after the last cluster; a configured `GITLAB_BOT_TOKEN`
+is never revoked.
 
 ### Browser authentication
 
@@ -206,17 +208,19 @@ terminal, the run fails with:
 GitHub authentication is required: set GITHUB_TOKEN or run in a terminal to use the gh browser login
 ```
 
-**GitLab.** LKMABT prints
-`gitlab: authentication required; choose Web in the glab login prompt` and runs
-`glab auth login --hostname gitlab.com --use-keyring=false`. Choose **Web**.
-Interactive login is supported only for `gitlab.com`; set `GITLAB_BOT_TOKEN`
-for self-managed instances, custom ports, or HTTP endpoints. The token is
-written into the tenant SCM Secret `gitlab-build-secret` so PaC can clone the
-fixture. Finalization deletes that Secret; the token's temporary copy is
-deleted when the run ends. Without a terminal, the run fails with:
+**GitLab.** LKMABT opens the prefilled personal access token page (scopes
+`api` and `write_repository`) and asks you to set the expiration to 1 day.
+Create the token, then paste it at the hidden `Paste the personal access token:`
+prompt. PaC cannot use OAuth tokens, so there is no Web login. Interactive entry
+is supported only for `gitlab.com`; set `GITLAB_BOT_TOKEN` for self-managed
+instances, custom ports, or HTTP endpoints. The token is written into the tenant
+SCM Secret `gitlab-build-secret` so PaC can clone the fixture. Each cluster's
+finalization deletes its Secret; the acquired PAT is revoked once after the last
+cluster with `DELETE /personal_access_tokens/self`. Without a terminal, the run
+fails with:
 
 ```text
-GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to use the glab browser login
+GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to paste a personal access token
 ```
 
 ### Configured tokens
@@ -234,7 +238,7 @@ automatically. The copy is ignored by Git; keep it local. The parser reads
 | Variable | Notes |
 | --- | --- |
 | `GITHUB_TOKEN` | Needs `repo`, `read:org`, and push access to the fixture; its owner must administer `redhat-appstudio-qe` to list App installations. Leave empty for the browser login. |
-| `GITLAB_BOT_TOKEN` | Needs `api` access. Leave empty for the `glab` Web login on `gitlab.com`. LKMABT never revokes it. |
+| `GITLAB_BOT_TOKEN` | Personal access token with `api` and `write_repository`. Leave empty for the token-page prompt on `gitlab.com`. LKMABT never revokes it. |
 | `GITLAB_API_URL` | Defaults to `https://gitlab.com/api/v4`. |
 
 **`GITHUB_TOKEN`.** In a terminal, LKMABT checks before the first cluster that
@@ -247,10 +251,9 @@ lists installation repositories for Apps installed for selected repositories;
 when the token cannot list them, preflight logs a warning and continues, and
 the trigger-stage PaC wait remains the backstop.
 
-**`GITLAB_BOT_TOKEN`.** The token is used as-is and is never revoked. It needs
-`api` access to the fixture repository. PaC reuses a usable
-`gitlab-build-secret` when one exists; otherwise LKMABT creates it and keeps it
-for later runs.
+**`GITLAB_BOT_TOKEN`.** The token is used as-is and is never revoked. PaC
+reuses a usable `gitlab-build-secret` when one exists; otherwise LKMABT creates
+it and keeps it for later runs.
 
 ## Running LKMABT
 
@@ -272,7 +275,8 @@ to `.lkmabt-clusters.yaml`.
 - `github` and `gitlab` test one fixture; `both` tests both.
 - Clusters run one at a time in clusters-file order. Each cluster finishes or
   fails before the next one starts. `both` runs the two providers concurrently
-  inside a cluster.
+  inside a cluster, and console lines from each provider carry a
+  `github run - ` or `gitlab run - ` prefix.
 - Each run uses one tenant namespace per provider it tests:
   `mathwizz-test-github` for GitHub and `mathwizz-test-gitlab` for GitLab.
   Single-provider runs accept `--tenant-namespace`.
@@ -340,6 +344,11 @@ selection. This applies to configured tokens and browser logins.
 - Triggering appends one comment to each of the three Dockerfiles on the
   fixture's default branch and commits it. The fixtures are shared; your
   commits are visible to other users.
+- A missing tenant namespace is requested through an OpenShift `ProjectRequest`,
+  which binds the requester as project admin; if that API is unavailable or
+  forbidden, LKMABT creates a bare `Namespace`. Cleanup labels are applied only
+  after the created Namespace's UID matches the returned project, and the
+  GitLab Secret access review runs before the Secret is written.
 - LKMABT waits for PaC readiness and for the triggered PipelineRuns.
   `--preflight-timeout` (10m) bounds preflight and fixture setup.
   `--build-timeout` (60m) bounds triggering, the build wait, and build-output
@@ -356,6 +365,27 @@ selection. This applies to configured tokens and browser logins.
   first, then prompts; if collection is incomplete, it skips the prompt and
   retains the namespace. A non-interactive run never prompts, so both the
   success and failure paths retain the namespace.
+- Namespace deletion waits are bounded to five minutes and re-strip
+  deadlock-prone finalizers that controllers re-add. A namespace that still
+  cannot be deleted fails with its name and the namespace controller's
+  remaining resources or finalizers.
+- GitLab fixtures own only `gitlab-build-secret`, labeled
+  `app.konflux-ci.org/managed-by=lkmabt` and `app.konflux.org/run-id=<run-id>`.
+  A Secret carrying both labels may be adopted and refreshed by the current
+  run; a same-named Secret missing either label is never modified or deleted,
+  and a legacy unowned Secret must be deleted once after access is granted.
+- Long waits are never silent: PaC onboarding and build waits report at most
+  once per minute, naming pending components, PipelineRun ages, and Buildah
+  counts. A pending PipelineRun whose annotated PaC git-auth Secret is missing
+  past two minutes fails with the Secret name and whether PaC created it: a
+  lost created Secret hints at a concurrent run, while a PipelineRun without
+  the PaC finalizer was never reconciled by the PaC watcher. Other Secret read
+  errors warn once.
+- Two LKMABT processes cannot share one tenant namespace on the same API server.
+  Each run and `cleanup` hold a non-blocking per-user file lock keyed by API
+  server and namespace; a contended run fails before creating artifacts and
+  names the current holder. Use another `--tenant-namespace` or wait for that
+  run.
 
 ## Run logs and artifact retention
 
