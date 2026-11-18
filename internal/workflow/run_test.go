@@ -90,6 +90,83 @@ var _ = Describe("Runner", func() {
 		Expect(stage.deadlines["preflight"]).Should(BeTrue())
 	})
 
+	It("reports every executed phase and its result", func() {
+		stage := &fakeStage{}
+		runner := Runner{Store: evidence.NewManifestStore(GinkgoT().TempDir()), Stage: stage}
+		var started, ended []model.Phase
+		var endErrors []error
+
+		_, err := runner.Run(context.Background(), Options{
+			RunID: "run-progress", Provider: "github", ClusterServer: "https://api.example",
+			OnPhaseStart: func(phase model.Phase) { started = append(started, phase) },
+			OnPhaseEnd: func(phase model.Phase, phaseErr error) {
+				ended = append(ended, phase)
+				endErrors = append(endErrors, phaseErr)
+			},
+		})
+
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(started).Should(Equal([]model.Phase{
+			model.PhasePreflight, model.PhaseFixtureReady, model.PhaseTriggered,
+			model.PhaseBuildsVerified, model.PhaseBuildOutputsVerified, model.PhaseCompleted,
+		}))
+		Expect(ended).Should(Equal(started))
+		Expect(endErrors).Should(ConsistOf(nil, nil, nil, nil, nil, nil))
+	})
+
+	It("reports the failing phase and does not start later phases", func() {
+		stage := &fakeStage{fail: "builds"}
+		runner := Runner{Store: evidence.NewManifestStore(GinkgoT().TempDir()), Stage: stage}
+		var started, ended []model.Phase
+		var lastErr error
+
+		_, err := runner.Run(context.Background(), Options{
+			RunID: "run-progress-fail", Provider: "github", ClusterServer: "https://api.example",
+			OnPhaseStart: func(phase model.Phase) { started = append(started, phase) },
+			OnPhaseEnd: func(phase model.Phase, phaseErr error) {
+				ended = append(ended, phase)
+				lastErr = phaseErr
+			},
+		})
+
+		Expect(err).Should(HaveOccurred())
+		Expect(started).Should(Equal([]model.Phase{
+			model.PhasePreflight, model.PhaseFixtureReady, model.PhaseTriggered, model.PhaseBuildsVerified,
+		}))
+		Expect(ended).Should(Equal(started))
+		Expect(lastErr).Should(HaveOccurred())
+	})
+
+	It("reports a phase transition failure instead of success", func() {
+		store := evidence.NewManifestStore(GinkgoT().TempDir())
+		stage := &fakeStage{}
+		runner := Runner{Store: store, Stage: stage}
+		var started, ended []model.Phase
+		var endErrors []error
+
+		_, err := runner.Run(context.Background(), Options{
+			RunID: "run-transition-fail", Provider: "github", ClusterServer: "https://api.example",
+			OnPhaseStart: func(phase model.Phase) { started = append(started, phase) },
+			OnPhaseEnd: func(phase model.Phase, phaseErr error) {
+				ended = append(ended, phase)
+				endErrors = append(endErrors, phaseErr)
+			},
+			OnManifestCreated: func(created model.RunManifest) {
+				// A directory where manifest.json belongs makes the next save fail.
+				manifestPath := filepath.Join(store.RunDirFor(created), "manifest.json")
+				Expect(os.Remove(manifestPath)).Should(Succeed())
+				Expect(os.Mkdir(manifestPath, 0o750)).Should(Succeed())
+			},
+		})
+
+		Expect(err).Should(HaveOccurred())
+		// Preflight's transition is a no-op, so the failure follows the fixture step.
+		Expect(started).Should(Equal([]model.Phase{model.PhasePreflight, model.PhaseFixtureReady}))
+		Expect(ended).Should(Equal(started))
+		Expect(endErrors[0]).Should(Succeed())
+		Expect(endErrors[1]).Should(HaveOccurred())
+	})
+
 	When("a manifest is created", func() {
 		It("should call OnManifestCreated with the persisted manifest", func() {
 			store := evidence.NewManifestStore(GinkgoT().TempDir())

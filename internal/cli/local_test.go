@@ -98,6 +98,34 @@ var _ = Describe("NewLiveRunner", func() {
 	})
 })
 
+var _ = Describe("promptFor", func() {
+	When("the output is a console with a prompt", func() {
+		It("should route prompts through the console so progress is buffered", func() {
+			runner := LiveRunner{Prompt: &recordingPrompt{}, Out: &Console{Prompt: &recordingPrompt{}}}
+
+			Expect(promptFor(runner)).Should(BeIdenticalTo(runner.Out))
+		})
+	})
+
+	When("the output is not a console", func() {
+		It("should keep the runner prompt", func() {
+			prompt := &recordingPrompt{}
+			runner := LiveRunner{Prompt: prompt, Out: io.Discard}
+
+			Expect(promptFor(runner)).Should(BeIdenticalTo(prompt))
+		})
+	})
+
+	When("the console has no prompt", func() {
+		It("should keep the runner prompt", func() {
+			prompt := &recordingPrompt{}
+			runner := LiveRunner{Prompt: prompt, Out: &Console{}}
+
+			Expect(promptFor(runner)).Should(BeIdenticalTo(prompt))
+		})
+	})
+})
+
 var _ = Describe("LiveRunner.Run", func() {
 	When("the provider run log cannot be attached", func() {
 		It("should report the attachment failure in the run error", func() {

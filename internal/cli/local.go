@@ -43,6 +43,15 @@ func NewLiveRunner(prompt workflow.Confirmation, out io.Writer, interactive bool
 	return LiveRunner{Prompt: prompt, Out: out, Interactive: interactive}
 }
 
+// promptFor routes prompts through the console when it owns the output, so the
+// spinner is cleared and concurrent progress is buffered until the prompt ends.
+func promptFor(runner LiveRunner) workflow.Confirmation {
+	if console, ok := runner.Out.(*Console); ok && console != nil && console.Prompt != nil {
+		return console
+	}
+	return runner.Prompt
+}
+
 // Run executes a provider workflow against the request's cluster, writing its output to log.
 func (runner LiveRunner) Run(ctx context.Context, request config.Request, log RunLog) (RunOutcome, error) {
 	clients, err := cluster.NewClientSet(request.Kubeconfig)
@@ -57,7 +66,7 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	if err != nil {
 		return RunOutcome{Provider: request.Provider}, err
 	}
-	stage.Prompt = runner.Prompt
+	stage.Prompt = promptFor(runner)
 	stage.Interactive = runner.Interactive
 	stage.Out = runner.Out
 	stage.ParentContext = ctx
@@ -70,6 +79,7 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	}
 	defer releaseNamespace()
 	store := evidence.NewManifestStore(request.StateDir)
+	observer := newPhaseObserver(runner.Out, request.Provider)
 	var logAttachErr error
 	manifest, runErr := (workflow.Runner{Store: store, Stage: stage}).Run(ctx, workflow.Options{
 		RunID:            request.RunID,
@@ -79,6 +89,8 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 		FixtureNamespace: request.TenantNamespace,
 		Application:      request.ApplicationName,
 		Timeouts:         workflow.PhaseTimeouts{Preflight: request.Timeouts.Preflight, Build: request.Timeouts.Build},
+		OnPhaseStart:     observer.start,
+		OnPhaseEnd:       observer.end,
 		OnManifestCreated: func(created model.RunManifest) {
 			// The provider run directory only exists after Store.Create, so attach the log there.
 			logAttachErr = log.Attach(filepath.Join(request.StateDir, created.ArtifactDirectory, "run.log"))
@@ -139,7 +151,7 @@ func (runner LiveRunner) Cleanup(ctx context.Context, request config.Request) er
 	}
 	// Provider artifacts live under the located cluster root, so verification must resolve there.
 	request.StateDir = stateRoot
-	return cleanupRun(ctx, request, evidence.NewManifestStore(stateRoot), cleanup.NamespaceService{Dynamic: clients.Dynamic}, runner.Prompt, runner.Out)
+	return cleanupRun(ctx, request, evidence.NewManifestStore(stateRoot), cleanup.NamespaceService{Dynamic: clients.Dynamic}, promptFor(runner), runner.Out)
 }
 
 // locateRunStateRoot finds the single <stateDir>/<aggregate>/<cluster> directory holding runID.

@@ -280,9 +280,15 @@ to `.lkmabt-clusters.yaml`.
 - Each run uses one tenant namespace per provider it tests:
   `mathwizz-test-github` for GitHub and `mathwizz-test-gitlab` for GitLab.
   Single-provider runs accept `--tenant-namespace`.
-- The console prints `cluster <name>: started`, `cluster <name>: finished
-  (<n> passed, <n> failed)`, one result line per provider and cluster, and the
-  report paths.
+- In a terminal, each workflow phase runs an animated spinner that is replaced
+  in place by a green `✓` line naming the action and its emoji, such as
+  ` ✓ Preflight cluster (github) 🔍`. Non-interactive output (redirected
+  streams or CI) gets the same information as plain, non-animated
+  ` • <action>  ...` / ` ✓ <action>` / ` ✗ <action>` lines with no ANSI codes.
+- The console prints a `cluster <name>` heading per cluster,
+  `cluster <name>: finished (<n> passed, <n> failed)`, one result line per
+  provider and cluster, and the report paths. A cluster that fails
+  authentication prints ` ✗ Authenticate cluster <name> 🔐` and the reason.
 - Reports and evidence are stored under `.lkmabt-runs/`; see
   [Run logs and artifact retention](#run-logs-and-artifact-retention).
 

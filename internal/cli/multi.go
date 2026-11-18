@@ -122,6 +122,7 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 	if err != nil {
 		return err
 	}
+	console.Printf("LKMABT: %d cluster(s), provider %s", len(entries), request.Provider)
 	githubTokenNeeded := providerNeedsGitHub(request.Provider) && strings.TrimSpace(request.Credentials.GitHubToken) == ""
 	gitlabTokenNeeded := providerNeedsGitLab(request.Provider) && strings.TrimSpace(request.Credentials.GitLabToken) == ""
 	if len(entries) > 0 && providerNeedsGitHub(request.Provider) && !githubTokenNeeded && console.Interactive() {
@@ -134,10 +135,23 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 			githubTokenNeeded = true
 		}
 	}
-	var store *auth.Store
+	var (
+		store       *auth.Store
+		credentials *Step
+	)
+	if len(entries) > 0 && (githubTokenNeeded || gitlabTokenNeeded) {
+		credentials = console.StartStep("Authenticate provider credentials 🔑")
+	}
+	finishCredentials := func(credentialErr error) {
+		if credentials != nil {
+			credentials.End(credentialErr == nil)
+			credentials = nil
+		}
+	}
 	if len(entries) > 0 && githubTokenNeeded {
 		store, err = auth.NewStore()
 		if err != nil {
+			finishCredentials(err)
 			return err
 		}
 		defer func() {
@@ -149,30 +163,42 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 		if console.Interactive() {
 			console.Printf("github: authentication required; starting the gh browser login")
 		}
-		token, err := authenticateGitHub(ctx, clusterauth.ExecRunner{}, store, console.Interactive())
-		if err != nil {
-			return err
+		resume := console.Suspend()
+		token, authErr := authenticateGitHub(ctx, clusterauth.ExecRunner{}, store, console.Interactive())
+		resume()
+		if authErr != nil {
+			finishCredentials(authErr)
+			return authErr
 		}
 		request.Credentials.GitHubToken = token
 	}
 	var revokeEphemeralGitLab func() error
 	if len(entries) > 0 && gitlabTokenNeeded {
 		if !console.Interactive() {
-			return fmt.Errorf("GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to paste a personal access token")
+			err := fmt.Errorf("GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to paste a personal access token")
+			finishCredentials(err)
+			return err
 		}
 		if err := validateInteractiveGitLabURL(request.Credentials.GitLabAPIURL); err != nil {
+			finishCredentials(err)
 			return err
 		}
 		console.Printf("gitlab: authentication required\nA browser window is opening at GitLab's personal access token page.\nSet the expiration to 1 day, keep the api and write_repository scopes, and create the token.")
+		resume := console.Suspend()
 		if err := openGitLabTokenPage(GitLabTokenURL); err != nil {
 			console.Printf("could not open the token page: %v\nOpen it manually: %s", err, GitLabTokenURL)
 		}
-		token, err := readGitLabToken()
-		if err != nil {
-			return fmt.Errorf("read GitLab personal access token: %w", err)
+		token, tokenErr := readGitLabToken()
+		resume()
+		if tokenErr != nil {
+			err := fmt.Errorf("read GitLab personal access token: %w", tokenErr)
+			finishCredentials(err)
+			return err
 		}
 		if !strings.HasPrefix(token, "glpat-") {
-			return fmt.Errorf("GitLab requires a personal access token with api and write_repository; create one at %s or set GITLAB_BOT_TOKEN", GitLabTokenURL)
+			err := fmt.Errorf("GitLab requires a personal access token with api and write_repository; create one at %s or set GITLAB_BOT_TOKEN", GitLabTokenURL)
+			finishCredentials(err)
+			return err
 		}
 		request.Credentials.GitLabToken = token
 		request.Credentials.GitLabTokenEphemeral = true
@@ -195,6 +221,7 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 			runErr = errors.Join(runErr, revokeEphemeralGitLab())
 		}()
 	}
+	finishCredentials(nil)
 	aggregate, err := newAggregateRun(request.StateDir)
 	if err != nil {
 		return err
@@ -317,11 +344,12 @@ func scheduleClusters(ctx context.Context, request config.Request, entries []clu
 	for index, entry := range entries {
 		runs[index] = clusterRun{Entry: entry, AuthErr: authFailures[entry.Name]}
 		if runs[index].AuthErr != nil {
-			console.Printf("cluster %s: authentication failed: %v", entry.Name, runs[index].AuthErr)
+			console.Result(false, fmt.Sprintf("Authenticate cluster %s 🔐", entry.Name))
+			console.Printf("  %v", runs[index].AuthErr)
 			continue
 		}
-		console.Printf("cluster %s: authenticated", entry.Name)
-		console.Printf("cluster %s: started", entry.Name)
+		console.Printf("")
+		console.Printf("cluster %s", entry.Name)
 		runs[index].Results = runCluster(ctx, request, entry, aggregate.Directory, runner)
 		console.Printf("cluster %s: finished (%s)", entry.Name, resultSummary(runs[index].Results))
 	}
@@ -346,7 +374,10 @@ func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []
 		rows = append(rows, report.Row{Cluster: "credentials", Provider: "auth", Stage: report.StageCleanup, Error: cleanupErr.Error(), Links: report.Links(aggregate.Directory, "", "")})
 	}
 	document := report.Document{RunID: aggregate.RunID, ClustersFile: request.ClustersFile, StartedAt: aggregate.StartedAt, EndedAt: time.Now().UTC(), Passed: allPassed(rows), Rows: rows}
+	step := console.StartStep("Write reports 📝")
 	writeErr := report.Write(aggregate.Directory, document)
+	step.End(writeErr == nil)
+	console.Printf("")
 	for _, row := range rows {
 		console.Printf("%s %s: %s (%s)", row.Cluster, row.Provider, row.Result(), row.Stage)
 	}

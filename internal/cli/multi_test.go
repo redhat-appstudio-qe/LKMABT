@@ -309,8 +309,9 @@ var _ = Describe("scheduleClusters", func() {
 			Expect(runs[2].Results[0].Err).Should(BeNil())
 
 			output := console.Out.(*bytes.Buffer).String()
-			Expect(output).Should(ContainSubstring("cluster c2: authentication failed"))
-			Expect(output).ShouldNot(ContainSubstring("cluster c2: started"))
+			Expect(output).Should(ContainSubstring("✗ Authenticate cluster c2 🔐"))
+			Expect(output).Should(ContainSubstring("authentication failed: no readable kubeconfig"))
+			Expect(output).ShouldNot(ContainSubstring("\ncluster c2\n"))
 		})
 	})
 
@@ -326,8 +327,7 @@ var _ = Describe("scheduleClusters", func() {
 			Expect(runs).Should(HaveLen(1))
 
 			output := console.Out.(*bytes.Buffer).String()
-			Expect(output).Should(ContainSubstring("cluster c1: authenticated"))
-			Expect(output).Should(ContainSubstring("cluster c1: started"))
+			Expect(output).Should(ContainSubstring("\ncluster c1\n"))
 			Expect(output).Should(ContainSubstring("cluster c1: finished (1 passed, 0 failed)"))
 		})
 	})
@@ -687,9 +687,9 @@ var _ = Describe("RunClusters under the aggregate layout", func() {
 
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: output})).Should(Succeed())
 
-			Expect(output.String()).Should(ContainSubstring("cluster c1: started"))
+			Expect(output.String()).Should(ContainSubstring("\ncluster c1\n"))
 			Expect(output.String()).Should(ContainSubstring("cluster c1: finished (2 passed, 0 failed)"))
-			Expect(output.String()).Should(ContainSubstring("cluster c2: started"))
+			Expect(output.String()).Should(ContainSubstring("\ncluster c2\n"))
 			Expect(output.String()).Should(ContainSubstring("report: "))
 			aggregateDirectory := singleAggregateDirectory(stateDir)
 			for _, name := range []string{"report.md", "report.html"} {
