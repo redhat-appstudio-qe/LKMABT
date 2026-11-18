@@ -41,7 +41,7 @@ resources.
 | --- | --- |
 | Go 1.26 or newer | Building LKMABT (see `go.mod`). |
 | `oc` | Every run. Each kubeconfig is proved with `oc whoami`; a readable file with an expired token is not enough. |
-| `kflux` | `ocp` clusters whose kubeconfig is missing or rejected. If `kflux` is absent, LKMABT clones `https://gitlab.cee.redhat.com/hares/kflux.git` into `~/.local/share/lkmabt/kflux-src`, builds it, and installs `~/.local/bin/kflux`; that path needs `git`, `make`, Go, and network access to the internal GitLab. If kflux cannot refresh the kubeconfig, LKMABT falls back to `oc login`. |
+| `kflux` | `ocp` clusters whose kubeconfig is missing or rejected; LKMABT installs it when absent. |
 | `ibmcloud` with the `kubernetes-service` plug-in | `type: roks` clusters. |
 | `gh` | GitHub runs with an empty `GITHUB_TOKEN`. |
 | `glab` | GitLab runs with an empty `GITLAB_BOT_TOKEN`. |
@@ -170,7 +170,8 @@ with `oc whoami`. If a ROKS kubeconfig is still rejected, open the cluster's
 OpenShift web console once from the IBM Cloud console and re-run. ROKS entries
 never fall through to kflux or `oc login`.
 
-For non-ROKS entries, kflux refreshes default-path kubeconfigs; any entry still
+For non-ROKS entries, kflux refreshes default-path kubeconfigs; if `kflux` is
+missing, LKMABT clones and builds it into `~/.local/bin/kflux`. Any entry still
 rejected falls back to `oc login`. All available fields are documented in
 `.lkmabt-clusters.yaml.example`.
 
@@ -226,8 +227,9 @@ Create the environment file from the example and fill in the tokens you use:
 cp .lkmabt.env.example .lkmabt.env
 ```
 
-The copy is ignored by Git; keep it local. The parser reads `KEY=VALUE` lines
-and does not execute the file.
+Pass it to a run with `--env-file .lkmabt.env`; LKMABT does not read the file
+automatically. The copy is ignored by Git; keep it local. The parser reads
+`KEY=VALUE` lines and does not execute the file.
 
 | Variable | Required | Notes |
 | --- | --- | --- |
@@ -371,16 +373,16 @@ Runtime evidence is stored under `.lkmabt-runs/`.
 │       └── <provider>-run-<hh:mm_d.m.yyyy>_<run-id>/
 │           ├── manifest.json                        # Run identity, phase, fixture, triggers
 │           ├── status.json                          # Compact phase and failure snapshot
-│           ├── session/manifest.json                # Failed runs: collected manifest
-│           ├── workload/applications.json           # Failed runs: Applications
-│           ├── workload/components.json             # Failed runs: Components
-│           ├── workload/pipelineruns.json           # Failed runs: PipelineRuns
-│           ├── workload/taskruns.json               # Failed runs: TaskRuns
-│           ├── workload/taskruns/                   # Failed runs: TaskRun YAML artifacts
-│           ├── workload/pods.json                   # Failed runs: Pods
-│           ├── logs/<namespace>/<pod>/<container>.log  # Failed runs: available pod logs
-│           ├── failed-builds/                       # Failed builds: Buildah logs
-│           └── collection-report.json               # Failed runs: collection outcome
+│           ├── session/manifest.json                # Collected run manifest
+│           ├── workload/applications.json           # Workload snapshot: Applications
+│           ├── workload/components.json             # Workload snapshot: Components
+│           ├── workload/pipelineruns.json           # Workload snapshot: PipelineRuns
+│           ├── workload/taskruns.json               # Workload snapshot: TaskRuns
+│           ├── workload/taskruns/                   # TaskRun YAML artifacts
+│           ├── workload/pods.json                   # Workload snapshot: Pods
+│           ├── logs/<namespace>/<pod>/<container>.log  # Available pod logs
+│           ├── failed-builds/                       # Buildah logs when a build fails
+│           └── collection-report.json               # Artifact collection outcome
 ├── latest -> multi-run-...                          # Most recently started aggregate run
 └── <older aggregate directories>/
 ```
