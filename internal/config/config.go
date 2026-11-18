@@ -49,6 +49,7 @@ type Timeouts struct {
 type Request struct {
 	Command          string
 	Provider         string
+	MultiProvider    bool
 	RunID            string
 	ClusterServer    string
 	ClustersFile     string

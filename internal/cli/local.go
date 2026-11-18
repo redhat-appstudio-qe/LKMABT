@@ -69,6 +69,14 @@ func (p consolePrompt) Confirm(ctx context.Context, message string) (bool, error
 	return p.console.confirm(ctx, p.prompt, message)
 }
 
+// providerLabel returns the step label for a split both run and "" otherwise.
+func providerLabel(request config.Request) string {
+	if request.MultiProvider {
+		return request.Provider
+	}
+	return ""
+}
+
 // stepFor starts a console step when out is a console and otherwise returns a
 // nil step whose methods are no-ops.
 func stepFor(out io.Writer, description string) *Step {
@@ -114,7 +122,13 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	}
 	defer releaseNamespace()
 	store := evidence.NewManifestStore(request.StateDir)
-	observer := newPhaseObserver(runner.Out, request.Provider)
+	observer := newPhaseObserver(runner.Out, providerLabel(request))
+	if observer != nil {
+		stage.Progress = observer.progress
+	}
+	if label := providerLabel(request); label != "" {
+		stage.NoticePrefix = label + " run - "
+	}
 	var logAttachErr error
 	manifest, runErr := (workflow.Runner{Store: store, Stage: stage}).Run(ctx, workflow.Options{
 		RunID:            request.RunID,
@@ -145,13 +159,6 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	}
 	fmt.Fprintf(log, "completed run %s at phase %s\n", manifest.RunID, manifest.Phase)
 	return outcome, nil
-}
-
-// withPrefix returns a runner whose console output carries the provider label.
-// The per-provider run log keeps unlabeled lines.
-func (runner LiveRunner) withPrefix(prefix string) Runner {
-	runner.Out = &providerPrefixWriter{prefix: prefix, out: runner.Out}
-	return runner
 }
 
 // Cleanup resolves the named cluster, locates its run, and prompts before deleting the tenant namespace.

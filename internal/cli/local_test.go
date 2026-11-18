@@ -98,6 +98,31 @@ var _ = Describe("NewLiveRunner", func() {
 	})
 })
 
+var _ = Describe("providerLabel", func() {
+	It("should label a both split", func() {
+		Expect(providerLabel(config.Request{Provider: config.ProviderGitHub, MultiProvider: true})).Should(Equal(config.ProviderGitHub))
+	})
+
+	It("should leave a single-provider run unlabeled", func() {
+		Expect(providerLabel(config.Request{Provider: config.ProviderGitHub})).Should(BeEmpty())
+	})
+})
+
+var _ = Describe("requestForProvider", func() {
+	It("should mark both-provider splits", func() {
+		request := requestForProvider(config.Request{Provider: config.ProviderBoth}, config.ProviderGitLab)
+
+		Expect(request.Provider).Should(Equal(config.ProviderGitLab))
+		Expect(request.MultiProvider).Should(BeTrue())
+	})
+
+	It("should keep a single-provider request unlabeled", func() {
+		request := requestForProvider(config.Request{Provider: config.ProviderGitHub}, config.ProviderGitHub)
+
+		Expect(request.MultiProvider).Should(BeFalse())
+	})
+})
+
 var _ = Describe("promptFor", func() {
 	When("the output is a console and the runner has a prompt", func() {
 		It("should preserve the caller's confirmation policy", func() {

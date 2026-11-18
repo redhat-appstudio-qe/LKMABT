@@ -94,13 +94,13 @@ var _ = Describe("Console.Printf", func() {
 				go func() {
 					defer group.Done()
 					for range 25 {
-						console.Printf(strings.Repeat("A", 200))
+						console.Printf("%s", strings.Repeat("A", 200))
 					}
 				}()
 				go func() {
 					defer group.Done()
 					for range 25 {
-						console.Printf(strings.Repeat("B", 200))
+						console.Printf("%s", strings.Repeat("B", 200))
 					}
 				}()
 			}

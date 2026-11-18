@@ -52,6 +52,18 @@ var _ = Describe("Console steps", func() {
 			Expect(out.String()).Should(ContainSubstring(" ✓ Trigger components (gitlab) 🚀\n"))
 			Expect(strings.Count(out.String(), "\r")).Should(BeZero())
 		})
+
+		It("should print heartbeat detail as one plain line", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out}
+
+			step := console.startStep("github", "Verify builds (github) 🏗️")
+			step.Update("builds: web: buildah 0/2")
+
+			Expect(out.String()).Should(ContainSubstring("github run - builds: web: buildah 0/2\n"))
+			Expect(out.String()).ShouldNot(ContainSubstring("\x1b["))
+			step.End(true)
+		})
 	})
 
 	When("output is a terminal", func() {
@@ -70,7 +82,7 @@ var _ = Describe("Console steps", func() {
 			Expect(console.spinning).Should(BeFalse())
 		})
 
-		It("should redraw the newest active step when one finishes", func() {
+		It("should redraw the remaining active step when one finishes", func() {
 			out := &bytes.Buffer{}
 			console := &Console{Out: out, animate: true, frameInterval: time.Hour}
 
@@ -78,24 +90,64 @@ var _ = Describe("Console steps", func() {
 			second := console.StartStep("Preflight cluster (gitlab) 🔍")
 			second.End(true)
 
-			Expect(out.String()).Should(ContainSubstring(" ✓ Preflight cluster (gitlab) 🔍\n"))
-			Expect(out.String()).Should(HaveSuffix("Preflight cluster (github) 🔍\x1b[?7h"))
+			text := out.String()
+			Expect(text).Should(ContainSubstring(" ✓ Preflight cluster (gitlab) 🔍\n"))
+			Expect(strings.LastIndex(text, "Preflight cluster (github) 🔍")).Should(
+				BeNumerically(">", strings.Index(text, "✓ Preflight cluster (gitlab) 🔍")))
 
 			first.End(true)
 			Expect(console.spinning).Should(BeFalse())
 		})
 
-		It("should interrupt the spinner for log lines and redraw it", func() {
+		It("should interrupt the live region for log lines and redraw it", func() {
 			out := &bytes.Buffer{}
 			console := &Console{Out: out, animate: true, frameInterval: time.Hour}
 
 			step := console.StartStep("Verify builds (github) 🏗️")
 			console.Printf("waiting for component graph")
 
-			Expect(out.String()).Should(ContainSubstring("\r\x1b[2K"))
-			Expect(out.String()).Should(ContainSubstring("waiting for component graph\n"))
-			Expect(out.String()).Should(HaveSuffix("Verify builds (github) 🏗️\x1b[?7h"))
+			text := out.String()
+			Expect(text).Should(ContainSubstring("\r\x1b[2K"))
+			Expect(text).Should(ContainSubstring("waiting for component graph\n"))
+			Expect(strings.LastIndex(text, "Verify builds (github) 🏗️")).Should(
+				BeNumerically(">", strings.Index(text, "waiting for component graph")))
 			step.End(true)
+		})
+
+		It("should print a durable block above all active steps", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, animate: true, frameInterval: time.Hour}
+
+			first := console.StartStep("Verify builds (github) 🏗️")
+			second := console.StartStep("Verify builds (gitlab) 🏗️")
+			console.Printf("GitHub App is not installed.\nTo complete the installation:\n  1. Approve it.")
+
+			text := out.String()
+			blockEnd := strings.Index(text, "  1. Approve it.")
+			Expect(blockEnd).Should(BeNumerically(">=", 0))
+			Expect(strings.LastIndex(text, "Verify builds (github) 🏗️")).Should(BeNumerically(">", blockEnd))
+			Expect(strings.LastIndex(text, "Verify builds (gitlab) 🏗️")).Should(BeNumerically(">", blockEnd))
+
+			first.End(true)
+			second.End(true)
+		})
+
+		It("should update one active line without adding another", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, animate: true, frameInterval: time.Hour}
+
+			first := console.StartStep("Verify builds (github) 🏗️")
+			second := console.StartStep("Verify builds (gitlab) 🏗️")
+			first.Update("web: buildah 0/2")
+			second.Update("web: running 1m13s")
+
+			text := out.String()
+			Expect(text).Should(ContainSubstring("Verify builds (github) 🏗️ · web: buildah 0/2"))
+			Expect(text).Should(ContainSubstring("Verify builds (gitlab) 🏗️ · web: running 1m13s"))
+			Expect(strings.Count(text, " ✓ ")).Should(BeZero())
+
+			first.End(true)
+			second.End(true)
 		})
 
 		It("should pause animation while an external command owns the terminal", func() {
@@ -193,6 +245,7 @@ var _ = Describe("phaseDescription", func() {
 			Expect(phaseDescription(phase, provider)).Should(Equal(expected))
 		},
 		Entry("preflight", model.PhasePreflight, "github", "Preflight cluster (github) 🔍"),
+		Entry("preflight single", model.PhasePreflight, "", "Preflight cluster 🔍"),
 		Entry("fixture", model.PhaseFixtureReady, "gitlab", "Prepare fixture (gitlab) 🧰"),
 		Entry("trigger", model.PhaseTriggered, "github", "Trigger components (github) 🚀"),
 		Entry("builds", model.PhaseBuildsVerified, "github", "Verify builds (github) 🏗️"),

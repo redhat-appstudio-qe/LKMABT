@@ -31,10 +31,11 @@ type Console struct {
 	suspended    bool
 	pending      bytes.Buffer
 
-	active    []*Step
-	frame     int
-	spinning  bool
-	frameDone chan struct{}
+	active        []*Step
+	frame         int
+	spinning      bool
+	frameDone     chan struct{}
+	renderedLines int
 	// frameInterval overrides the redraw period in tests.
 	frameInterval time.Duration
 }
@@ -58,8 +59,8 @@ func (c *Console) Interactive() bool {
 	return c != nil && c.interactive
 }
 
-// Printf writes one serialized status line. A running spinner is interrupted
-// and redrawn below the line.
+// Printf writes one serialized status line. Running steps are cleared and
+// redrawn below the line.
 func (c *Console) Printf(format string, args ...any) {
 	if c == nil || c.Out == nil {
 		return
@@ -70,7 +71,10 @@ func (c *Console) Printf(format string, args ...any) {
 		fmt.Fprintf(&c.pending, format+"\n", args...)
 		return
 	}
-	c.writeLineLocked(format, args...)
+	line := fmt.Sprintf(format, args...)
+	c.writePermanentLocked(strings.Count(line, "\n")+1, func() {
+		fmt.Fprintln(c.Out, line)
+	})
 }
 
 // Write serializes progress output from concurrent provider stages.
@@ -83,25 +87,29 @@ func (c *Console) Write(p []byte) (int, error) {
 	if c.promptActive {
 		return c.pending.Write(p)
 	}
-	if c.spinning {
-		c.clearLineLocked()
-	}
-	written, err := c.Out.Write(p)
-	if c.spinning {
-		c.drawFrameLocked()
-	}
+	var written int
+	var err error
+	c.writePermanentLocked(permanentLines(p), func() {
+		written, err = c.Out.Write(p)
+	})
 	return written, err
 }
 
 // StartStep begins one status step. In a terminal it draws an animated spinner;
 // otherwise it emits a plain start line and no animation.
 func (c *Console) StartStep(description string) *Step {
+	return c.startStep("", description)
+}
+
+// startStep begins a step with an optional provider label used by plain
+// heartbeat lines.
+func (c *Console) startStep(provider, description string) *Step {
 	if c == nil || c.Out == nil {
 		return nil
 	}
 	c.outMu.Lock()
 	defer c.outMu.Unlock()
-	step := &Step{console: c, description: description}
+	step := &Step{console: c, description: description, provider: provider}
 	c.active = append(c.active, step)
 	if !c.animate {
 		line := fmt.Sprintf(" • %s  ...", description)
@@ -118,7 +126,7 @@ func (c *Console) StartStep(description string) *Step {
 	if !c.spinning {
 		c.startSpinnerLocked()
 	}
-	c.drawFrameLocked()
+	c.drawLiveLocked()
 	return step
 }
 
@@ -133,18 +141,17 @@ func (c *Console) Result(success bool, description string) {
 	line := resultLine(c.color, success, description)
 	if c.promptActive {
 		fmt.Fprintln(&c.pending, line)
+		if len(c.active) == 0 {
+			c.haltSpinnerLocked()
+		}
 		return
 	}
-	if c.spinning {
-		c.clearLineLocked()
-	}
-	fmt.Fprintln(c.Out, line)
-	if c.spinning {
-		c.drawFrameLocked()
-	}
+	c.writePermanentLocked(1, func() {
+		fmt.Fprintln(c.Out, line)
+	})
 }
 
-// Suspend hides the spinner while an external command writes directly to the
+// Suspend hides the live region while an external command writes directly to the
 // terminal, such as a browser or device login. The returned function restores
 // progress output when the command returns.
 func (c *Console) Suspend() func() {
@@ -153,10 +160,8 @@ func (c *Console) Suspend() func() {
 	}
 	c.outMu.Lock()
 	c.suspended = true
-	if c.spinning {
-		c.clearLineLocked()
-		c.haltSpinnerLocked()
-	}
+	c.eraseLiveLocked()
+	c.haltSpinnerLocked()
 	c.outMu.Unlock()
 	return func() {
 		c.outMu.Lock()
@@ -166,12 +171,13 @@ func (c *Console) Suspend() func() {
 			if !c.spinning {
 				c.startSpinnerLocked()
 			}
-			c.drawFrameLocked()
+			c.drawLiveLocked()
 		}
 	}
 }
 
-// Confirm serializes an approval through the console's configured prompt.
+// Confirm serializes prompts and buffers progress output until the prompt
+// completes.
 func (c *Console) Confirm(ctx context.Context, message string) (bool, error) {
 	if c == nil || c.Prompt == nil {
 		return false, fmt.Errorf("interactive confirmation is not configured")
@@ -179,8 +185,8 @@ func (c *Console) Confirm(ctx context.Context, message string) (bool, error) {
 	return c.confirm(ctx, c.Prompt, message)
 }
 
-// confirm runs prompt while the spinner is cleared and concurrent progress is
-// buffered until the prompt completes.
+// confirm runs prompt while the live region is cleared and concurrent progress
+// is buffered until the prompt completes.
 func (c *Console) confirm(ctx context.Context, prompt workflow.Confirmation, message string) (bool, error) {
 	if c == nil || prompt == nil {
 		return false, fmt.Errorf("interactive confirmation is not configured")
@@ -199,9 +205,7 @@ func (c *Console) confirm(ctx context.Context, prompt workflow.Confirmation, mes
 	defer c.promptMu.Unlock()
 	c.outMu.Lock()
 	c.promptActive = true
-	if c.spinning {
-		c.clearLineLocked()
-	}
+	c.eraseLiveLocked()
 	c.outMu.Unlock()
 	approved, err := prompt.Confirm(ctx, message)
 	c.outMu.Lock()
@@ -213,22 +217,21 @@ func (c *Console) confirm(ctx context.Context, prompt workflow.Confirmation, mes
 		if !c.spinning {
 			c.startSpinnerLocked()
 		}
-		c.drawFrameLocked()
-	}
+		c.drawLiveLocked()
 	c.outMu.Unlock()
 	return approved, err
 }
 
-// writeLineLocked writes one terminated line, interrupting the spinner first.
-// Callers hold outMu.
-func (c *Console) writeLineLocked(format string, args ...any) {
-	if c.spinning {
-		c.clearLineLocked()
+// writePermanentLocked clears the live region, writes durable output, and
+// redraws the remaining steps. Callers hold outMu.
+func (c *Console) writePermanentLocked(lines int, write func()) {
+	erased := c.eraseLiveLocked()
+	write()
+	if !c.spinning || len(c.active) == 0 {
+		c.clearBelowLocked(erased - lines)
+		return
 	}
-	fmt.Fprintf(c.Out, format+"\n", args...)
-	if c.spinning {
-		c.drawFrameLocked()
-	}
+	c.drawLiveLocked()
 }
 
 // startSpinnerLocked starts the frame goroutine when animation is available.
@@ -254,7 +257,7 @@ func (c *Console) startSpinnerLocked() {
 			case <-ticker.C:
 				c.outMu.Lock()
 				if c.spinning && !c.promptActive && !c.suspended {
-					c.drawFrameLocked()
+					c.drawLiveLocked()
 				}
 				c.outMu.Unlock()
 			}
@@ -262,8 +265,8 @@ func (c *Console) startSpinnerLocked() {
 	}()
 }
 
-// haltSpinnerLocked stops the frame goroutine. The current line is left for the
-// caller to clear or overwrite. Callers hold outMu.
+// haltSpinnerLocked stops the frame goroutine. The live region is left for the
+// caller to clear. Callers hold outMu.
 func (c *Console) haltSpinnerLocked() {
 	if !c.spinning {
 		return
@@ -273,21 +276,53 @@ func (c *Console) haltSpinnerLocked() {
 	c.frameDone = nil
 }
 
-// drawFrameLocked renders the newest active step over the current line.
-// Callers hold outMu.
-func (c *Console) drawFrameLocked() {
-	if !c.spinning || len(c.active) == 0 {
+// drawLiveLocked renders every active step, one line per step, and leaves the
+// cursor on the line after the block. Callers hold outMu.
+func (c *Console) drawLiveLocked() {
+	if !c.spinning || len(c.active) == 0 || c.promptActive || c.suspended {
 		return
+	}
+	previous := c.renderedLines
+	if previous > 0 {
+		fmt.Fprintf(c.Out, "\x1b[%dA", previous)
+	}
+	lines := len(c.active)
+	maxLines := previous
+	if lines > maxLines {
+		maxLines = lines
 	}
 	frame := spinnerFrames[c.frame%len(spinnerFrames)]
 	c.frame++
 	if c.color {
 		frame = "\x1b[36m" + frame + "\x1b[0m"
 	}
-	fmt.Fprintf(c.Out, spinnerFormat, frame, c.active[len(c.active)-1].description)
+	fmt.Fprint(c.Out, "\x1b[?7l")
+	for index := range maxLines {
+		fmt.Fprint(c.Out, "\r\x1b[2K")
+		if index < lines {
+			fmt.Fprintf(c.Out, spinnerLineFormat, frame, c.active[index].render())
+		}
+		fmt.Fprint(c.Out, "\n")
+	}
+	fmt.Fprint(c.Out, "\x1b[?7h")
+	if maxLines > lines {
+		fmt.Fprintf(c.Out, "\x1b[%dA", maxLines-lines)
+	}
+	c.renderedLines = lines
 }
 
-// clearLineLocked erases the spinner line. Callers hold outMu.
-func (c *Console) clearLineLocked() {
-	fmt.Fprint(c.Out, "\r\x1b[2K")
+// eraseLiveLocked clears the live region, leaves the cursor at its first line,
+// and returns the number of cleared lines. Callers hold outMu.
+func (c *Console) eraseLiveLocked() int {
+	erased := c.renderedLines
+	if erased == 0 {
+		return 0
+	}
+	fmt.Fprintf(c.Out, "\x1b[%dA", erased)
+	for range erased {
+		fmt.Fprint(c.Out, "\r\x1b[2K\n")
+	}
+	fmt.Fprintf(c.Out, "\x1b[%dA", erased)
+	c.renderedLines = 0
+	return erased
 }

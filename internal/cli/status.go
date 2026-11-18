@@ -15,21 +15,53 @@ var spinnerFrames = []string{
 	"⢎⡱", "⢎⡰", "⢎⡠", "⢎⡀", "⢎⠁", "⠎⠁", "⠊⠁",
 }
 
-// spinnerFormat rewrites the spinner line in place. Wrapping is disabled while
-// the frame is drawn on every platform so a line wider than the terminal cannot
-// wrap and leave stale rows behind when the line is cleared.
-const spinnerFormat = "\x1b[?7l\r\x1b[2K%s %s\x1b[?7h"
+// spinnerLineFormat draws one frame and its step description. Wrapping is
+// disabled around the whole live block so a long line cannot create stale rows.
+const spinnerLineFormat = "%s %s"
 
 // Step is one status line that starts as an animated spinner and is replaced by
-// a success or failure marker when it ends.
+// a success or failure marker when it ends. Detail may be updated while the
+// step is running to show a heartbeat without adding a new line.
 type Step struct {
 	console     *Console
 	description string
+	detail      string
+	provider    string
 	done        bool
 }
 
-// End completes the step and overwrites its spinner line. It is safe to call
-// more than once and on a nil step.
+// Update replaces the step's detail and redraws the live region. In plain mode
+// it prints one progress line, prefixed with the provider in a both run.
+func (s *Step) Update(detail string) {
+	if s == nil || s.console == nil {
+		return
+	}
+	c := s.console
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	if s.done {
+		return
+	}
+	s.detail = detail
+	if !c.animate {
+		line := s.plainDetail()
+		if line == "" {
+			return
+		}
+		if c.promptActive {
+			fmt.Fprintln(&c.pending, line)
+		} else {
+			fmt.Fprintln(c.Out, line)
+		}
+		return
+	}
+	if c.spinning && !c.promptActive && !c.suspended {
+		c.drawLiveLocked()
+	}
+}
+
+// End completes the step and replaces its live line with a result marker. It is
+// safe to call more than once and on a nil step.
 func (s *Step) End(success bool) {
 	if s == nil || s.console == nil {
 		return
@@ -59,20 +91,31 @@ func (s *Step) End(success bool) {
 		fmt.Fprintln(c.Out, line)
 		return
 	}
-	if c.spinning {
-		c.clearLineLocked()
-	}
-	fmt.Fprintln(c.Out, line)
+	c.writePermanentLocked(1, func() {
+		fmt.Fprintln(c.Out, line)
+	})
 	if len(c.active) == 0 {
 		c.haltSpinnerLocked()
-		return
 	}
-	if !c.promptActive && !c.suspended {
-		if !c.spinning {
-			c.startSpinnerLocked()
-		}
-		c.drawFrameLocked()
+}
+
+// render returns the live line text, including the current detail.
+func (s *Step) render() string {
+	if s.detail == "" {
+		return s.description
 	}
+	return s.description + " · " + s.detail
+}
+
+// plainDetail returns the provider-prefixed heartbeat line for non-TTY output.
+func (s *Step) plainDetail() string {
+	if s.detail == "" {
+		return ""
+	}
+	if s.provider != "" {
+		return s.provider + " run - " + s.detail
+	}
+	return s.detail
 }
 
 // resultLine renders one completed step with an optional colored marker.
@@ -122,7 +165,8 @@ func phaseAction(phase model.Phase) (string, string) {
 	}
 }
 
-// phaseDescription builds the status text for one provider phase.
+// phaseDescription builds the status text for one provider phase. The provider
+// label is empty for single-provider runs.
 func phaseDescription(phase model.Phase, provider string) string {
 	action, emoji := phaseAction(phase)
 	if provider == "" {
@@ -131,7 +175,8 @@ func phaseDescription(phase model.Phase, provider string) string {
 	return fmt.Sprintf("%s (%s) %s", action, provider, emoji)
 }
 
-// phaseObserver turns workflow phase transitions into console steps.
+// phaseObserver turns workflow phase transitions and progress into console
+// steps.
 type phaseObserver struct {
 	console  *Console
 	provider string
@@ -152,7 +197,15 @@ func (o *phaseObserver) start(phase model.Phase) {
 	if o == nil {
 		return
 	}
-	o.step = o.console.StartStep(phaseDescription(phase, o.provider))
+	o.step = o.console.startStep(o.provider, phaseDescription(phase, o.provider))
+}
+
+// progress updates the active phase with heartbeat detail.
+func (o *phaseObserver) progress(detail string) {
+	if o == nil || o.step == nil {
+		return
+	}
+	o.step.Update(detail)
 }
 
 // end completes the open step with the phase result.
