@@ -83,9 +83,10 @@ placeholders.
 
 ## Quality Tooling
 
-**Qodo is not onboarded.** Do not invoke Qodo skills (`qodo-review`,
-`qodo-get-rules`, etc.) for this repository, and do not expect automated Qodo
-comments on PRs.
+**Qodo is onboarded.** Use the Qodo skills for this repository: `qodo-review`
+for local pre-commit reviews, `qodo-get-rules` to load repository standards,
+and `qodo-review-resolver` for findings posted on PRs. Address or explicitly
+dismiss every finding before merging.
 
 ## After Merge
 

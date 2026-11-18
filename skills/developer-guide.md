@@ -260,15 +260,6 @@ The tool uses **persistent fixtures** rather than creating/deleting test resourc
 **Rationale**: avoids PaC onboarding delays, reduces flakiness from resource
 creation/deletion races, enables faster iteration during development.
 
-### Trigger Pattern from DR Suite
-Trigger logic is based on
-`infra-deployments/tests/disaster-recovery/tenant_application_lifecycle.go`:
-- Append timestamped comment to each component's Dockerfile
-- Commit through provider API
-- Wait for PaC-triggered PipelineRuns matching the exact commit SHA
-
-This pattern is proven reliable in the DR suite's periodic CI runs.
-
 ### Platform Detection Strategy
 Build output verification uses TaskRun labels, annotations, params, and results
 to determine platform. **No Pod/Node lookup** is performed:
@@ -289,14 +280,6 @@ rather than continuously:
 
 **Rationale**: reduces storage overhead for successful runs; redaction prevents
 accidental credential leakage in shared artifacts.
-
-## Relationship to Disaster Recovery Suite
-
-LKMABT extracts patterns from `infra-deployments/tests/disaster-recovery` but is
-not part of the DR e2e suite. It is a standalone local operator tool for
-validating multi-arch builds. Consult the DR suite's
-`tenant_application_lifecycle.go` for trigger pattern changes and collection
-helpers.
 
 ## Artifact Layout
 
