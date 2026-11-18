@@ -163,7 +163,11 @@ counts, with milestone lines at each phase entry. `VerifyBuilds` inspects the
 `pipelinesascode.tekton.dev/git-auth-secret` annotation on pending
 PipelineRuns: when the referenced Secret is absent for more than two minutes it
 fails with `MissingPacAuthSecretError`, which names the run, component, Secret,
-and pending duration and suggests checking for a concurrent run. A Secret read
+and pending duration. The diagnostic reads PaC's `secret-created` annotation
+and finalizer: a Secret PaC created and then lost points at a concurrent run, a
+PipelineRun without the `pipelinesascode.tekton.dev/finalizer` was never
+reconciled by the PaC watcher, and a reconciled run with
+`secret-created=false` has not finished Secret creation. A Secret read
 that fails for any other reason warns once and keeps waiting. A matched
 PipelineRun with a `Succeeded=False` condition fails the wait immediately
 instead of waiting for Buildah TaskRuns.

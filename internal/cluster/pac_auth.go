@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -14,6 +15,10 @@ import (
 const (
 	// PacGitAuthSecretAnnotation names the git authentication Secret PaC generates for a PipelineRun.
 	PacGitAuthSecretAnnotation = "pipelinesascode.tekton.dev/git-auth-secret"
+	// PacSecretCreatedAnnotation records whether PaC created the git authentication Secret.
+	PacSecretCreatedAnnotation = "pipelinesascode.tekton.dev/secret-created"
+	// PacFinalizer is added by the PaC watcher on its first reconciliation of a PipelineRun.
+	PacFinalizer = "pipelinesascode.tekton.dev/finalizer"
 	// PacAuthSecretGracePeriod tolerates a PipelineRun that has not created its Secret yet.
 	PacAuthSecretGracePeriod = 2 * time.Minute
 )
@@ -25,12 +30,24 @@ type MissingPacAuthSecretError struct {
 	Component   string
 	Secret      string
 	Pending     time.Duration
+	// Created reports PaC's secret-created annotation: whether PaC created the Secret before it disappeared.
+	Created bool
+	// Reconciled reports whether the PaC watcher added its finalizer, the side effect of its first reconciliation.
+	Reconciled bool
 }
 
-// Error explains that PaC removed the Secret with its PipelineRun, which a concurrent run explains.
+// Error distinguishes a Secret PaC created and then deleted from one PaC never created.
 func (e *MissingPacAuthSecretError) Error() string {
-	return fmt.Sprintf("PipelineRun %s/%s for component %s has been pending for %s and its PaC git authentication Secret %q is missing; PaC deletes that Secret with its PipelineRun, so check for a concurrent LKMABT run using namespace %s",
-		e.Namespace, e.PipelineRun, e.Component, e.Pending.Round(time.Second), e.Secret, e.Namespace)
+	state := fmt.Sprintf("PipelineRun %s/%s for component %s has been pending for %s and its PaC git authentication Secret %q",
+		e.Namespace, e.PipelineRun, e.Component, e.Pending.Round(time.Second), e.Secret)
+	switch {
+	case e.Created:
+		return fmt.Sprintf("%s was deleted after PaC created it; PaC deletes that Secret with its PipelineRun, so check for a concurrent LKMABT run using namespace %s", state, e.Namespace)
+	case !e.Reconciled:
+		return fmt.Sprintf("%s was never created: PaC did not reconcile the PipelineRun (no %s finalizer), so check the PaC watcher and retry the run", state, PacFinalizer)
+	default:
+		return fmt.Sprintf("%s was not created: the PaC reconciler has not finished creating it, so check the PaC watcher logs and retry the run", state)
+	}
 }
 
 // PacAuthInspector detects PipelineRuns that can never start because PaC's git Secret disappeared.
@@ -81,6 +98,8 @@ func (i PacAuthInspector) Missing(ctx context.Context, namespace string, pipelin
 				Component:   pipelineRun.GetLabels()["appstudio.openshift.io/component"],
 				Secret:      secret,
 				Pending:     pending,
+				Created:     pipelineRun.GetAnnotations()[PacSecretCreatedAnnotation] == "true",
+				Reconciled:  slices.Contains(pipelineRun.GetFinalizers(), PacFinalizer),
 			}, nil
 		case err != nil:
 			return nil, fmt.Errorf("inspect PaC git authentication Secret %q for PipelineRun %s/%s: %w", secret, namespace, pipelineRun.GetName(), err)

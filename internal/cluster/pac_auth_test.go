@@ -34,6 +34,18 @@ func pacAuthSecret(name string) *corev1.Secret {
 	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "tenant"}}
 }
 
+// pacAuthCreated marks the PipelineRun as created by a PaC watcher that reconciled it.
+func pacAuthCreated(object unstructured.Unstructured) unstructured.Unstructured {
+	annotations := object.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[cluster.PacSecretCreatedAnnotation] = "true"
+	object.SetAnnotations(annotations)
+	object.SetFinalizers([]string{cluster.PacFinalizer})
+	return object
+}
+
 // forbiddenSecretGet makes every Secret Get fail with Forbidden.
 func forbiddenSecretGet(client *kubernetesfake.Clientset) {
 	client.PrependReactor("get", "secrets", func(kubetesting.Action) (bool, runtime.Object, error) {
@@ -48,10 +60,10 @@ var _ = Describe("PacAuthInspector", func() {
 		now = time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	})
 
-	When("an annotated PipelineRun is pending past its grace period without its Secret", func() {
-		It("should return a typed error naming the run, component, Secret, and pending time", func() {
+	When("a PipelineRun PaC created is pending past its grace period without its Secret", func() {
+		It("should return a typed error reporting the Secret was deleted and naming a concurrent run", func() {
 			inspector := cluster.PacAuthInspector{Kubernetes: kubernetesfake.NewSimpleClientset(), Now: func() time.Time { return now }}
-			pending := pacAuthPipelineRun("run-build", "mathwizz-web-server", "Unknown", "git-auth-secret", now.Add(-5*time.Minute))
+			pending := pacAuthCreated(pacAuthPipelineRun("run-build", "mathwizz-web-server", "Unknown", "git-auth-secret", now.Add(-5*time.Minute)))
 
 			missing, err := inspector.Missing(context.Background(), "tenant", []unstructured.Unstructured{pending})
 			Expect(err).ShouldNot(HaveOccurred())
@@ -61,12 +73,52 @@ var _ = Describe("PacAuthInspector", func() {
 			Expect(missing.Component).Should(Equal("mathwizz-web-server"))
 			Expect(missing.Secret).Should(Equal("git-auth-secret"))
 			Expect(missing.Pending).Should(BeNumerically("~", 5*time.Minute, time.Second))
+			Expect(missing.Created).Should(BeTrue())
+			Expect(missing.Reconciled).Should(BeTrue())
 			Expect(missing.Error()).Should(ContainSubstring("run-build"))
 			Expect(missing.Error()).Should(ContainSubstring("mathwizz-web-server"))
 			Expect(missing.Error()).Should(ContainSubstring("git-auth-secret"))
 			Expect(missing.Error()).Should(ContainSubstring("5m0s"))
-			Expect(missing.Error()).Should(ContainSubstring("deletes that Secret with its PipelineRun"))
+			Expect(missing.Error()).Should(ContainSubstring("deleted after PaC created it"))
 			Expect(missing.Error()).Should(ContainSubstring("concurrent"))
+		})
+	})
+
+	When("PaC never reconciled the PipelineRun", func() {
+		It("should report a Secret that was never created and name the missing finalizer", func() {
+			inspector := cluster.PacAuthInspector{Kubernetes: kubernetesfake.NewSimpleClientset(), Now: func() time.Time { return now }}
+			pending := pacAuthPipelineRun("run-build", "mathwizz-web-server", "Unknown", "git-auth-secret", now.Add(-5*time.Minute))
+
+			missing, err := inspector.Missing(context.Background(), "tenant", []unstructured.Unstructured{pending})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(missing).ShouldNot(BeNil())
+			Expect(missing.Created).Should(BeFalse())
+			Expect(missing.Reconciled).Should(BeFalse())
+			Expect(missing.Error()).Should(ContainSubstring("was never created"))
+			Expect(missing.Error()).Should(ContainSubstring("did not reconcile"))
+			Expect(missing.Error()).Should(ContainSubstring(cluster.PacFinalizer))
+			Expect(missing.Error()).ShouldNot(ContainSubstring("concurrent"))
+		})
+	})
+
+	When("PaC reconciled the PipelineRun but has not created the Secret", func() {
+		It("should report that Secret creation has not finished", func() {
+			inspector := cluster.PacAuthInspector{Kubernetes: kubernetesfake.NewSimpleClientset(), Now: func() time.Time { return now }}
+			pending := pacAuthPipelineRun("run-build", "mathwizz-web-server", "Unknown", "git-auth-secret", now.Add(-5*time.Minute))
+			pending.SetAnnotations(map[string]string{
+				cluster.PacGitAuthSecretAnnotation: "git-auth-secret",
+				cluster.PacSecretCreatedAnnotation: "false",
+			})
+			pending.SetFinalizers([]string{cluster.PacFinalizer})
+
+			missing, err := inspector.Missing(context.Background(), "tenant", []unstructured.Unstructured{pending})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(missing).ShouldNot(BeNil())
+			Expect(missing.Created).Should(BeFalse())
+			Expect(missing.Reconciled).Should(BeTrue())
+			Expect(missing.Error()).Should(ContainSubstring("was not created"))
+			Expect(missing.Error()).Should(ContainSubstring("has not finished creating"))
+			Expect(missing.Error()).ShouldNot(ContainSubstring("concurrent"))
 		})
 	})
 
