@@ -120,15 +120,23 @@ func NewFromCredentials(token, apiURL string) (*Adapter, error) {
 }
 
 // RevokeToken revokes the run-scoped personal access token. OAuth tokens return
-// 404 because only personal access tokens can revoke themselves.
+// 404 or 400 because only personal access tokens can revoke themselves.
 func (a *Adapter) RevokeToken(ctx context.Context) error {
 	if a == nil || a.client == nil {
 		return fmt.Errorf("gitlab client is required")
 	}
 	err := a.client.RevokeToken(ctx)
 	var response *gl.ErrorResponse
-	if errors.As(err, &response) && response.Response != nil && response.Response.StatusCode == http.StatusNotFound {
-		return nil
+	if errors.As(err, &response) && response.Response != nil {
+		switch response.Response.StatusCode {
+		case http.StatusNotFound:
+			return nil
+		case http.StatusBadRequest:
+			message := strings.ToLower(response.Message + " " + string(response.Body))
+			if strings.Contains(message, "requires token type to be a personal access token") {
+				return nil
+			}
+		}
 	}
 	return err
 }

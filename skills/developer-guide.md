@@ -74,7 +74,7 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 **`internal/auth/`** — Provider credential acquisition
 - Creates one run-scoped `lkmabt-auth-*` directory with 0700 credentials written as 0600 files
 - GitHub: runs `gh auth login --web` with an isolated `GH_CONFIG_DIR` and `--insecure-storage`
-- GitLab: runs `glab auth login` (choose Web) with an isolated `GLAB_CONFIG_DIR`, keeps that directory for OAuth refresh, and deletes the ephemeral SCM Secret during finalization
+- GitLab: runs `glab auth login` (choose Token and paste a PAT with `api` and `write_repository`) with an isolated `GLAB_CONFIG_DIR`, keeps that directory for token re-reads, and deletes the ephemeral SCM Secret during finalization
 - `RunClusters` deletes the directory after the last cluster; non-interactive runs must provide the provider tokens
 
 **`internal/report/`** — Aggregate reports
@@ -258,15 +258,17 @@ skips it and preflight keeps the warning path. The acquisition check does not
 require the fixture in every installation because the cluster app slug is
 unknown there; a listing that remains unverifiable after the browser login still
 only produces the preflight warning. When `GITLAB_BOT_TOKEN` is empty, GitLab runs
-`glab auth login` (choose Web) with a private `GLAB_CONFIG_DIR`, then reads the
-token with `glab config get token --host`; the glab directory stays in the
-store so `glab api user` can refresh the OAuth token before each cluster. Each
+`glab auth login` (choose Token and paste a PAT with `api` and `write_repository`)
+with a private `GLAB_CONFIG_DIR`, then reads the token with
+`glab config get token --host`; the glab directory stays in the store so
+`glab api user` can validate the stored token before each cluster. An OAuth
+token is rejected at acquisition because PaC cannot use it. Each
 acquired token is kept in a 0600 file inside one run-scoped `lkmabt-auth-*`
 temporary directory and reused for every cluster. The ephemeral GitLab token is
 also written to the tenant SCM Secret for PaC, and finalization deletes that
 Secret and revokes the run-acquired token with
-`DELETE /personal_access_tokens/self`. An OAuth token answers 404 and is left
-to expire; a configured `GITLAB_BOT_TOKEN` is never revoked.
+`DELETE /personal_access_tokens/self`. An OAuth token answers 404 or 400 and is
+left to expire; a configured `GITLAB_BOT_TOKEN` is never revoked.
 
 The directory is removed when the run ends, including after failures and
 cancellations, and a removal failure fails the run. Authentication requires an

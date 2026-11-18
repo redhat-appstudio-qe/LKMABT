@@ -114,7 +114,8 @@ resources.
 9. Provider credentials come from `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` when
    set. Leave either empty to authenticate at run time: GitHub uses
    `gh auth login` (browser; requests `repo`, `read:org`, and `read:user`) and
-   GitLab uses `glab auth login` (choose **Web** in its sign-in menu). Both
+   GitLab uses `glab auth login` (choose **Token** and paste a personal access token
+   with `api` and `write_repository`; PaC rejects the Web/OAuth token). Both
    `gh` and `glab` must be on `PATH` when the corresponding token is empty. A
    run-acquired GitLab token is revoked during finalization, including after a
    failed run; a configured `GITLAB_BOT_TOKEN` is never revoked. A
@@ -196,7 +197,8 @@ the current holder. Use another `--tenant-namespace` or wait for that run.
 Copy `.lkmabt.env.example` to `.lkmabt.env`. Keep the copy local.
 `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` are optional. Leave either empty to
 authenticate at run time: GitHub opens the `gh` browser flow; GitLab opens the
-`glab` login prompt (choose **Web**). A configured `GITHUB_TOKEN` is validated
+`glab` login prompt (choose **Token** and paste a personal access token with
+`api` and `write_repository`; PaC rejects the Web/OAuth token). A configured `GITHUB_TOKEN` is validated
 for App-installation listing and fixture push access; when it fails for
 credential reasons, an interactive run reuses the existing `gh` login if that
 login passes the same checks, then falls back to the `gh` browser flow.

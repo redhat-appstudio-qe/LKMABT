@@ -18,12 +18,13 @@ const (
 	glabConfigSubdir    = "glab"
 )
 
-// GitLabToken runs the glab web login in an isolated configuration directory and
-// stores the resulting token in store. The glab directory stays in the store so
-// OAuth refreshes remain available until Store.Destroy.
+// GitLabToken runs the glab login in an isolated configuration directory and
+// stores the resulting personal access token in store. OAuth tokens are rejected
+// because PaC cannot use them. The glab directory stays in the store until
+// Store.Destroy.
 func GitLabToken(ctx context.Context, runner clusterauth.CommandRunner, store *Store, interactive bool, apiURL string) (string, error) {
 	if !interactive {
-		return "", fmt.Errorf("GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to use the glab browser login")
+		return "", fmt.Errorf("GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to use the glab login")
 	}
 	if runner == nil {
 		return "", fmt.Errorf("command runner is required")
@@ -44,10 +45,17 @@ func GitLabToken(ctx context.Context, runner clusterauth.CommandRunner, store *S
 	if err := runner.Run(ctx, login); err != nil {
 		return "", fmt.Errorf("authenticate to GitLab: %w", err)
 	}
-	return readGitLabToken(ctx, runner, spec, host, store)
+	token, err := readGitLabToken(ctx, runner, spec, host, store)
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(token, "glpat-") {
+		return "", fmt.Errorf("glab returned an OAuth token, which PaC cannot use; run glab auth login again and choose Token to paste a personal access token with api and write_repository, or set GITLAB_BOT_TOKEN")
+	}
+	return token, nil
 }
 
-// RefreshGitLabToken refreshes an OAuth token and stores the current value in store.
+// RefreshGitLabToken validates the stored credential and stores the current token value.
 func RefreshGitLabToken(ctx context.Context, runner clusterauth.CommandRunner, store *Store, apiURL string) (string, error) {
 	if runner == nil {
 		return "", fmt.Errorf("command runner is required")

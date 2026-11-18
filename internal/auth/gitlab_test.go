@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -17,7 +18,7 @@ var _ = Describe("GitLabToken", func() {
 		tempRoot string
 	)
 	BeforeEach(func() {
-		runner = &fakeRunner{stdout: "glpat_token\n"}
+		runner = &fakeRunner{stdout: "glpat-test-token\n"}
 		tempRoot = GinkgoT().TempDir()
 		GinkgoT().Setenv("TMPDIR", tempRoot)
 		var err error
@@ -30,7 +31,7 @@ var _ = Describe("GitLabToken", func() {
 		It("should return the token and keep the isolatable login state", func() {
 			token, err := GitLabToken(context.Background(), runner, store, true, "")
 			Expect(err).ShouldNot(HaveOccurred())
-			Expect(token).Should(Equal("glpat_token"))
+			Expect(token).Should(Equal("glpat-test-token"))
 			Expect(runner.runSpecs).Should(HaveLen(1))
 			Expect(runner.runSpecs[0].Name).Should(Equal("glab"))
 			Expect(runner.runSpecs[0].Args).Should(Equal([]string{"auth", "login", "--hostname", "gitlab.com", "--use-keyring=false"}))
@@ -48,11 +49,21 @@ var _ = Describe("GitLabToken", func() {
 			Expect(info.Mode().Perm() & 0o077).Should(BeZero())
 			content, readErr := os.ReadFile(tokenPath)
 			Expect(readErr).ShouldNot(HaveOccurred())
-			Expect(string(content)).Should(Equal("glpat_token"))
+			Expect(string(content)).Should(Equal("glpat-test-token"))
 			Expect(filepath.Join(store.Directory(), glabConfigSubdir)).Should(BeADirectory())
 
 			Expect(store.Destroy()).Should(Succeed())
 			Expect(os.ReadDir(tempRoot)).Should(BeEmpty())
+		})
+	})
+
+	When("glab returns an OAuth token", func() {
+		It("should reject it and require a personal access token", func() {
+			runner.stdout = strings.Repeat("a", 64) + "\n"
+
+			_, err := GitLabToken(context.Background(), runner, store, true, "")
+
+			Expect(err).Should(MatchError(ContainSubstring("personal access token")))
 		})
 	})
 
@@ -139,7 +150,7 @@ var _ = Describe("RefreshGitLabToken", func() {
 		tempRoot string
 	)
 	BeforeEach(func() {
-		runner = &fakeRunner{stdout: "glpat_initial\n"}
+		runner = &fakeRunner{stdout: "glpat-initial\n"}
 		tempRoot = GinkgoT().TempDir()
 		GinkgoT().Setenv("TMPDIR", tempRoot)
 		var err error
@@ -148,21 +159,21 @@ var _ = Describe("RefreshGitLabToken", func() {
 		DeferCleanup(func() { _ = store.Destroy() })
 		_, err = GitLabToken(context.Background(), runner, store, true, "")
 		Expect(err).ShouldNot(HaveOccurred())
-		runner.stdout = "glpat_refreshed\n"
+		runner.stdout = "glpat-refreshed\n"
 	})
 
 	When("the stored login can refresh", func() {
 		It("should trigger an API call and return the new token", func() {
 			token, err := RefreshGitLabToken(context.Background(), runner, store, "")
 			Expect(err).ShouldNot(HaveOccurred())
-			Expect(token).Should(Equal("glpat_refreshed"))
+			Expect(token).Should(Equal("glpat-refreshed"))
 			Expect(runner.stdoutSpecs).Should(HaveLen(3))
 			Expect(runner.stdoutSpecs[1].Args).Should(Equal([]string{"api", "user"}))
 			Expect(runner.stdoutSpecs[2].Args).Should(Equal([]string{"config", "get", "token", "--host", "gitlab.com"}))
 
 			content, readErr := os.ReadFile(filepath.Join(store.Directory(), gitlabTokenFilename))
 			Expect(readErr).ShouldNot(HaveOccurred())
-			Expect(string(content)).Should(Equal("glpat_refreshed"))
+			Expect(string(content)).Should(Equal("glpat-refreshed"))
 		})
 	})
 
