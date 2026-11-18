@@ -44,10 +44,10 @@ func (s *Step) Update(detail string) {
 	if s.done {
 		return
 	}
-	s.detail = detail
+	s.detail = normalizeDetail(detail)
 	full := s.description
-	if detail != "" {
-		full += " · " + detail
+	if s.detail != "" {
+		full += " · " + s.detail
 	}
 	if !c.animate {
 		line := s.plainDetail()
@@ -62,6 +62,10 @@ func (s *Step) Update(detail string) {
 		return
 	}
 	if limit := c.renderWidth(); limit > 0 && displayWidth(full) > limit {
+		if c.promptActive {
+			fmt.Fprintln(&c.pending, full)
+			return
+		}
 		c.writePermanentLocked(1, func() {
 			fmt.Fprintln(c.Out, full)
 		})
@@ -70,6 +74,11 @@ func (s *Step) Update(detail string) {
 	if c.spinning && !c.promptActive && !c.suspended {
 		c.drawLiveLocked()
 	}
+}
+
+// normalizeDetail collapses API-provided heartbeat text to one terminal line.
+func normalizeDetail(detail string) string {
+	return strings.Join(strings.Fields(detail), " ")
 }
 
 // End completes the step and replaces its live line with a result marker. It is

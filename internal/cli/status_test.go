@@ -135,12 +135,48 @@ var _ = Describe("Console steps", func() {
 			console := &Console{Out: out, animate: true, width: 50, frameInterval: time.Hour}
 
 			step := console.StartStep("Verify builds (github) 🏗️")
-			detail := strings.Repeat("web: buildah 0/2; ", 8)
+			detail := strings.TrimSpace(strings.Repeat("web: buildah 0/2; ", 8))
 			step.Update(detail)
 
 			text := out.String()
 			Expect(text).Should(ContainSubstring(detail))
 			Expect(text).Should(ContainSubstring("…"))
+			step.End(true)
+		})
+
+		It("should keep newline-bearing detail on one live row", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, animate: true, frameInterval: time.Hour}
+
+			step := console.StartStep("Preflight cluster (github) 🔍")
+			step.Update("last check failed\nretrying")
+
+			text := out.String()
+			Expect(text).Should(ContainSubstring("last check failed retrying"))
+			Expect(text).ShouldNot(ContainSubstring("last check failed\nretrying"))
+			step.End(true)
+		})
+
+		It("should buffer an overlong heartbeat while a prompt is open", func() {
+			prompt := &countingPrompt{approved: true, entered: make(chan struct{}), release: make(chan struct{})}
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, Prompt: prompt, animate: true, width: 40, frameInterval: time.Hour}
+			step := console.StartStep("Verify builds (github) 🏗️")
+
+			confirmDone := make(chan struct{})
+			go func() {
+				defer close(confirmDone)
+				_, _ = console.Confirm(context.Background(), "delete tenant")
+			}()
+			<-prompt.entered
+
+			detail := strings.TrimSpace(strings.Repeat("web: buildah 0/2; ", 6))
+			step.Update(detail)
+			Expect(out.String()).ShouldNot(ContainSubstring(detail))
+
+			close(prompt.release)
+			Eventually(confirmDone).Should(BeClosed())
+			Expect(out.String()).Should(ContainSubstring(detail))
 			step.End(true)
 		})
 
