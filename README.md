@@ -92,7 +92,9 @@ resources.
    `Namespace`. Because a ProjectRequest does not copy labels, the run identity
    also needs cluster-scoped `update` on `namespaces` to mark the new project
    for cleanup; without it, setup fails and names the namespace to delete
-   manually. After the namespace exists, setup asks the API with a
+   manually. The namespace is labeled only when its UID matches the project
+   returned by the request; a namespace created by another actor is never
+   adopted. After the namespace exists, setup asks the API with a
    `SelfSubjectAccessReview` for `get`, `create`, and `update` on Secrets there,
    plus `delete` when the GitLab token is ephemeral (acquired at run time).
    Missing permissions fail fixture setup before the Secret is written, with

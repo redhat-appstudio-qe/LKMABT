@@ -1228,6 +1228,28 @@ var _ = Describe("LiveStage", func() {
 				Expect(missing.Pending).Should(BeNumerically(">", cluster.PacAuthSecretGracePeriod))
 			})
 
+			It("should report a matched failed PipelineRun before a missing Secret", func() {
+				failed := pipelineRun("run-failed", "mathwizz-web-server", "sha-1", "uid-failed", "False")
+				pending := annotatedPipelineRun("run-pending", "mathwizz-history-worker", "sha-2", "uid-pending", "Unknown", "git-auth-secret", time.Now().Add(-5*time.Minute))
+				stage := &LiveStage{
+					Request: config.Request{Timeouts: config.Timeouts{Trigger: time.Second, Build: time.Second}},
+					Clients: &cluster.ClientSet{Dynamic: namespaceDynamicClient(&failed, &pending), Kubernetes: kubernetesfake.NewSimpleClientset()},
+					Out:     &bytes.Buffer{},
+				}
+				manifest := &model.RunManifest{Fixture: model.FixtureIdentity{TenantNamespace: "mathwizz-test"}, TriggerCommits: []model.TriggerCommit{
+					{Component: "mathwizz-web-server", SHA: "sha-1"},
+					{Component: "mathwizz-history-worker", SHA: "sha-2"},
+				}}
+
+				err := stage.VerifyBuilds(context.Background(), manifest)
+
+				var failure *PipelineRunFailedError
+				Expect(errors.As(err, &failure)).Should(BeTrue())
+				Expect(failure.Name).Should(Equal("run-failed"))
+				var missing *cluster.MissingPacAuthSecretError
+				Expect(errors.As(err, &missing)).Should(BeFalse())
+			})
+
 			It("should succeed when the annotated Secret exists", func() {
 				pipeline := annotatedPipelineRun("run-build", "mathwizz-web-server", "sha-1", "uid-build", "Unknown", "git-auth-secret", time.Now().Add(-5*time.Minute))
 				build := buildTaskRunForWorkflow("build-task", "uid-build", "True", "buildah-oci-ta")

@@ -361,6 +361,7 @@ var _ = Describe("DeletionBlocker", func() {
 		Expect(unstructured.SetNestedSlice(object.Object, []any{
 			map[string]any{"type": "NamespaceContentRemaining", "status": "True", "message": "Some resources are remaining: pipelineruns.tekton.dev has 3 resource instances"},
 			map[string]any{"type": "NamespaceFinalizersRemaining", "status": "True", "message": "Some content in the namespace has finalizers remaining: chains.tekton.dev/pipelinerun in 3 resource instances"},
+			map[string]any{"type": "NamespaceContentRemaining", "status": "False", "message": "already resolved"},
 			map[string]any{"type": "NamespaceDeletionDiscoveryFailure", "status": "False", "message": "ignored"},
 		}, "status", "conditions")).Should(Succeed())
 		service := NamespaceService{Dynamic: cleanupClient(object)}
@@ -369,6 +370,7 @@ var _ = Describe("DeletionBlocker", func() {
 
 		Expect(blocker).Should(ContainSubstring("pipelineruns.tekton.dev has 3 resource instances"))
 		Expect(blocker).Should(ContainSubstring("chains.tekton.dev/pipelinerun in 3 resource instances"))
+		Expect(blocker).ShouldNot(ContainSubstring("already resolved"))
 		Expect(blocker).ShouldNot(ContainSubstring("ignored"))
 	})
 

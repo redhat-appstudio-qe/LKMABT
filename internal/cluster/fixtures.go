@@ -153,8 +153,8 @@ func (s FixtureService) ensureNamespace(ctx context.Context, namespaces dynamic.
 	} else if !errors.IsNotFound(err) {
 		return fmt.Errorf("get namespace: %w", err)
 	}
-	if err := s.createProject(ctx, namespaces, namespace); err == nil {
-		return s.labelNamespace(ctx, namespaces, namespace, runID)
+	if uid, err := s.createProject(ctx, namespaces, namespace); err == nil {
+		return s.labelNamespace(ctx, namespaces, namespace, runID, uid)
 	} else if !errors.IsNotFound(err) && !errors.IsForbidden(err) && !meta.IsNoMatchError(err) {
 		return err
 	}
@@ -166,16 +166,25 @@ func (s FixtureService) ensureNamespace(ctx context.Context, namespaces dynamic.
 	return nil
 }
 
-// createProject requests a namespace from the OpenShift project controller and
-// waits for it to appear. The controller deletes the ProjectRequest afterward.
-func (s FixtureService) createProject(ctx context.Context, namespaces dynamic.ResourceInterface, namespace string) error {
+// createProject requests a namespace from the OpenShift project controller,
+// waits for it to appear, and returns the created project's UID so fixture
+// setup can reject a namespace another actor created in the same window.
+func (s FixtureService) createProject(ctx context.Context, namespaces dynamic.ResourceInterface, namespace string) (string, error) {
 	request := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "project.openshift.io/v1", "kind": "ProjectRequest", "metadata": map[string]any{"name": namespace},
 	}}
-	if _, err := s.Dynamic.Resource(ProjectRequestGVR).Create(ctx, request, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
-		return fmt.Errorf("create project request %s: %w", namespace, err)
+	created, err := s.Dynamic.Resource(ProjectRequestGVR).Create(ctx, request, metav1.CreateOptions{})
+	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("project request %s already exists; refusing to adopt a namespace this run did not request", namespace)
+		}
+		return "", fmt.Errorf("create project request %s: %w", namespace, err)
 	}
-	err := wait.PollUntilContextTimeout(ctx, projectCreationInterval, projectCreationTimeout, true, func(ctx context.Context) (bool, error) {
+	uid := string(created.GetUID())
+	if uid == "" {
+		return "", fmt.Errorf("project request %s returned no UID; refusing to label a namespace this run cannot verify", namespace)
+	}
+	err = wait.PollUntilContextTimeout(ctx, projectCreationInterval, projectCreationTimeout, true, func(ctx context.Context) (bool, error) {
 		_, err := namespaces.Get(ctx, namespace, metav1.GetOptions{})
 		if err == nil {
 			return true, nil
@@ -186,18 +195,35 @@ func (s FixtureService) createProject(ctx context.Context, namespaces dynamic.Re
 		return false, err
 	})
 	if err != nil {
-		return fmt.Errorf("wait for project %s: %w", namespace, err)
+		return "", fmt.Errorf("wait for project %s: %w", namespace, err)
 	}
-	return nil
+	return uid, nil
+}
+
+// namespaceOwnershipError reports a namespace that appeared without the UID
+// returned by this run's ProjectRequest.
+type namespaceOwnershipError struct {
+	Namespace string
+	Actual    string
+	Expected  string
+}
+
+// Error names the mismatched UIDs and refuses to take ownership.
+func (e *namespaceOwnershipError) Error() string {
+	return fmt.Sprintf("namespace %s has UID %q, not the requested project UID %q; refusing to label a namespace this run did not create", e.Namespace, e.Actual, e.Expected)
 }
 
 // labelNamespace applies the harness ownership labels that a ProjectRequest
-// does not guarantee the project controller copies.
-func (s FixtureService) labelNamespace(ctx context.Context, namespaces dynamic.ResourceInterface, namespace, runID string) error {
+// does not guarantee the project controller copies. It only labels a namespace
+// whose UID matches the project this run requested.
+func (s FixtureService) labelNamespace(ctx context.Context, namespaces dynamic.ResourceInterface, namespace, runID, expectedUID string) error {
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		object, err := namespaces.Get(ctx, namespace, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("get requested namespace: %w", err)
+		}
+		if actual := string(object.GetUID()); actual != expectedUID {
+			return &namespaceOwnershipError{Namespace: namespace, Actual: actual, Expected: expectedUID}
 		}
 		labels := object.GetLabels()
 		if labels == nil {
@@ -211,6 +237,9 @@ func (s FixtureService) labelNamespace(ctx context.Context, namespaces dynamic.R
 		return err
 	})
 	if err != nil {
+		if _, ok := err.(*namespaceOwnershipError); ok {
+			return err
+		}
 		return fmt.Errorf("label requested namespace %s: %w (a ProjectRequest does not copy ownership labels, so the run identity needs cluster-scoped update on namespaces to mark it for cleanup; grant that permission or delete namespace %s manually)", namespace, err, namespace)
 	}
 	return nil

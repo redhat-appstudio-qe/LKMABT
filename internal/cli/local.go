@@ -283,7 +283,9 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 	defer cancel()
 	if l.RevokeGitLabToken != nil {
 		defer func() {
-			if revokeErr := l.RevokeGitLabToken(cleanupCtx); revokeErr != nil {
+			revokeCtx, revokeCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+			defer revokeCancel()
+			if revokeErr := l.RevokeGitLabToken(revokeCtx); revokeErr != nil {
 				err = errors.Join(err, fmt.Errorf("revoke GitLab token: %w", revokeErr))
 			}
 		}()

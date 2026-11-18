@@ -274,6 +274,9 @@ func (s NamespaceService) DeletionBlocker(ctx context.Context, name string) stri
 		if conditionType != "NamespaceContentRemaining" && conditionType != "NamespaceFinalizersRemaining" {
 			continue
 		}
+		if status, _ := condition["status"].(string); status != "True" {
+			continue
+		}
 		if message, _ := condition["message"].(string); strings.TrimSpace(message) != "" {
 			blockers = append(blockers, strings.TrimSpace(message))
 		}

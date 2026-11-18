@@ -503,6 +503,11 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 		if err != nil {
 			return nil, nil, err
 		}
+		// A matched failed PipelineRun wins over a missing PaC Secret so the
+		// failed-build log collection still runs.
+		if failed := matchedFailedPipelineRun(pipelineRuns.Items, manifest.TriggerCommits); failed != nil {
+			return nil, nil, failed
+		}
 		// Fail fast when PaC already removed the Secret a pending build needs; a
 		// transient read failure only warns, because the build wait still works.
 		missing, inspectErr := inspector.Missing(ctx, namespace, candidatePipelineRunsForCommits(pipelineRuns.Items, manifest.TriggerCommits))
@@ -731,17 +736,26 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 	}
 }
 
+// matchedFailedPipelineRun returns the first matched PipelineRun reporting
+// failure, so callers can fail before other checks hide it.
+func matchedFailedPipelineRun(pipelineRuns []unstructured.Unstructured, commits []model.TriggerCommit) *PipelineRunFailedError {
+	for _, commit := range commits {
+		candidates := matchingPipelineRuns(pipelineRuns, commit)
+		if len(candidates) == 1 && pipelineRunConditionStatus(candidates[0]) == "False" {
+			return &PipelineRunFailedError{Namespace: candidates[0].GetNamespace(), Name: candidates[0].GetName(), Component: commit.Component}
+		}
+	}
+	return nil
+}
+
 // matchBuildTaskRuns matches each commit to one PipelineRun and its successful Buildah TaskRuns.
 func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, commits []model.TriggerCommit) ([]model.PipelineRunIdentity, bool, error) {
 	identities := make([]model.PipelineRunIdentity, 0, len(commits))
 	// Fail on any matched failed PipelineRun before reporting another component as
 	// pending; otherwise a later component's failure can hide behind an earlier
 	// component that never produces a PipelineRun.
-	for _, commit := range commits {
-		candidates := matchingPipelineRuns(pipelineRuns, commit)
-		if len(candidates) == 1 && pipelineRunConditionStatus(candidates[0]) == "False" {
-			return nil, false, &PipelineRunFailedError{Namespace: candidates[0].GetNamespace(), Name: candidates[0].GetName(), Component: commit.Component}
-		}
+	if failed := matchedFailedPipelineRun(pipelineRuns, commits); failed != nil {
+		return nil, false, failed
 	}
 	for _, commit := range commits {
 		candidates := matchingPipelineRuns(pipelineRuns, commit)

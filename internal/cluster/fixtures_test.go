@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic/fake"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	kubetesting "k8s.io/client-go/testing"
@@ -47,12 +48,15 @@ func fixtureTestClient(objects ...runtime.Object) *fake.FakeDynamicClient {
 	}, objects...)
 	client.PrependReactor("create", ProjectRequestGVR.Resource, func(action kubetesting.Action) (bool, runtime.Object, error) {
 		create := action.(kubetesting.CreateAction)
-		request := create.GetObject().(metav1.Object)
+		request := create.GetObject().(*unstructured.Unstructured)
+		uid := types.UID("project-" + request.GetName())
+		request.SetUID(uid)
 		namespace := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": request.GetName()}}}
+		namespace.SetUID(uid)
 		if err := client.Tracker().Create(NamespaceGVR, namespace, ""); err != nil {
 			return true, nil, err
 		}
-		return true, create.GetObject(), nil
+		return true, request, nil
 	})
 	return client
 }
@@ -438,6 +442,28 @@ var _ = Describe("tenant namespace creation", func() {
 		Expect(kubernetes.Actions()).Should(BeEmpty())
 	})
 
+	It("refuses to label a namespace created by another actor", func() {
+		client := fixtureTestClient()
+		client.PrependReactor("create", ProjectRequestGVR.Resource, func(action kubetesting.Action) (bool, runtime.Object, error) {
+			create := action.(kubetesting.CreateAction)
+			request := create.GetObject().(*unstructured.Unstructured)
+			request.SetUID(types.UID("project-request-uid"))
+			foreign := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": request.GetName()}}}
+			foreign.SetUID(types.UID("foreign-uid"))
+			if err := client.Tracker().Create(NamespaceGVR, foreign, ""); err != nil {
+				return true, nil, err
+			}
+			return true, request, nil
+		})
+
+		_, err := fixtureTestService(client).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "token"))
+		Expect(err).Should(MatchError(ContainSubstring("refusing to label a namespace this run did not create")))
+
+		namespace, getErr := client.Resource(NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+		Expect(getErr).ShouldNot(HaveOccurred())
+		Expect(namespace.GetLabels()).ShouldNot(HaveKey(cleanup.ManagedByLabel))
+	})
+
 	It("explains the orphaned namespace when labels cannot be applied", func() {
 		client := fixtureTestClient()
 		client.PrependReactor("update", "namespaces", func(kubetesting.Action) (bool, runtime.Object, error) {
@@ -556,5 +582,24 @@ var _ = Describe("GitLab Secret management", func() {
 			))
 			Expect(secret.GetAnnotations()).Should(HaveKeyWithValue(scmSecretRepositoryAnnotation, "o/r"))
 		})
+	})
+})
+
+var _ = Describe("ProjectRequest ownership verification", func() {
+	It("refuses to label a namespace when the request returns no UID", func() {
+		client := fixtureTestClient()
+		client.PrependReactor("create", ProjectRequestGVR.Resource, func(action kubetesting.Action) (bool, runtime.Object, error) {
+			request := action.(kubetesting.CreateAction).GetObject().(*unstructured.Unstructured)
+			if err := client.Tracker().Create(NamespaceGVR, &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": request.GetName()},
+			}}, ""); err != nil {
+				return true, nil, err
+			}
+			return true, request, nil
+		})
+
+		_, err := fixtureTestService(client).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "token"))
+
+		Expect(err).Should(MatchError(ContainSubstring("returned no UID")))
 	})
 })

@@ -285,7 +285,9 @@ cluster's own namespace RBAC error. A ProjectRequest does not guarantee label
 copying, so setup applies the ownership labels after the controller creates the
 Namespace. That update is cluster-scoped: the run identity needs `update` on
 `namespaces`, and a denial fails setup with an error naming the namespace to
-delete manually.
+delete manually. The namespace is labeled only when its UID matches the project
+returned by the ProjectRequest, so a namespace created by another actor during
+the request is refused rather than adopted.
 
 After the namespace exists, setup runs one `SelfSubjectAccessReview` per verb:
 `get`, `create`, and `update` on `secrets` in the tenant namespace; ephemeral

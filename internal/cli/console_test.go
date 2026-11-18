@@ -141,7 +141,7 @@ var _ = Describe("Console.Confirm", func() {
 	})
 
 	When("one prompt is open", func() {
-		It("should block status lines until the prompt completes", func() {
+		It("should buffer status lines until the prompt completes", func() {
 			prompt := &countingPrompt{approved: true, entered: make(chan struct{}), release: make(chan struct{})}
 			out := &bytes.Buffer{}
 			console := &Console{Out: out, Prompt: prompt}
@@ -158,12 +158,37 @@ var _ = Describe("Console.Confirm", func() {
 				defer close(printDone)
 				console.Printf("cluster c1: started")
 			}()
-			Consistently(printDone, 100*time.Millisecond, time.Millisecond).ShouldNot(BeClosed())
-			close(prompt.release)
+			Eventually(printDone, 100*time.Millisecond).Should(BeClosed())
+			Expect(out.String()).ShouldNot(ContainSubstring("cluster c1: started"))
 
+			close(prompt.release)
 			Eventually(confirmDone).Should(BeClosed())
-			Eventually(printDone).Should(BeClosed())
 			Expect(out.String()).Should(ContainSubstring("cluster c1: started"))
+		})
+
+		It("should buffer direct writes until the prompt completes", func() {
+			prompt := &countingPrompt{approved: true, entered: make(chan struct{}), release: make(chan struct{})}
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, Prompt: prompt}
+
+			confirmDone := make(chan struct{})
+			go func() {
+				defer close(confirmDone)
+				_, _ = console.Confirm(context.Background(), "delete tenant")
+			}()
+			<-prompt.entered
+
+			writeDone := make(chan struct{})
+			go func() {
+				defer close(writeDone)
+				_, _ = console.Write([]byte("provider progress\n"))
+			}()
+			Eventually(writeDone, 100*time.Millisecond).Should(BeClosed())
+			Expect(out.String()).ShouldNot(ContainSubstring("provider progress"))
+
+			close(prompt.release)
+			Eventually(confirmDone).Should(BeClosed())
+			Expect(out.String()).Should(ContainSubstring("provider progress"))
 		})
 	})
 
