@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -218,6 +219,7 @@ func (c *Console) confirm(ctx context.Context, prompt workflow.Confirmation, mes
 			c.startSpinnerLocked()
 		}
 		c.drawLiveLocked()
+	}
 	c.outMu.Unlock()
 	return approved, err
 }
@@ -232,6 +234,31 @@ func (c *Console) writePermanentLocked(lines int, write func()) {
 		return
 	}
 	c.drawLiveLocked()
+	c.clearBelowLocked(erased - lines - len(c.active))
+}
+
+// permanentLines counts the terminal lines a write occupies.
+func permanentLines(p []byte) int {
+	if len(p) == 0 {
+		return 0
+	}
+	lines := bytes.Count(p, []byte{'\n'})
+	if p[len(p)-1] != '\n' {
+		lines++
+	}
+	return lines
+}
+
+// clearBelowLocked clears lines left below the live region after it shrinks and
+// restores the cursor to the end of the visible block. Callers hold outMu.
+func (c *Console) clearBelowLocked(lines int) {
+	if lines <= 0 {
+		return
+	}
+	for range lines {
+		fmt.Fprint(c.Out, "\r\x1b[2K\n")
+	}
+	fmt.Fprintf(c.Out, "\x1b[%dA", lines)
 }
 
 // startSpinnerLocked starts the frame goroutine when animation is available.

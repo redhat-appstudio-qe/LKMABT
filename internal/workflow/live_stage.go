@@ -542,7 +542,7 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 			return nil, nil, err
 		}
 		return pipelineRuns.Items, taskRuns.Items, nil
-	}, s.notice)
+	}, s.progress)
 	if err != nil {
 		var pipelineRunError *PipelineRunFailedError
 		if errors.As(err, &pipelineRunError) && s.FailedBuildCollector != nil && manifest.ArtifactDirectory != "" {
