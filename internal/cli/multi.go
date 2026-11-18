@@ -306,7 +306,7 @@ func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []
 	document := report.Document{RunID: aggregate.RunID, ClustersFile: request.ClustersFile, StartedAt: aggregate.StartedAt, EndedAt: time.Now().UTC(), Passed: allPassed(rows), Rows: rows}
 	writeErr := report.Write(aggregate.Directory, document)
 	for _, row := range rows {
-		console.Printf("%s %s: %s (%s) %s", row.Cluster, row.Provider, row.Result(), row.Stage, row.Error)
+		console.Printf("%s %s: %s (%s)", row.Cluster, row.Provider, row.Result(), row.Stage)
 	}
 	markdownPath, htmlPath := aggregate.reportPaths()
 	console.Printf("report: %s", markdownPath)

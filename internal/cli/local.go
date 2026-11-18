@@ -278,7 +278,7 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 	}
 	var secretErr error
 	if manifest.Fixture.EphemeralGitLabAuth {
-		secretErr = deleteGitLabCredentialSecret(cleanupCtx, l.Namespace.Dynamic, namespace)
+		secretErr = deleteGitLabCredentialSecret(cleanupCtx, l.Namespace.Dynamic, namespace, manifest.RunID)
 	}
 	if runErr != nil {
 		sources := l.Sources
@@ -323,16 +323,29 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 	return errors.Join(secretErr, l.Namespace.WaitDeleted(ctx, namespace))
 }
 
-// deleteGitLabCredentialSecret removes the run-scoped GitLab SCM Secret.
-func deleteGitLabCredentialSecret(ctx context.Context, client dynamic.Interface, namespace string) error {
+// deleteGitLabCredentialSecret removes the run-scoped GitLab SCM Secret after
+// confirming the harness owns it for runID. A missing Secret is already cleaned up.
+func deleteGitLabCredentialSecret(ctx context.Context, client dynamic.Interface, namespace, runID string) error {
 	if client == nil {
 		return fmt.Errorf("dynamic client is required to delete the ephemeral GitLab SCM Secret")
 	}
-	err := client.Resource(cluster.SecretGVR).Namespace(namespace).Delete(ctx, cluster.GitLabCredentialSecretName, metav1.DeleteOptions{})
+	secrets := client.Resource(cluster.SecretGVR).Namespace(namespace)
+	secret, err := secrets.Get(ctx, cluster.GitLabCredentialSecretName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
 	if err != nil {
+		return fmt.Errorf("get ephemeral GitLab SCM Secret: %w", err)
+	}
+	labels := secret.GetLabels()
+	if labels[cleanup.ManagedByLabel] != cleanup.ManagedByValue || labels[cleanup.RunIDLabel] != runID {
+		return fmt.Errorf("refusing to delete GitLab SCM Secret %q in namespace %s: not owned by run %s (%s=%q, %s=%q)", cluster.GitLabCredentialSecretName, namespace, runID, cleanup.ManagedByLabel, labels[cleanup.ManagedByLabel], cleanup.RunIDLabel, labels[cleanup.RunIDLabel])
+	}
+	options := metav1.DeleteOptions{}
+	if uid := secret.GetUID(); uid != "" {
+		options.Preconditions = &metav1.Preconditions{UID: &uid}
+	}
+	if err := secrets.Delete(ctx, cluster.GitLabCredentialSecretName, options); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete ephemeral GitLab SCM Secret: %w", err)
 	}
 	return nil

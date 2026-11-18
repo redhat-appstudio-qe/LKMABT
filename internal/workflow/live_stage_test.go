@@ -62,14 +62,18 @@ func (b *syncBuffer) String() string {
 
 // fakePreflightCluster satisfies cluster.Cluster for Preflight tests.
 type fakePreflightCluster struct {
-	server string
+	server       string
+	accessChecks *[]cluster.AccessCheck
 }
 
 // Server returns the configured API server.
 func (f fakePreflightCluster) Server(context.Context) (string, error) { return f.server, nil }
 
-// CheckAccess passes every access check.
-func (f fakePreflightCluster) CheckAccess(context.Context, []cluster.AccessCheck) []cluster.CheckResult {
+// CheckAccess records the requested checks and passes them.
+func (f fakePreflightCluster) CheckAccess(_ context.Context, checks []cluster.AccessCheck) []cluster.CheckResult {
+	if f.accessChecks != nil {
+		*f.accessChecks = checks
+	}
 	return nil
 }
 
@@ -1373,3 +1377,74 @@ func namespaceDynamicClient(objects ...runtime.Object) *dynamicfake.FakeDynamicC
 		{Group: "tekton.dev", Version: "v1", Resource: "taskruns"}:                          "TaskRunList",
 	}, objects...)
 }
+
+var _ = Describe("LiveStage preflight access checks", func() {
+	// gitLabSecretCheck returns the GitLab Secret access check, or false when absent.
+	gitLabSecretCheck := func(checks []cluster.AccessCheck) (cluster.AccessCheck, bool) {
+		for _, check := range checks {
+			if check.Name == "GitLab SCM Secret" {
+				return check, true
+			}
+		}
+		return cluster.AccessCheck{}, false
+	}
+
+	When("the GitLab token is ephemeral", func() {
+		It("should require get, create, update, and delete on Secrets in the tenant namespace", func() {
+			stage := &LiveStage{Request: config.Request{
+				Provider:        config.ProviderGitLab,
+				TenantNamespace: "mathwizz-test-gitlab",
+				Credentials:     config.Credentials{GitLabTokenEphemeral: true},
+			}}
+
+			check, found := gitLabSecretCheck(stage.accessChecks())
+			Expect(found).Should(BeTrue())
+			Expect(check.Resource).Should(Equal(cluster.SecretGVR))
+			Expect(check.Namespace).Should(Equal("mathwizz-test-gitlab"))
+			Expect(check.Verbs).Should(ConsistOf("get", "create", "update", "delete"))
+			Expect(check.Guidance).Should(ContainSubstring("mathwizz-test-gitlab"))
+			Expect(check.Guidance).Should(ContainSubstring("get, create, update, delete"))
+			Expect(check.Guidance).Should(ContainSubstring("oc adm policy add-role-to-user edit <user> -n mathwizz-test-gitlab"))
+		})
+	})
+
+	When("the GitLab token is long-lived", func() {
+		It("should require get, create, and update without delete", func() {
+			stage := &LiveStage{Request: config.Request{
+				Provider:        config.ProviderGitLab,
+				TenantNamespace: "mathwizz-test-gitlab",
+			}}
+
+			check, found := gitLabSecretCheck(stage.accessChecks())
+			Expect(found).Should(BeTrue())
+			Expect(check.Verbs).Should(ConsistOf("get", "create", "update"))
+			Expect(check.Guidance).ShouldNot(ContainSubstring("delete"))
+		})
+	})
+
+	When("the provider is GitHub", func() {
+		It("should not add a Secrets check", func() {
+			stage := &LiveStage{Request: config.Request{Provider: config.ProviderGitHub, TenantNamespace: "mathwizz-test-github"}}
+
+			_, found := gitLabSecretCheck(stage.accessChecks())
+			Expect(found).Should(BeFalse())
+		})
+	})
+
+	When("preflight runs for GitLab", func() {
+		It("should send the Secrets check to the cluster", func() {
+			var checks []cluster.AccessCheck
+			stage := &LiveStage{
+				Request:          config.Request{Provider: config.ProviderGitLab, ClusterServer: "https://api.example", TenantNamespace: "tenant", Credentials: config.Credentials{GitLabTokenEphemeral: true}},
+				PreflightCluster: fakePreflightCluster{server: "https://api.example", accessChecks: &checks},
+				Namespace:        cleanup.NamespaceService{Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), NameLister: testNameLister{}},
+			}
+
+			Expect(stage.Preflight(context.Background(), &model.RunManifest{})).Should(Succeed())
+			check, found := gitLabSecretCheck(checks)
+			Expect(found).Should(BeTrue())
+			Expect(check.Namespace).Should(Equal("tenant"))
+			Expect(check.Verbs).Should(ConsistOf("get", "create", "update", "delete"))
+		})
+	})
+})

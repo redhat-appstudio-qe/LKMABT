@@ -80,12 +80,7 @@ func NewLiveStage(request config.Request, clients *cluster.ClientSet, provider p
 
 // Preflight validates the cluster, required APIs, platform scheduling, and tenant namespace.
 func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) error {
-	spec := cluster.PreflightSpec{ExpectedServer: s.Request.ClusterServer, AccessChecks: []cluster.AccessCheck{
-		{Name: "pipelineruns", Resource: PipelineRunGVR, Namespace: s.Request.TenantNamespace},
-		{Name: "taskruns", Resource: cluster.TaskRunGVR, Namespace: s.Request.TenantNamespace},
-		{Name: "applications", Resource: cluster.ApplicationGVR, Namespace: s.Request.TenantNamespace},
-		{Name: "components", Resource: cluster.ComponentGVR, Namespace: s.Request.TenantNamespace},
-	}, Scheduling: cluster.SchedulingSpec{
+	spec := cluster.PreflightSpec{ExpectedServer: s.Request.ClusterServer, AccessChecks: s.accessChecks(), Scheduling: cluster.SchedulingSpec{
 		Namespace:  cluster.MultiPlatformControllerNamespace,
 		Deployment: cluster.MultiPlatformControllerDeployment,
 		ConfigMap:  cluster.MultiPlatformControllerConfigMap,
@@ -117,6 +112,31 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 	}
 	manifest.TargetClusterServer = s.Request.ClusterServer
 	return nil
+}
+
+// accessChecks lists the API versions, and GitLab Secret authorization, preflight must verify.
+func (s *LiveStage) accessChecks() []cluster.AccessCheck {
+	checks := []cluster.AccessCheck{
+		{Name: "pipelineruns", Resource: PipelineRunGVR, Namespace: s.Request.TenantNamespace},
+		{Name: "taskruns", Resource: cluster.TaskRunGVR, Namespace: s.Request.TenantNamespace},
+		{Name: "applications", Resource: cluster.ApplicationGVR, Namespace: s.Request.TenantNamespace},
+		{Name: "components", Resource: cluster.ComponentGVR, Namespace: s.Request.TenantNamespace},
+	}
+	if s.Request.Provider != config.ProviderGitLab {
+		return checks
+	}
+	verbs := []string{"get", "create", "update"}
+	if s.Request.Credentials.GitLabTokenEphemeral {
+		verbs = append(verbs, "delete")
+	}
+	namespace := s.Request.TenantNamespace
+	return append(checks, cluster.AccessCheck{
+		Name:      "GitLab SCM Secret",
+		Resource:  cluster.SecretGVR,
+		Namespace: namespace,
+		Verbs:     verbs,
+		Guidance:  fmt.Sprintf("GitLab runs require %s on Secrets in namespace %s; ask a namespace administrator to grant them, for example: oc adm policy add-role-to-user edit <user> -n %s", strings.Join(verbs, ", "), namespace, namespace),
+	})
 }
 
 // githubAppVerification reports the context remaining valid for preflight and

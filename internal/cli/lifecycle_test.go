@@ -112,7 +112,7 @@ var _ = Describe("Lifecycle", func() {
 
 	It("deletes the ephemeral GitLab SCM Secret before the namespace prompt", func() {
 		stateDir := GinkgoT().TempDir()
-		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), gitLabSecretObject("tenant"))
+		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), gitLabSecretObject("tenant", "run-1"))
 		prompt := &fakePrompt{approved: false}
 		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseCompleted, Fixture: model.FixtureIdentity{TenantNamespace: "tenant", EphemeralGitLabAuth: true}}
 		store := evidence.NewManifestStore(stateDir)
@@ -127,7 +127,7 @@ var _ = Describe("Lifecycle", func() {
 
 	It("deletes the ephemeral GitLab SCM Secret when the run context is canceled", func() {
 		stateDir := GinkgoT().TempDir()
-		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), gitLabSecretObject("tenant"))
+		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), gitLabSecretObject("tenant", "run-1"))
 		prompt := &fakePrompt{approved: false}
 		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseFailed, Fixture: model.FixtureIdentity{TenantNamespace: "tenant", EphemeralGitLabAuth: true}}
 		store := evidence.NewManifestStore(stateDir)
@@ -143,7 +143,7 @@ var _ = Describe("Lifecycle", func() {
 
 	It("keeps failure evidence when the ephemeral GitLab SCM Secret cannot be deleted", func() {
 		stateDir := GinkgoT().TempDir()
-		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), gitLabSecretObject("tenant"))
+		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), gitLabSecretObject("tenant", "run-1"))
 		client.PrependReactor("delete", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
 			return true, nil, errors.New("delete denied")
 		})
@@ -161,9 +161,73 @@ var _ = Describe("Lifecycle", func() {
 		Expect(loaded.FailureArtifacts).ShouldNot(BeNil())
 	})
 
+	It("accepts a missing ephemeral GitLab SCM Secret", func() {
+		stateDir := GinkgoT().TempDir()
+		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"))
+		prompt := &fakePrompt{approved: false}
+		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseCompleted, Fixture: model.FixtureIdentity{TenantNamespace: "tenant", EphemeralGitLabAuth: true}}
+		store := evidence.NewManifestStore(stateDir)
+		Expect(store.Create(&manifest)).Should(Succeed())
+		lifecycle := Lifecycle{Store: store, Namespace: cleanup.NamespaceService{Dynamic: client}, Collector: collector.Collector{StateDir: stateDir}, Prompt: prompt, Sources: lifecycleTestSources()}
+
+		Expect(lifecycle.Finalize(context.Background(), manifest, nil)).Should(Succeed())
+	})
+
+	It("refuses to delete a GitLab SCM Secret owned by another run", func() {
+		stateDir := GinkgoT().TempDir()
+		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), gitLabSecretObject("tenant", "run-2"))
+		prompt := &fakePrompt{approved: false}
+		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseCompleted, Fixture: model.FixtureIdentity{TenantNamespace: "tenant", EphemeralGitLabAuth: true}}
+		store := evidence.NewManifestStore(stateDir)
+		Expect(store.Create(&manifest)).Should(Succeed())
+		lifecycle := Lifecycle{Store: store, Namespace: cleanup.NamespaceService{Dynamic: client}, Collector: collector.Collector{StateDir: stateDir}, Prompt: prompt, Sources: lifecycleTestSources()}
+
+		err := lifecycle.Finalize(context.Background(), manifest, nil)
+		Expect(err).Should(MatchError(ContainSubstring("refusing to delete GitLab SCM Secret")))
+		Expect(err.Error()).Should(ContainSubstring("run-2"))
+		_, getErr := client.Resource(cluster.SecretGVR).Namespace("tenant").Get(context.Background(), cluster.GitLabCredentialSecretName, metav1.GetOptions{})
+		Expect(getErr).ShouldNot(HaveOccurred())
+	})
+
+	It("refuses to delete an unlabeled GitLab SCM Secret", func() {
+		stateDir := GinkgoT().TempDir()
+		foreign := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]any{"name": cluster.GitLabCredentialSecretName, "namespace": "tenant"}}}
+		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), foreign)
+		prompt := &fakePrompt{approved: false}
+		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseCompleted, Fixture: model.FixtureIdentity{TenantNamespace: "tenant", EphemeralGitLabAuth: true}}
+		store := evidence.NewManifestStore(stateDir)
+		Expect(store.Create(&manifest)).Should(Succeed())
+		lifecycle := Lifecycle{Store: store, Namespace: cleanup.NamespaceService{Dynamic: client}, Collector: collector.Collector{StateDir: stateDir}, Prompt: prompt, Sources: lifecycleTestSources()}
+
+		err := lifecycle.Finalize(context.Background(), manifest, nil)
+		Expect(err).Should(MatchError(ContainSubstring("refusing to delete GitLab SCM Secret")))
+		_, getErr := client.Resource(cluster.SecretGVR).Namespace("tenant").Get(context.Background(), cluster.GitLabCredentialSecretName, metav1.GetOptions{})
+		Expect(getErr).ShouldNot(HaveOccurred())
+	})
+
+	It("keeps failure evidence when the ephemeral GitLab SCM Secret cannot be read", func() {
+		stateDir := GinkgoT().TempDir()
+		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), gitLabSecretObject("tenant", "run-1"))
+		client.PrependReactor("get", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("get denied")
+		})
+		prompt := &fakePrompt{approved: false}
+		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseFailed, Fixture: model.FixtureIdentity{TenantNamespace: "tenant", EphemeralGitLabAuth: true}}
+		store := evidence.NewManifestStore(stateDir)
+		Expect(store.Create(&manifest)).Should(Succeed())
+		lifecycle := Lifecycle{Store: store, Namespace: cleanup.NamespaceService{Dynamic: client}, Collector: collector.Collector{StateDir: stateDir}, Prompt: prompt, Sources: lifecycleTestSources()}
+
+		err := lifecycle.Finalize(context.Background(), manifest, errors.New("build failed"))
+		Expect(err).Should(MatchError(ContainSubstring("get ephemeral GitLab SCM Secret")))
+		Expect(prompt.calls).Should(Equal(1))
+		loaded, loadErr := store.Load("run-1")
+		Expect(loadErr).ShouldNot(HaveOccurred())
+		Expect(loaded.FailureArtifacts).ShouldNot(BeNil())
+	})
+
 	It("retains the GitLab SCM Secret for a configured token", func() {
 		stateDir := GinkgoT().TempDir()
-		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), gitLabSecretObject("tenant"))
+		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"), gitLabSecretObject("tenant", "run-1"))
 		prompt := &fakePrompt{approved: false}
 		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseCompleted, Fixture: model.FixtureIdentity{TenantNamespace: "tenant"}}
 		store := evidence.NewManifestStore(stateDir)
@@ -213,11 +277,14 @@ func lifecycleTestSources() []collector.Source {
 	return result
 }
 
-// gitLabSecretObject creates the harness-owned GitLab SCM Secret.
-func gitLabSecretObject(namespace string) *unstructured.Unstructured {
+// gitLabSecretObject creates the harness-owned GitLab SCM Secret for a run.
+func gitLabSecretObject(namespace, runID string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1", "kind": "Secret",
-		"metadata": map[string]any{"name": cluster.GitLabCredentialSecretName, "namespace": namespace},
+		"metadata": map[string]any{
+			"name": cluster.GitLabCredentialSecretName, "namespace": namespace,
+			"labels": map[string]any{cleanup.ManagedByLabel: cleanup.ManagedByValue, cleanup.RunIDLabel: runID},
+		},
 	}}
 }
 

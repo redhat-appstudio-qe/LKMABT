@@ -470,6 +470,24 @@ var _ = Describe("finishAggregateRun", func() {
 			Expect(statErr).ShouldNot(HaveOccurred())
 		})
 	})
+	When("a failed row also reports a finalization error", func() {
+		It("should print the row without repeating the error", func() {
+			stateDir := GinkgoT().TempDir()
+			aggregate, err := newAggregateRun(stateDir)
+			Expect(err).ShouldNot(HaveOccurred())
+			request := config.Request{Provider: config.ProviderGitHub}
+			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Err: errors.New("build failed; finalization failed: delete denied")}}}}
+			console := &Console{Out: &bytes.Buffer{}}
+
+			err = finishAggregateRun(aggregate, request, runs, console, nil)
+			Expect(err).Should(MatchError(ContainSubstring("build failed; finalization failed: delete denied")))
+			output := console.Out.(*bytes.Buffer).String()
+			Expect(output).Should(ContainSubstring("c1 github: failed (completed)"))
+			Expect(output).ShouldNot(ContainSubstring("finalization failed"))
+			markdown := readFile(filepath.Join(aggregate.Directory, "report.md"))
+			Expect(markdown).Should(ContainSubstring("finalization failed: delete denied"))
+		})
+	})
 })
 
 var _ = Describe("RunClusters", func() {
