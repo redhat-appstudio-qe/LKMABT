@@ -522,24 +522,12 @@ var _ = Describe("RunClusters", func() {
 
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
 
-			aggregates := []string{}
-			entriesList, err := os.ReadDir(stateDir)
-			Expect(err).ShouldNot(HaveOccurred())
-			for _, entry := range entriesList {
-				if entry.Name() == "latest" || strings.HasPrefix(entry.Name(), ".") {
-					continue
-				}
-				aggregates = append(aggregates, entry.Name())
-			}
-			Expect(aggregates).Should(HaveLen(1))
-			Expect(aggregates[0]).Should(MatchRegexp(`^multi-run-`))
-			aggregateDirectory := filepath.Join(stateDir, aggregates[0])
+			aggregateDirectory := singleAggregateDirectory(stateDir)
 
 			for _, name := range []string{"report.md", "report.html", "run.log", "c1", "c2"} {
 				_, statErr := os.Stat(filepath.Join(aggregateDirectory, name))
 				Expect(statErr).ShouldNot(HaveOccurred())
 			}
-			Expect(os.Readlink(filepath.Join(stateDir, "latest"))).Should(Equal(aggregates[0]))
 			Expect(readFile(filepath.Join(aggregateDirectory, "c1", "run.log"))).Should(ContainSubstring("cluster c1: running both"))
 			Expect(readFile(filepath.Join(aggregateDirectory, "c2", "run.log"))).Should(ContainSubstring("cluster c2: running both"))
 
@@ -1149,17 +1137,7 @@ func runClustersFixture(clusterCount int) (config.Request, *artifactWritingRunne
 	return request, &artifactWritingRunner{}
 }
 
-// singleAggregateDirectory returns the one non-latest directory under stateDir.
+// singleAggregateDirectory returns the real latest aggregate directory under stateDir.
 func singleAggregateDirectory(stateDir string) string {
-	entries, err := os.ReadDir(stateDir)
-	Expect(err).ShouldNot(HaveOccurred())
-	names := []string{}
-	for _, entry := range entries {
-		if entry.Name() == "latest" || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		names = append(names, entry.Name())
-	}
-	Expect(names).Should(HaveLen(1))
-	return filepath.Join(stateDir, names[0])
+	return filepath.Join(stateDir, "latest")
 }

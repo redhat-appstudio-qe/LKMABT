@@ -8,13 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/redhat-appstudio/lkmabt/internal/model"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -22,33 +18,21 @@ const (
 	latestLockRunEnv  = "LKMABT_LATEST_LOCK_RUN"
 )
 
-// TestSetLatestWaitsForCrossProcessLock verifies that concurrent latest updates wait for the file lock.
-func TestSetLatestWaitsForCrossProcessLock(t *testing.T) {
+var latestLockCandidateStartedAt = time.Date(2026, 10, 8, 12, 5, 0, 0, time.UTC)
+
+// TestPrepareLatestFailsWhileCrossProcessLockHeld verifies that a second
+// process is refused instead of writing into a live run's latest directory.
+func TestPrepareLatestFailsWhileCrossProcessLockHeld(t *testing.T) {
 	if root := os.Getenv(latestLockRootEnv); root != "" {
-		fd, err := unix.Open(filepath.Join(root, ".latest.lock"), unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer unix.Close(fd)
-		if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
-			_ = unix.Flock(fd, unix.LOCK_UN)
-			t.Fatal("non-blocking lock unexpectedly acquired while parent holds the lock")
-		} else if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
-			t.Fatalf("non-blocking lock returned %v, want EWOULDBLOCK", err)
-		}
-		if err := os.WriteFile(filepath.Join(root, "child-contended"), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
 		store := NewManifestStore(root)
-		runID := os.Getenv(latestLockRunEnv)
-		manifest, err := store.Load(runID)
-		if err != nil {
-			t.Fatal(err)
+		_, release, err := store.PrepareLatest(os.Getenv(latestLockRunEnv), latestLockCandidateStartedAt)
+		if release != nil {
+			release()
 		}
-		if err := store.SetLatest(manifest); err != nil {
-			t.Fatal(err)
+		if !errors.Is(err, ErrLatestLocked) {
+			t.Fatalf("PrepareLatest error = %v, want ErrLatestLocked", err)
 		}
-		if err := os.WriteFile(filepath.Join(root, "child-complete"), nil, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(root, "child-refused"), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return
@@ -56,120 +40,77 @@ func TestSetLatestWaitsForCrossProcessLock(t *testing.T) {
 
 	root := t.TempDir()
 	store := NewManifestStore(root)
-	baseline := model.RunManifest{RunID: "baseline", ArtifactDirectory: "baseline", CreatedAt: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
-	if err := store.Create(&baseline); err != nil {
-		t.Fatal(err)
-	}
-	candidate := model.RunManifest{RunID: "candidate", ArtifactDirectory: "candidate", CreatedAt: baseline.CreatedAt.Add(time.Minute)}
-	if err := os.MkdirAll(store.RunDirFor(candidate), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Save(&candidate); err != nil {
-		t.Fatal(err)
-	}
-
-	lockFile, err := os.OpenFile(filepath.Join(root, ".latest.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	baselineStartedAt := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	_, release, err := store.PrepareLatest("baseline", baselineStartedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lockFile.Close()
-	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX); err != nil {
-		t.Fatal(err)
-	}
-	locked := true
+	released := false
 	defer func() {
-		if locked {
-			_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+		if !released {
+			release()
 		}
 	}()
 
-	command := exec.Command(os.Args[0], "-test.run=^TestSetLatestWaitsForCrossProcessLock$", "-test.v")
+	command := exec.Command(os.Args[0], "-test.run=^TestPrepareLatestFailsWhileCrossProcessLockHeld$", "-test.v")
 	for _, value := range os.Environ() {
 		if strings.HasPrefix(value, latestLockRootEnv+"=") || strings.HasPrefix(value, latestLockRunEnv+"=") {
 			continue
 		}
 		command.Env = append(command.Env, value)
 	}
-	command.Env = append(command.Env, latestLockRootEnv+"="+root, latestLockRunEnv+"="+candidate.RunID)
+	command.Env = append(command.Env, latestLockRootEnv+"="+root, latestLockRunEnv+"=candidate")
 	var childOutput bytes.Buffer
 	command.Stdout = &childOutput
 	command.Stderr = &childOutput
+	finished := make(chan error, 1)
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	finished := make(chan error, 1)
 	go func() { finished <- command.Wait() }()
 
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	for {
-		if _, err := os.Stat(filepath.Join(root, "child-contended")); err == nil {
-			break
-		}
-		select {
-		case err := <-finished:
-			t.Fatalf("child exited before confirming lock contention: %v; output: %s", err, childOutput.String())
-		case <-deadline.C:
-			t.Fatal("child did not confirm lock contention")
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-
-	waiterDeadline := time.Now().Add(5 * time.Second)
-	for {
-		waiting, err := flockWaiterPresent(command.Process.Pid)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if waiting {
-			break
-		}
-		select {
-		case err := <-finished:
-			t.Fatalf("SetLatest completed without waiting on the cross-process lock: %v; output: %s", err, childOutput.String())
-		default:
-		}
-		if time.Now().After(waiterDeadline) {
-			t.Fatal("child did not enter the kernel flock wait queue")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_UN); err != nil {
-		t.Fatal(err)
-	}
-	locked = false
 	select {
 	case err := <-finished:
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("child failed: %v; output: %s", err, childOutput.String())
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("child remained blocked after lock release")
+		_ = command.Process.Kill()
+		t.Fatal("child blocked instead of failing fast on the held latest lock")
 	}
-	if _, err := os.Stat(filepath.Join(root, "child-complete")); err != nil {
-		t.Fatalf("child did not complete latest update: %v", err)
+	if _, err := os.Stat(filepath.Join(root, "child-refused")); err != nil {
+		t.Fatalf("child did not confirm the held lock: %v; output: %s", err, childOutput.String())
 	}
-	latest, err := store.Latest()
+	metadata, err := readAggregateMetadata(filepath.Join(root, "latest"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest != candidate.RunID {
-		t.Fatalf("latest run = %q, want %q", latest, candidate.RunID)
+	if metadata.RunID != "baseline" {
+		t.Fatalf("latest run = %q, want baseline", metadata.RunID)
 	}
-}
+	if _, err := os.Stat(filepath.Join(root, ArtifactDirectoryName("multi", latestLockCandidateStartedAt, "candidate"))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused child still created a candidate directory: %v", err)
+	}
 
-// flockWaiterPresent reports whether pid is queued for a flock lock in /proc/locks.
-func flockWaiterPresent(pid int) (bool, error) {
-	data, err := os.ReadFile("/proc/locks")
+	release()
+	released = true
+	candidate, candidateRelease, err := store.PrepareLatest("candidate", latestLockCandidateStartedAt)
 	if err != nil {
-		return false, err
+		t.Fatal(err)
 	}
-	processID := strconv.Itoa(pid)
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) > 5 && fields[1] == "->" && fields[2] == "FLOCK" && fields[5] == processID {
-			return true, nil
-		}
+	defer candidateRelease()
+	if candidate != filepath.Join(root, "latest") {
+		t.Fatalf("candidate directory = %q, want latest", candidate)
 	}
-	return false, nil
+	metadata, err = readAggregateMetadata(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.RunID != "candidate" {
+		t.Fatalf("latest run = %q, want candidate", metadata.RunID)
+	}
+	rotated := filepath.Join(root, ArtifactDirectoryName("multi", baselineStartedAt, "baseline"))
+	if info, err := os.Stat(rotated); err != nil || !info.IsDir() {
+		t.Fatalf("baseline was not rotated to %s: %v", rotated, err)
+	}
 }

@@ -226,7 +226,7 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 	if err != nil {
 		return err
 	}
-	defer aggregate.Log.Close()
+	defer aggregate.Close()
 	ladder := clusterauth.Ladder{Runner: clusterauth.ExecRunner{Log: aggregate.Log}, Log: aggregate.Log}
 	authFailures := ladder.Authenticate(ctx, entries)
 	if err := rejectDuplicateServers(entries, authFailures); err != nil {

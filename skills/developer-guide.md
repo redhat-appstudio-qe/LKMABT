@@ -63,10 +63,10 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 - `internal/workflow.Runner` reports each executed phase through `Options.OnPhaseStart` and `Options.OnPhaseEnd`; `phaseObserver` maps them to step descriptions and emojis, and `LiveStage.Progress` feeds PaC/build heartbeats into the active step while `LiveStage.Log` keeps the full lines
 
 **`internal/clusterfile/`** — Clusters-file schema
-- Strict parsing of `name`, `type`, `kflux`, `ibmcloud`, `ibmcloud-endpoint`, `kubeconfig`, and `server` per entry
-- `name` is the report/`--cluster` identity; `kflux` is the kflux catalog name (`cluster login -c`) and defaults to `name`
+- Strict parsing of `name`, `type`, `ibmcloud`, `ibmcloud-endpoint`, `kubeconfig`, and `server` per entry
+- `name` is the report/`--cluster` identity; the kflux catalog name is that name with a leading `kflux-` removed, and names without the prefix are unchanged
 - `type: roks` defaults `ibmcloud` to `name` and `ibmcloud-endpoint` to `vpe`; IBM Cloud fields are rejected on `ocp` entries
-- Resolves kubeconfig paths (`~` expansion, relative-to-file); the default is `~/.kube/config-<kflux>`, kflux's own per-cluster path
+- Resolves kubeconfig paths (`~` expansion, relative-to-file); the default is `~/.kube/config-<catalog>`, kflux's own per-cluster path
 
 **`internal/clusterauth/`** — Authentication ladder
 - Every non-ROKS kubeconfig is verified with `oc whoami` on every run: an expired token leaves the file readable, so readability proves nothing. A rejected one is refreshed through `kflux cluster login` (default kubeconfig path) or `oc login` (any path) and otherwise fails at `authentication`. `type: roks` entries are verified and refreshed through the IBM Cloud CLI
@@ -212,9 +212,15 @@ Namespaces are labeled with `app.konflux-ci.org/managed-by=lkmabt` and
 
 ### Artifact Retention
 All runtime evidence is stored under `.lkmabt-runs/`:
-- `latest/` resolves to the most recently started run directory from run
-  creation. It is a relative symlink that exposes artifacts as they are written
-  and remains on that run through success or failure until another run starts.
+- `latest/` is a real directory holding the current aggregate run. At the next
+  invocation the previous run is renamed in place to
+  `multi-run-<hh:mm_d.m.yyyy>_<aggregate-run-id>/` using the run ID and start
+  time in `.aggregate.json`, and a fresh `latest/` is created.
+- A run holds `.latest.lock` for its whole duration, so a second run against the
+  same state directory fails immediately instead of writing into the live
+  `latest/`; if rotation fails for a filesystem reason, the new run is written
+  to its permanent directory with a warning.
+- No run is stored twice, and `latest` is not a symlink.
 - Failed runs retain `session/manifest.json`, workload snapshots, pod logs, and `collection-report.json`
 - Credential-like fields in JSON evidence are redacted before writing
 
@@ -320,14 +326,14 @@ evidence is still collected and saved, so the report retains its artifacts.
 
 ### Sequential Cluster Execution
 Clusters run one at a time in clusters-file order so run-scoped credentials are
-reused and only one cluster is mutated at a time. `run both` still runs GitHub and
+reused and only one cluster is mutated at a time. `both` still runs GitHub and
 GitLab concurrently inside a cluster.
 
 ## Design Decisions
 
 ### Fixed Fixtures Pattern
 The tool uses **persistent fixtures** rather than creating/deleting test resources on every run:
-- One persistent tenant namespace per provider (GitHub, GitLab); `run both`
+- One persistent tenant namespace per provider (GitHub, GitLab); `both`
   starts both providers concurrently inside the cluster with distinct run IDs
   and artifact directories; clusters themselves run sequentially
 - One Application with three Components (`mathwizz-web-server`, `mathwizz-history-worker`, `mathwizz-frontend`)
@@ -359,18 +365,21 @@ accidental credential leakage in shared artifacts.
 
 ## Artifact Layout
 
-Each run creates a timestamped directory under `.lkmabt-runs/`:
+Each run writes into `.lkmabt-runs/latest/`; the next invocation renames it to
+its permanent timestamped directory:
 
 ```
 .lkmabt-runs/
-├── latest -> multi-run-<hh:mm_d.m.yyyy>_<run-id>/
-└── multi-run-<hh:mm_d.m.yyyy>_<run-id>/
-    ├── report.md
-    ├── report.html
-    ├── run.log
-    └── <cluster>/
-        ├── run.log
-        └── <provider>-run-<hh:mm_d.m.yyyy>_<run-id>/   (run.log, manifest.json, status.json, workload/, failed-builds/, logs/, collection-report.json)
+├── latest/                                          # Current aggregate run (real directory)
+│   ├── .aggregate.json                              # Run ID and start time used for rotation
+│   ├── report.md
+│   ├── report.html
+│   ├── run.log
+│   └── <cluster>/
+│       ├── run.log
+│       └── <provider>-run-<hh:mm_d.m.yyyy>_<run-id>/   (run.log, manifest.json, status.json, workload/, failed-builds/, logs/, collection-report.json)
+├── .latest.lock                                     # Held for the run; refuses a second process
+└── multi-run-<hh:mm_d.m.yyyy>_<aggregate-run-id>/   # Previous aggregate runs
 ```
 
 ### TaskRun YAML Snapshots
@@ -429,12 +438,13 @@ resources and finalizers. If cleanup still fails, check:
 - `kubectl describe namespace <tenant>` for stuck finalizers from other sources
 
 ### Cluster Names Versus kflux Catalog Names
-`name` in the clusters file is the report and `--cluster` identity; `kflux` is
-the catalog name (`kflux cluster list`). They differ when the user's name is the
-API server's first label, e.g. host `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is
-catalog cluster `ocp-p01`. An unknown catalog name surfaces kflux's own
-`unknown cluster` error. `type: roks` entries never call kflux; their `kflux`
-value only names the default kubeconfig path.
+`name` in the clusters file is the report and `--cluster` identity. The kflux
+catalog name is derived from it: a leading `kflux-` is removed and any other
+name is used unchanged. A name like the API server's first label therefore
+matches the catalog, e.g. host `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is
+catalog cluster `ocp-p01` through the name `kflux-ocp-p01`. An unknown catalog
+name surfaces kflux's own `unknown cluster` error. `type: roks` entries never
+call kflux; the catalog name only names the default kubeconfig path.
 
 ### ROKS First-Time Login
 `type: roks` authenticates with `ibmcloud login --sso` and

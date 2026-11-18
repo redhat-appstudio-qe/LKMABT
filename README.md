@@ -22,7 +22,7 @@ resources.
   - [Cluster requirements](#cluster-requirements)
   - [Network access](#network-access)
 - [Setup](#setup)
-  - [1. Build LKMABT](#1-build-lkmabt)
+  - [1. Install LKMABT](#1-install-lkmabt)
   - [2. List the clusters](#2-list-the-clusters)
   - [3. Verify fixture access](#3-verify-fixture-access)
 - [Authentication methods](#authentication-methods)
@@ -31,6 +31,7 @@ resources.
 - [Running LKMABT](#running-lkmabt)
   - [When the cluster GitHub App is not installed](#when-the-cluster-github-app-is-not-installed)
   - [During the run](#during-the-run)
+  - [Cleaning up a namespace](#cleaning-up-a-namespace)
 - [Run logs and artifact retention](#run-logs-and-artifact-retention)
 
 ## Prerequisites
@@ -117,11 +118,20 @@ Every run needs network access to:
 
 ## Setup
 
-### 1. Build LKMABT
+### 1. Install LKMABT
 
 ```bash
-go build -o bin/lkmabt ./cmd/lkmabt
+go install ./cmd/lkmabt
 ```
+
+`go install` writes the `lkmabt` binary to `$(go env GOPATH)/bin`. Put that
+directory on your `PATH`:
+
+```bash
+export PATH="$(go env GOPATH)/bin:$PATH"
+```
+
+Every example below invokes `lkmabt` from `PATH`.
 
 ### 2. List the clusters
 
@@ -131,28 +141,29 @@ Start from the example and edit the copy:
 cp .lkmabt-clusters.yaml.example .lkmabt-clusters.yaml
 ```
 
-The copy is ignored by Git; keep it local. A minimal kflux entry:
+The copy is ignored by Git; keep it local. A minimal entry:
 
 ```yaml
 clusters:
   - name: kflux-ocp-p01
-    kflux: ocp-p01
 ```
 
 | Field | Required | Purpose |
 | --- | --- | --- |
-| `name` | Yes | Unique identity used by `--cluster`, in logs, and as the report directory name. |
-| `kflux` | No | kflux catalog name passed to `kflux cluster login -c`; defaults to `name`. It also names the default kubeconfig path, `~/.kube/config-<kflux>`. |
-| `kubeconfig` | No | Kubeconfig path. `~` expands; relative paths resolve against the clusters file. Every kubeconfig is verified on every run. |
+| `name` | Yes | Unique identity used by `--cluster`, in logs, and as the report directory name. It also derives the kflux catalog name and the default kubeconfig path. |
+| `kubeconfig` | No | Kubeconfig path, `~/.kube/config-<catalog>` by default. `~` expands; relative paths resolve against the clusters file. Every kubeconfig is verified on every run. |
 | `server` | No | API server URL. Omit it to use the kubeconfig's own server. |
 | `type` | No | `ocp` (default) or `roks`. |
 | `ibmcloud` | ROKS only | IBM Cloud cluster name or ID passed to `ibmcloud ks cluster config`; defaults to `name`. |
 | `ibmcloud-endpoint` | ROKS only | `vpe` (default), `private`, or `link`. |
 
-`kflux` is the short catalog name, not the API server host:
-`kflux-ocp-p01.7ayg.p1.openshiftapps.com` is catalog cluster `ocp-p01`. List
-catalog names with `kflux cluster list`; an unknown name fails with kflux's
-`unknown cluster` error.
+The kflux catalog name comes from `name`: a leading `kflux-` is removed and
+other names are unchanged. The host `kflux-ocp-p01.7ayg.p1.openshiftapps.com`
+is therefore catalog cluster `ocp-p01` through the name `kflux-ocp-p01`. List
+catalog names with `kflux cluster list`; an unknown catalog name fails with
+kflux's `unknown cluster` error. The `kflux` field was removed; a file that
+still sets it is rejected with a message to delete the field and keep the
+prefix on `name`.
 
 A ROKS entry:
 
@@ -185,7 +196,7 @@ written. Checking now avoids a failed run.
 ## Authentication methods
 
 LKMABT needs a GitHub token for GitHub runs and a GitLab token for GitLab runs.
-Choose either method; `run both` uses both credentials. Values in the process
+Choose either method; `both` uses both credentials. Values in the process
 environment take precedence over `.lkmabt.env`. A GitHub token acquired through
 browser authentication is written to a private temporary directory as a `0600`
 file and deleted when the last cluster finishes. A prompted GitLab PAT is kept
@@ -231,9 +242,14 @@ Create the environment file from the example and fill in the tokens you use:
 cp .lkmabt.env.example .lkmabt.env
 ```
 
-Pass it to a run with `--env-file .lkmabt.env`; LKMABT does not read the file
-automatically. The copy is ignored by Git; keep it local. The parser reads
-`KEY=VALUE` lines and does not execute the file.
+Provider commands read `.lkmabt.env` automatically when the file exists; a
+missing default file is fine, so environment-only credentials work. Pass
+`--env-file <path>` only to use a different file, and an explicit path that
+does not exist is an error. `cleanup` needs no provider credentials and does
+not read the file. The copy is ignored by Git; keep it local. The parser reads
+`KEY=VALUE` lines and does not execute the file. A token and its API URL come
+from the same source: a process `GITLAB_BOT_TOKEN` is paired only with a
+process `GITLAB_API_URL`, never with a URL from an env file.
 
 | Variable | Notes |
 | --- | --- |
@@ -262,14 +278,14 @@ to `.lkmabt-clusters.yaml`.
 
 ```bash
 # Browser authentication
-./bin/lkmabt run github
-./bin/lkmabt run gitlab
-./bin/lkmabt run both
+lkmabt github
+lkmabt gitlab
+lkmabt both
 
 # Configured tokens
-./bin/lkmabt run github --env-file .lkmabt.env
-./bin/lkmabt run gitlab --env-file .lkmabt.env
-./bin/lkmabt run both --env-file .lkmabt.env
+lkmabt github --env-file my.env
+lkmabt gitlab --env-file my.env
+lkmabt both --env-file my.env
 ```
 
 - `github` and `gitlab` test one fixture; `both` tests both.
@@ -301,21 +317,6 @@ to `.lkmabt-clusters.yaml`.
   authentication prints ` ✗ Authenticate cluster <name> 🔐` and the reason.
 - Reports and evidence are stored under `.lkmabt-runs/`; see
   [Run logs and artifact retention](#run-logs-and-artifact-retention).
-
-`cleanup` needs a provider run ID, which is the suffix of
-`github-run-<time>_<date>_<run-id>` or `gitlab-run-<time>_<date>_<run-id>`
-inside `.lkmabt-runs/<aggregate>/<cluster>/`. The aggregate run ID in the
-report title is not accepted. Use the ID belonging to the provider whose
-namespace you want to delete:
-
-```bash
-./bin/lkmabt cleanup --cluster <name> --run-id <run-id>
-```
-
-`cleanup` authenticates the cluster, finds the run by exact run ID, verifies
-the saved artifacts and both ownership labels, and asks before deleting the
-namespace. A `both` run creates a separate provider run ID and namespace for
-GitHub and GitLab, so clean up each namespace with its own provider run ID.
 
 ### When the cluster GitHub App is not installed
 
@@ -403,14 +404,46 @@ selection. This applies to configured tokens and browser logins.
   names the current holder. Use another `--tenant-namespace` or wait for that
   run.
 
+### Cleaning up a namespace
+
+```bash
+lkmabt cleanup --cluster <name> --run-id <run-id>
+```
+
+- `--run-id` is the provider run ID: the final `<run-id>` segment of
+  `github-run-<time>_<date>_<run-id>` or `gitlab-run-<time>_<date>_<run-id>`,
+  not the aggregate report run ID. A `both` run creates a separate provider run
+  ID and namespace for GitHub and GitLab, so clean up each namespace with its
+  own provider run ID.
+- `cleanup` authenticates the cluster with the same ladder as a run and checks
+  that the connected API server matches the clusters-file entry.
+- It locates exactly one aggregate directory holding that run for the cluster;
+  `latest/` is searched like any other directory, and the state-directory lock
+  is held while the run is verified so a concurrent run cannot rotate `latest/`
+  mid-cleanup. If a live run owns `latest/`, only permanent aggregate
+  directories are searched.
+- It loads the manifest and requires the exact run ID and cluster server, then
+  verifies the saved artifacts and collection report.
+- It re-inspects the tenant namespace and requires both ownership labels plus
+  the exact run ID.
+- It holds the tenant namespace lock and prompts
+  `Delete tenant namespace <name> owned by run <id> [y/N]`; deletion happens
+  only on an explicit yes.
+- A non-interactive run cannot approve the prompt, so it retains the namespace
+  and exits successfully.
+- Deletion waits at most five minutes; on timeout it reports the namespace
+  controller's remaining resources or finalizers.
+- `cleanup` does not read `.lkmabt.env` and does not accept `--env-file`; it
+  needs no provider credentials.
+
 ## Run logs and artifact retention
 
 Runtime evidence is stored under `.lkmabt-runs/`.
 
 ```text
 .lkmabt-runs/
-├── multi-run-<hh:mm_d.m.yyyy>_<aggregate-run-id>/   # One directory per invocation
-│   ├── .started-at                                  # Start marker used to choose latest/
+├── latest/                                          # Current aggregate run, a real directory
+│   ├── .aggregate.json                              # Run ID and start time used for rotation
 │   ├── report.md                                    # Markdown report
 │   ├── report.html                                  # HTML report
 │   ├── run.log                                      # Aggregate run log
@@ -429,17 +462,23 @@ Runtime evidence is stored under `.lkmabt-runs/`.
 │           ├── logs/<namespace>/<pod>/<container>.log  # Available pod logs
 │           ├── failed-builds/                       # Logs from failed TaskRun steps
 │           └── collection-report.json               # Artifact collection outcome
-├── latest -> multi-run-...                          # Most recently started aggregate run
-└── <older aggregate directories>/
+├── .latest.lock                                     # Held for the run by the state-directory owner
+└── multi-run-<hh:mm_d.m.yyyy>_<aggregate-run-id>/   # Previous aggregate runs
 ```
 
 - `<provider>` is `github` or `gitlab`; `<run-id>` is the provider run ID used
   by `cleanup`.
-- `latest` is a relative symlink to the most recently started aggregate run. It
-  exposes artifacts as they are written and keeps pointing at that run through
-  success or failure; the next run atomically repoints it. If an older
-  directory-form `latest` cannot be exchanged atomically, LKMABT preserves it
-  and refuses to switch.
+- `latest/` holds the most recently started aggregate run and is written in
+  place. At the next invocation the previous `latest/` is renamed to
+  `multi-run-<hh:mm_d.m.yyyy>_<aggregate-run-id>/` using the run ID and start
+  time in `.aggregate.json`, and a fresh `latest/` is created.
+- No run is stored twice and `latest` is not a symlink.
+- A run holds `.latest.lock` for its whole duration. A second run against the
+  same state directory fails immediately with an actionable message instead of
+  writing into the live run's `latest`; wait for the first run or pass a
+  different `--state-dir`.
+- If rotation fails for a filesystem reason, the new run is written to its
+  permanent directory and a warning is logged.
 - Pod log requests use the run start time as `SinceTime` and stop with the
   run's collection context; historical logs are not requested.
 - Report links target concrete directories and only existing files.

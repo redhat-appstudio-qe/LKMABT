@@ -3,6 +3,7 @@
 package evidence
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,7 +11,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// acquireLatestUpdateLock obtains an exclusive cross-process lock and returns its release function.
+// acquireLatestUpdateLock obtains an exclusive cross-process lock that
+// serializes aggregate latest use, and returns its release function. It fails
+// with ErrLatestLocked instead of waiting when another process holds the lock.
 func acquireLatestUpdateLock(root string) (func(), error) {
 	lockPath := filepath.Join(root, ".latest.lock")
 	fd, err := unix.Open(lockPath, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
@@ -31,8 +34,11 @@ func acquireLatestUpdateLock(root string) (func(), error) {
 		_ = lockFile.Close()
 		return nil, fmt.Errorf("lock path is not a regular file")
 	}
-	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = lockFile.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return nil, ErrLatestLocked
+		}
 		return nil, fmt.Errorf("acquire file lock: %w", err)
 	}
 	return func() {

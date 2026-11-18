@@ -122,7 +122,7 @@ var _ = Describe("runProviders", func() {
 					}
 				}(key, original, had)
 			}
-			request, err := config.Parse([]string{"run", "both"})
+			request, err := config.Parse([]string{"both"})
 			Expect(err).ShouldNot(HaveOccurred())
 			request.StateDir = GinkgoT().TempDir()
 			runner := &providerRunner{}
