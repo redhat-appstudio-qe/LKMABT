@@ -55,19 +55,23 @@ installation.
 after `glab auth login`:
 
 ```bash
-glab api projects/konflux-qe%2Fdr_test_mathwizz_gl --jq .permissions.project_access.access_level
-# 40 (Maintainer) or 50 (Owner)
+glab api projects/konflux-qe%2Fdr_test_mathwizz_gl --jq '[.permissions.project_access.access_level, .permissions.group_access.access_level] | map(. // 0) | max'
+# 40 (Maintainer) or 50 (Owner), including access inherited from konflux-qe
 ```
 
-**Cluster.** Your identity must be able to create and delete the tenant
-namespace and its resources (`pipelineruns`, `taskruns`, `applications`,
-`components`). GitLab runs also need `list`, `get`, `create`, and `update` on
-Secrets in the tenant namespace, plus `delete` when the run acquires its own
-GitLab token. For a namespace you do not administer:
+**Cluster.** Your identity needs cluster-scoped permission to create the
+tenant namespace, and to delete it during cleanup. Inside that namespace the
+run needs access to `pipelineruns`, `taskruns`, `applications`, and
+`components`. GitLab runs also need `list`, `get`, `create`, and `update` on
+Secrets there, plus `delete` when the run acquires its own GitLab token. If you
+administer an existing namespace, grant the Secret access with:
 
 ```bash
 oc adm policy add-role-to-user edit <user> -n mathwizz-test-gitlab
 ```
+
+That binding is namespace-scoped; it does not grant the cluster-scoped create
+and delete permissions above.
 
 ### Cluster requirements
 
@@ -168,9 +172,11 @@ process environment.
 - The console prints `cluster <name>: started`, `cluster <name>: finished
   (<n> passed, <n> failed)`, one result line per provider and cluster, and the
   Markdown and HTML report paths.
-- The run ID appears in the report title and in the
-  `multi-run-<time>_<date>_<run-id>` directory name under `.lkmabt-runs/`. Use
-  it to clean up a retained namespace later:
+- The report title and its `multi-run-<time>_<date>_<run-id>` directory use
+  an aggregate run ID. `cleanup` needs a provider run ID instead: the suffix of
+  `github-run-<time>_<date>_<run-id>` or `gitlab-run-<time>_<date>_<run-id>`
+  inside `.lkmabt-runs/<aggregate>/<cluster>/`. Use the ID belonging to the
+  provider whose namespace you want to delete:
 
 ```bash
 ./bin/lkmabt cleanup --cluster <name> --run-id <run-id>
@@ -178,7 +184,8 @@ process environment.
 
 `cleanup` authenticates the cluster, finds the run by exact run ID, verifies
 the saved artifacts and both ownership labels, and asks before deleting the
-namespace.
+namespace. A `both` run creates a separate provider run ID and namespace for
+GitHub and GitLab, so clean up each namespace with its own provider run ID.
 
 ### Authentication without provider tokens
 
@@ -213,13 +220,13 @@ GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to 
 ```
 
 **Configured `GITHUB_TOKEN`.** In a terminal, LKMABT checks before the first
-cluster that the token can list App installations for `redhat-appstudio-qe`,
-can push to the fixture, and can list repositories for App installations that
-cover selected repositories. A token GitHub rejects is replaced by an existing
+cluster that the token can list App installations for `redhat-appstudio-qe`
+and can push to the fixture. A token GitHub rejects is replaced by an existing
 `gh` login when that login passes the same checks, and otherwise by the `gh`
 browser login. Transient failures, rate limits, and timeouts abort the run
-without replacing the token. Classic or OAuth tokens need `read:org`; add
-`read:user` when an App is installed for selected repositories:
+without replacing the token. Classic or OAuth tokens need `read:org`. Cluster
+preflight additionally lists installation repositories for Apps installed for
+selected repositories; add `read:user` so that check can succeed:
 
 ```bash
 gh auth refresh -h github.com -s read:user
@@ -272,10 +279,12 @@ repositories, so GitHub logins keep this warning path.
 - Triggering appends one comment to each of the three Dockerfiles on the
   fixture's default branch and commits it. The fixtures are shared; your
   commits are visible to other users.
-- LKMABT waits for PaC readiness and for the triggered PipelineRuns. The
-  preflight, trigger, and build phases are bounded by `--preflight-timeout`,
-  `--trigger-timeout`, and `--build-timeout` (defaults: 10m, 5m, and 60m). A
-  matching PipelineRun that has already failed fails the wait immediately.
+- LKMABT waits for PaC readiness and for the triggered PipelineRuns.
+  `--preflight-timeout` (10m) bounds preflight and fixture setup.
+  `--build-timeout` (60m) bounds triggering, the build wait, and build-output
+  verification. `--trigger-timeout` (5m) bounds only the wait for a triggered
+  PipelineRun to appear. A matching PipelineRun that has already failed fails
+  the wait immediately.
 - Owned stale tenant namespaces (`<tenant>` and `<tenant>-*`) are deleted
   automatically and logged. Namespaces with absent or different ownership
   labels are prompted individually and re-inspected before deletion. Declining
