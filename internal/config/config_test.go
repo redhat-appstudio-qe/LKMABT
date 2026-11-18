@@ -193,6 +193,18 @@ var _ = Describe("Parse", func() {
 			Expect(got.Credentials.GitLabToken).Should(Equal("process-token"))
 			Expect(got.Credentials.GitLabAPIURL).Should(BeEmpty())
 		})
+
+		It("keeps a file GitLab token away from a process API URL", func() {
+			envFile := GinkgoT().TempDir() + "/other.env"
+			Expect(os.WriteFile(envFile, []byte("GITLAB_BOT_TOKEN=file-token\n"), 0o600)).Should(Succeed())
+			GinkgoT().Setenv("GITLAB_BOT_TOKEN", "")
+			GinkgoT().Setenv("GITLAB_API_URL", "https://process.example/api/v4")
+
+			got, err := Parse([]string{"gitlab", "--env-file", envFile})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(got.Credentials.GitLabToken).Should(Equal("file-token"))
+			Expect(got.Credentials.GitLabAPIURL).Should(BeEmpty())
+		})
 	})
 
 	When("input is invalid", func() {

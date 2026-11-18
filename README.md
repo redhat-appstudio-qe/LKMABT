@@ -247,9 +247,9 @@ missing default file is fine, so environment-only credentials work. Pass
 `--env-file <path>` only to use a different file, and an explicit path that
 does not exist is an error. `cleanup` needs no provider credentials and does
 not read the file. The copy is ignored by Git; keep it local. The parser reads
-`KEY=VALUE` lines and does not execute the file. A token and its API URL come
-from the same source: a process `GITLAB_BOT_TOKEN` is paired only with a
-process `GITLAB_API_URL`, never with a URL from an env file.
+`KEY=VALUE` lines and does not execute the file. A GitLab token and its API URL
+come from the same source: LKMABT never pairs a process token with a file URL
+or a file token with a process URL.
 
 | Variable | Notes |
 | --- | --- |

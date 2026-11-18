@@ -159,8 +159,9 @@ func Parse(args []string) (Request, error) {
 }
 
 // credentialsFromEnv resolves provider credentials from the environment and env-file values.
-// A GitLab token from the process environment keeps its API URL from the process
-// environment too, so an implicitly read env file cannot redirect a live token.
+// A GitLab token and its API URL always come from the same source, so neither
+// the implicitly read env file nor the process environment can redirect the
+// other source's token.
 func credentialsFromEnv(fileValues map[string]string) Credentials {
 	credentials := Credentials{GitHubToken: envValue("GITHUB_TOKEN", fileValues)}
 	if token := strings.TrimSpace(os.Getenv("GITLAB_BOT_TOKEN")); token != "" {
@@ -169,7 +170,7 @@ func credentialsFromEnv(fileValues map[string]string) Credentials {
 		return credentials
 	}
 	credentials.GitLabToken = fileValues["GITLAB_BOT_TOKEN"]
-	credentials.GitLabAPIURL = envValue("GITLAB_API_URL", fileValues)
+	credentials.GitLabAPIURL = fileValues["GITLAB_API_URL"]
 	return credentials
 }
 
