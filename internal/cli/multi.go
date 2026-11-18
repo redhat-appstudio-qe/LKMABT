@@ -134,7 +134,7 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 		}()
 		if gitlabTokenNeeded {
 			if console.Interactive() {
-				console.Printf("gitlab: authentication required; in the glab prompt choose Token and paste a personal access token with api and write_repository")
+				console.Printf("gitlab: authentication required\nIn the glab prompt, choose:\n  - Token: paste a personal access token with api and write_repository (required for PaC)\n  - Web: signs in with an OAuth token that PaC cannot use, so the run will fail")
 			}
 			token, err := authenticateGitLab(ctx, clusterauth.ExecRunner{}, store, console.Interactive(), request.Credentials.GitLabAPIURL)
 			if err != nil {

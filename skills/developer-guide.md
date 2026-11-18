@@ -259,7 +259,8 @@ require the fixture in every installation because the cluster app slug is
 unknown there; a listing that remains unverifiable after the browser login still
 only produces the preflight warning. When `GITLAB_BOT_TOKEN` is empty, GitLab runs
 `glab auth login` (choose Token and paste a PAT with `api` and `write_repository`)
-with a private `GLAB_CONFIG_DIR`, then reads the token with
+with a private `GLAB_CONFIG_DIR`; the registry-domain and git-protocol prompts are
+glab defaults and do not affect LKMABT. It then reads the token with
 `glab config get token --host`; the glab directory stays in the store so
 `glab api user` can validate the stored token before each cluster. An OAuth
 token is rejected at acquisition because PaC cannot use it. Each

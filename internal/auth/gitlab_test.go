@@ -63,7 +63,7 @@ var _ = Describe("GitLabToken", func() {
 
 			_, err := GitLabToken(context.Background(), runner, store, true, "")
 
-			Expect(err).Should(MatchError(ContainSubstring("personal access token")))
+			Expect(err).Should(MatchError(ContainSubstring("choose Token")))
 		})
 	})
 

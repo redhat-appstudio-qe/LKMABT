@@ -115,7 +115,11 @@ resources.
    set. Leave either empty to authenticate at run time: GitHub uses
    `gh auth login` (browser; requests `repo`, `read:org`, and `read:user`) and
    GitLab uses `glab auth login` (choose **Token** and paste a personal access token
-   with `api` and `write_repository`; PaC rejects the Web/OAuth token). Both
+   with `api` and `write_repository`; PaC rejects the Web/OAuth token). In the
+   glab prompts, the container-registry defaults
+   (`gitlab.com,gitlab.com:443,registry.gitlab.com`) come from glab and can be
+   accepted with Enter; the git protocol and git credential helper choices do
+   not affect LKMABT, which reads the token from glab's isolated config. Both
    `gh` and `glab` must be on `PATH` when the corresponding token is empty. A
    run-acquired GitLab token is revoked during finalization, including after a
    failed run; a configured `GITLAB_BOT_TOKEN` is never revoked. A

@@ -903,6 +903,19 @@ var _ = Describe("RunClusters credential authentication", func() {
 	})
 
 	When("the provider is GitLab without a token", func() {
+		It("should explain the Token and Web choices before the glab prompt", func() {
+			request, runner := runClustersFixture(1)
+			request.Provider = config.ProviderGitLab
+			_ = credentialTempRoot()
+			out := &bytes.Buffer{}
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: out, interactive: true})).Should(Succeed())
+
+			Expect(out.String()).Should(ContainSubstring("In the glab prompt, choose:"))
+			Expect(out.String()).Should(ContainSubstring("Token: paste a personal access token"))
+			Expect(out.String()).Should(ContainSubstring("Web: signs in with an OAuth token that PaC cannot use"))
+		})
+
 		It("should prompt once, reuse the token, and delete the credentials", func() {
 			request, runner := runClustersFixture(1)
 			request.Provider = config.ProviderGitLab
