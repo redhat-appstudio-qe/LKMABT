@@ -204,7 +204,7 @@ var _ = Describe("FixtureService", func() {
 			Expect(err).NotTo(HaveOccurred())
 		}
 		repositoryPassword, _, _ := unstructured.NestedString(repositoryScoped.Object, "data", "password")
-		Expect(repositoryPassword).To(Equal(base64.StdEncoding.EncodeToString([]byte("new-token"))))
+		Expect(repositoryPassword).To(Equal("stale-token"))
 
 		other, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), "existing-gitlab-secret", metav1.GetOptions{})
 		if err != nil {

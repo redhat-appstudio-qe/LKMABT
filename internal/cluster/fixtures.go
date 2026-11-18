@@ -298,9 +298,8 @@ func (s FixtureService) ensureGitLabCredentialSecret(ctx context.Context, namesp
 		return unmanagedGitLabSecretError(namespace)
 	}
 	if ephemeral {
-		if err := s.refreshRepositoryScopedSecrets(ctx, secrets, repositoryPath, token); err != nil {
-			return err
-		}
+		// A run-acquired token is revoked at the end of the run, so it must never
+		// be written into another repository-scoped Secret that outlives it.
 		return s.writeGitLabCredentialSecret(ctx, secrets, existing, namespace, runID, token, repositoryPath)
 	}
 	if existing != nil {
@@ -330,33 +329,6 @@ func (s FixtureService) reusableGitLabCredentialSecret(ctx context.Context, secr
 		}
 	}
 	return false, nil
-}
-
-// refreshRepositoryScopedSecrets replaces stale passwords in basic-auth Secrets
-// that build-service would prefer for the fixture repository. It is best effort:
-// a Forbidden list skips refresh, and a Forbidden update skips that Secret.
-func (s FixtureService) refreshRepositoryScopedSecrets(ctx context.Context, secrets dynamic.ResourceInterface, repositoryPath, token string) error {
-	list, err := secrets.List(ctx, metav1.ListOptions{LabelSelector: scmCredentialsLabel + "=scm," + scmHostnameLabel + "=gitlab.com"})
-	if err != nil {
-		if errors.IsForbidden(err) {
-			return nil
-		}
-		return fmt.Errorf("list GitLab SCM Secrets: %w", err)
-	}
-	for index := range list.Items {
-		secret := &list.Items[index]
-		if secret.GetName() == GitLabCredentialSecretName || !directRepositoryMatch(secret, repositoryPath) || !basicAuthSecret(secret) {
-			continue
-		}
-		updateBasicAuthPassword(secret, token)
-		if _, err := secrets.Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
-			if errors.IsForbidden(err) {
-				continue
-			}
-			return fmt.Errorf("update GitLab SCM Secret %q: %w", secret.GetName(), err)
-		}
-	}
-	return nil
 }
 
 // writeGitLabCredentialSecret creates or updates the harness-owned GitLab Secret.
@@ -418,22 +390,6 @@ func gitLabRepositoryPath(repository string) (string, error) {
 		return "", fmt.Errorf("GitLab repository URL %q has no path", repository)
 	}
 	return repositoryPath, nil
-}
-
-// directRepositoryMatch reports whether a Secret directly names the repository.
-func directRepositoryMatch(secret *unstructured.Unstructured, repositoryPath string) bool {
-	for _, candidate := range strings.Split(secret.GetAnnotations()[scmSecretRepositoryAnnotation], ",") {
-		if strings.Trim(strings.TrimSpace(candidate), "/") == repositoryPath {
-			return true
-		}
-	}
-	return false
-}
-
-// basicAuthSecret reports whether a Secret is a basic-auth credential.
-func basicAuthSecret(secret *unstructured.Unstructured) bool {
-	secretType, found, err := unstructured.NestedString(secret.Object, "type")
-	return err == nil && found && secretType == string(corev1.SecretTypeBasicAuth)
 }
 
 // updateBasicAuthPassword writes the token without discarding other Secret data.

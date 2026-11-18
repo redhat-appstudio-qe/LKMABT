@@ -125,6 +125,17 @@ func (s *gitlabAuthStub) authenticate(_ context.Context, _ clusterauth.CommandRu
 	return s.token, s.err
 }
 
+type gitlabRevokeStub struct {
+	err   error
+	calls int
+}
+
+// revoke records the call and returns the configured error.
+func (s *gitlabRevokeStub) revoke(context.Context, string, string) error {
+	s.calls++
+	return s.err
+}
+
 type gitlabRefreshStub struct {
 	token string
 	err   error
@@ -138,20 +149,23 @@ func (s *gitlabRefreshStub) refresh(_ context.Context, _ clusterauth.CommandRunn
 }
 
 var (
-	defaultGitHubAuth  *githubAuthStub
-	defaultGitLabAuth  *gitlabAuthStub
-	defaultGitLabToken *gitlabRefreshStub
+	defaultGitHubAuth   *githubAuthStub
+	defaultGitLabAuth   *gitlabAuthStub
+	defaultGitLabToken  *gitlabRefreshStub
+	defaultGitLabRevoke *gitlabRevokeStub
 )
 
 var _ = BeforeEach(func() {
 	defaultGitHubAuth = &githubAuthStub{token: "test-github-token"}
 	defaultGitLabAuth = &gitlabAuthStub{token: "test-gitlab-token"}
 	defaultGitLabToken = &gitlabRefreshStub{token: "test-gitlab-token"}
-	originalGitHub, originalGitLab, originalRefresh, originalDestroy, originalCheck := authenticateGitHub, authenticateGitLab, refreshGitLabToken, destroyCredentials, checkGitHubAccess
+	defaultGitLabRevoke = &gitlabRevokeStub{}
+	originalGitHub, originalGitLab, originalRefresh, originalRevoke, originalDestroy, originalCheck := authenticateGitHub, authenticateGitLab, refreshGitLabToken, revokeGitLabToken, destroyCredentials, checkGitHubAccess
 	originalRead := readExistingGitHubToken
 	authenticateGitHub = defaultGitHubAuth.authenticate
 	authenticateGitLab = defaultGitLabAuth.authenticate
 	refreshGitLabToken = defaultGitLabToken.refresh
+	revokeGitLabToken = defaultGitLabRevoke.revoke
 	readExistingGitHubToken = func(context.Context, clusterauth.CommandRunner) (string, error) {
 		return "", errors.New("no existing gh login")
 	}
@@ -160,6 +174,7 @@ var _ = BeforeEach(func() {
 		authenticateGitHub = originalGitHub
 		authenticateGitLab = originalGitLab
 		refreshGitLabToken = originalRefresh
+		revokeGitLabToken = originalRevoke
 		readExistingGitHubToken = originalRead
 		destroyCredentials = originalDestroy
 		checkGitHubAccess = originalCheck
@@ -916,6 +931,42 @@ var _ = Describe("RunClusters credential authentication", func() {
 			Expect(out.String()).Should(ContainSubstring("Web: signs in with an OAuth token that PaC cannot use"))
 		})
 
+		It("should revoke the acquired token once after every cluster", func() {
+			request, runner := runClustersFixture(2)
+			request.Provider = config.ProviderGitLab
+			_ = credentialTempRoot()
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
+
+			Expect(defaultGitLabRevoke.calls).Should(Equal(1))
+			Expect(runner.requests).Should(HaveLen(2))
+		})
+
+		It("should revoke the GitLab token when GitHub authentication fails", func() {
+			defaultGitHubAuth.err = errors.New("gh failed")
+			request, runner := runClustersFixture(1)
+			request.Provider = config.ProviderBoth
+			_ = credentialTempRoot()
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
+
+			Expect(err).Should(MatchError(ContainSubstring("gh failed")))
+			Expect(defaultGitLabAuth.calls).Should(Equal(1))
+			Expect(defaultGitLabRevoke.calls).Should(Equal(1))
+		})
+
+		It("should report a revocation failure after the clusters ran", func() {
+			defaultGitLabRevoke.err = errors.New("revoke denied")
+			request, runner := runClustersFixture(2)
+			request.Provider = config.ProviderGitLab
+			_ = credentialTempRoot()
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
+
+			Expect(err).Should(MatchError(ContainSubstring("revoke GitLab token: revoke denied")))
+			Expect(runner.requests).Should(HaveLen(2))
+		})
+
 		It("should prompt once, reuse the token, and delete the credentials", func() {
 			request, runner := runClustersFixture(1)
 			request.Provider = config.ProviderGitLab
@@ -945,6 +996,7 @@ var _ = Describe("RunClusters credential authentication", func() {
 
 			Expect(defaultGitLabAuth.calls).Should(Equal(0))
 			Expect(defaultGitLabToken.calls).Should(Equal(0))
+			Expect(defaultGitLabRevoke.calls).Should(Equal(0))
 			Expect(runner.requests[0].Credentials.GitLabToken).Should(Equal("configured-gitlab-token"))
 			Expect(runner.requests[0].Credentials.GitLabTokenEphemeral).Should(BeFalse())
 		})

@@ -266,9 +266,9 @@ glab defaults and do not affect LKMABT. It then reads the token with
 token is rejected at acquisition because PaC cannot use it. Each
 acquired token is kept in a 0600 file inside one run-scoped `lkmabt-auth-*`
 temporary directory and reused for every cluster. The ephemeral GitLab token is
-also written to the tenant SCM Secret for PaC, and finalization deletes that
-Secret and revokes the run-acquired token with
-`DELETE /personal_access_tokens/self`. An OAuth token answers 404 or 400 and is
+also written to the tenant SCM Secret for PaC; each cluster's finalization deletes
+that Secret, and the run-acquired token is revoked once after the last cluster
+with `DELETE /personal_access_tokens/self`. An OAuth token answers 404 or 400 and is
 left to expire; a configured `GITLAB_BOT_TOKEN` is never revoked.
 
 The directory is removed when the run ends, including after failures and
@@ -307,9 +307,10 @@ Deletion additionally requires the run ID to equal the current run. A Secret
 with that name but missing either label is never updated or deleted; the run
 fails with an error naming the Secret and namespace, and a legacy unowned
 Secret must be deleted once after access is granted. Secret listing is
-opportunistic: reuse or refresh of other repository-scoped Secrets happens
-only when the API allows it, and a `Forbidden` list falls back to managing the
-owned Secret. Forbidden updates during an ephemeral refresh are skipped.
+opportunistic: a configured token may reuse another repository-scoped Secret
+when the API allows it, and a `Forbidden` list falls back to managing the owned
+Secret. A run-acquired token is never written into another repository-scoped
+Secret, because that Secret would outlive the token's revocation.
 
 Finalization deletes the Secret only for ephemeral tokens and only after
 confirming the managed-by and run-ID labels, using a UID precondition when the

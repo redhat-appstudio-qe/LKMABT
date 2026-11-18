@@ -217,9 +217,10 @@ accepted with Enter; the git-protocol and git-credential-helper choices do not
 affect LKMABT. Interactive login is supported only for `gitlab.com`; set
 `GITLAB_BOT_TOKEN` for self-managed instances, custom ports, or HTTP endpoints.
 The token is written into the tenant SCM Secret `gitlab-build-secret` so PaC can
-clone the fixture. Finalization deletes that Secret and revokes the acquired
-PAT with `DELETE /personal_access_tokens/self`; the token's temporary copy is
-deleted when the run ends. Without a terminal, the run fails with:
+clone the fixture. Each cluster's finalization deletes its Secret; the acquired
+PAT is revoked once after the last cluster with
+`DELETE /personal_access_tokens/self`, and its temporary copy is deleted when
+the run ends. Without a terminal, the run fails with:
 
 ```text
 GitLab authentication is required: set GITLAB_BOT_TOKEN or run in a terminal to use the glab login

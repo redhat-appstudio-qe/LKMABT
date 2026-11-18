@@ -143,6 +143,13 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 			request.Credentials.GitLabToken = token
 			request.Credentials.GitLabTokenEphemeral = true
 			gitlabEphemeral = true
+			defer func() {
+				revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+				defer cancel()
+				if revokeErr := revokeGitLabToken(revokeCtx, request.Credentials.GitLabToken, request.Credentials.GitLabAPIURL); revokeErr != nil {
+					runErr = errors.Join(runErr, fmt.Errorf("revoke GitLab token: %w", revokeErr))
+				}
+			}()
 		}
 		if githubTokenNeeded {
 			if console.Interactive() {

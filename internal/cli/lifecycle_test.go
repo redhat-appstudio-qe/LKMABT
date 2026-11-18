@@ -306,35 +306,6 @@ func writeLifecycleArtifact(path string) error {
 	return os.WriteFile(path, []byte("{}\n"), 0o640)
 }
 
-var _ = Describe("Lifecycle GitLab token revocation", func() {
-	It("revokes the run-scoped token when the run failed", func() {
-		stateDir := GinkgoT().TempDir()
-		client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"))
-		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseFailed, Fixture: model.FixtureIdentity{TenantNamespace: "tenant"}}
-		revoked := 0
-		lifecycle := Lifecycle{
-			Store: evidence.NewManifestStore(stateDir), Namespace: cleanup.NamespaceService{Dynamic: client},
-			Collector: collector.Collector{StateDir: stateDir}, Prompt: &fakePrompt{}, Sources: lifecycleTestSources(),
-			RevokeGitLabToken: func(context.Context) error { revoked++; return nil },
-		}
-
-		Expect(lifecycle.Finalize(context.Background(), manifest, errors.New("build failed"))).Should(Succeed())
-		Expect(revoked).Should(Equal(1))
-	})
-
-	It("revokes the token even when fixture setup never created a namespace", func() {
-		revoked := 0
-		lifecycle := Lifecycle{RevokeGitLabToken: func(context.Context) error {
-			revoked++
-			return errors.New("revoke denied")
-		}}
-		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseFailed}
-
-		Expect(lifecycle.Finalize(context.Background(), manifest, errors.New("preflight failed"))).Should(MatchError(ContainSubstring("revoke GitLab token: revoke denied")))
-		Expect(revoked).Should(Equal(1))
-	})
-})
-
 var _ = Describe("Namespace deletion timeout", func() {
 	It("fails instead of hanging when the namespace never disappears", func() {
 		stateDir := GinkgoT().TempDir()

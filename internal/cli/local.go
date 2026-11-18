@@ -247,9 +247,6 @@ type Lifecycle struct {
 	Prompt    workflow.Confirmation
 	Sources   []collector.Source
 	Log       io.Writer
-	// RevokeGitLabToken removes the run-acquired GitLab credential. It runs on
-	// every finalization path, including failed and canceled runs.
-	RevokeGitLabToken func(context.Context) error
 }
 
 // finalizationTimeout bounds cleanup work after the workflow context is done.
@@ -278,18 +275,9 @@ func waitForNamespaceDeletion(ctx context.Context, service cleanup.NamespaceServ
 // Inspection, credential deletion, and artifact collection use a fresh bounded context so a canceled
 // run still removes the ephemeral GitLab Secret. The prompt and namespace deletion keep the run context,
 // so a canceled run retains the namespace.
-func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, runErr error) (err error) {
+func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, runErr error) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
 	defer cancel()
-	if l.RevokeGitLabToken != nil {
-		defer func() {
-			revokeCtx, revokeCancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
-			defer revokeCancel()
-			if revokeErr := l.RevokeGitLabToken(revokeCtx); revokeErr != nil {
-				err = errors.Join(err, fmt.Errorf("revoke GitLab token: %w", revokeErr))
-			}
-		}()
-	}
 	namespace := manifest.Fixture.TenantNamespace
 	if namespace == "" {
 		return nil
@@ -407,27 +395,21 @@ func runErrorWithLogFailure(runErr, attachErr error) error {
 	return errors.Join(runErr, fmt.Errorf("attach run log: %w", attachErr))
 }
 
-// gitLabTokenRevoker returns the finalization callback for a run-acquired
-// GitLab token. Configured long-lived tokens are never revoked.
-func gitLabTokenRevoker(request config.Request) func(context.Context) error {
-	if request.Provider != config.ProviderGitLab || !request.Credentials.GitLabTokenEphemeral || strings.TrimSpace(request.Credentials.GitLabToken) == "" {
-		return nil
+// revokeGitLabToken revokes a run-acquired GitLab personal access token once,
+// after every cluster has finished using it.
+var revokeGitLabToken = func(ctx context.Context, token, apiURL string) error {
+	adapter, err := gitlab.NewFromCredentials(token, apiURL)
+	if err != nil {
+		return err
 	}
-	token, apiURL := request.Credentials.GitLabToken, request.Credentials.GitLabAPIURL
-	return func(ctx context.Context) error {
-		adapter, err := gitlab.NewFromCredentials(token, apiURL)
-		if err != nil {
-			return err
-		}
-		return adapter.RevokeToken(ctx)
-	}
+	return adapter.RevokeToken(ctx)
 }
 
 // finalizeRun collects artifacts and finalizes the tenant namespace for one completed or failed run.
 func (runner LiveRunner) finalizeRun(ctx context.Context, request config.Request, clients *cluster.ClientSet, stage *workflow.LiveStage, store evidence.ManifestStore, manifest model.RunManifest, runErr error, log io.Writer) error {
 	sources := collector.KubernetesSources(clients.Dynamic, manifest.Fixture.TenantNamespace, manifest.RunID)
 	sources = append(sources, collector.KubernetesPodLogSources(clients.Kubernetes, manifest.Fixture.TenantNamespace, manifest.CreatedAt)...)
-	lifecycle := Lifecycle{Store: store, Namespace: stage.Namespace, Collector: collector.Collector{StateDir: request.StateDir}, Prompt: stage.Prompt, Sources: sources, Log: log, RevokeGitLabToken: gitLabTokenRevoker(request)}
+	lifecycle := Lifecycle{Store: store, Namespace: stage.Namespace, Collector: collector.Collector{StateDir: request.StateDir}, Prompt: stage.Prompt, Sources: sources, Log: log}
 	return lifecycle.Finalize(ctx, manifest, runErr)
 }
 
