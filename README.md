@@ -231,11 +231,11 @@ Pass it to a run with `--env-file .lkmabt.env`; LKMABT does not read the file
 automatically. The copy is ignored by Git; keep it local. The parser reads
 `KEY=VALUE` lines and does not execute the file.
 
-| Variable | Required | Notes |
-| --- | --- | --- |
-| `GITHUB_TOKEN` | No | Needs `repo` and `read:org`. Leave empty for the browser login. |
-| `GITLAB_BOT_TOKEN` | No | Needs `api` access. Leave empty for the `glab` Web login on `gitlab.com`. Never revoked. |
-| `GITLAB_API_URL` | No | Defaults to `https://gitlab.com/api/v4`. |
+| Variable | Notes |
+| --- | --- |
+| `GITHUB_TOKEN` | Needs `repo`, `read:org`, and push access to the fixture; its owner must administer `redhat-appstudio-qe` to list App installations. Leave empty for the browser login. |
+| `GITLAB_BOT_TOKEN` | Needs `api` access. Leave empty for the `glab` Web login on `gitlab.com`. LKMABT never revokes it. |
+| `GITLAB_API_URL` | Defaults to `https://gitlab.com/api/v4`. |
 
 **`GITHUB_TOKEN`.** In a terminal, LKMABT checks before the first cluster that
 the token can list App installations for `redhat-appstudio-qe` and can push to
