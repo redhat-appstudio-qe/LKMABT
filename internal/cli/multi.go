@@ -63,7 +63,10 @@ func checkGitHubToken(ctx context.Context, request *config.Request, console *Con
 		return false, fmt.Errorf("check the configured GitHub token: %w", err)
 	}
 	console.Printf("github: configured token cannot access the fixture repository: %v", err)
-	token, readErr := readExistingGitHubToken(ctx, clusterauth.ExecRunner{})
+	readCtx, cancelRead := context.WithTimeout(ctx, githubAccessCheckTimeout)
+	token, readErr := readExistingGitHubToken(readCtx, clusterauth.ExecRunner{})
+	readEnded := readCtx.Err() != nil
+	cancelRead()
 	if readErr == nil {
 		checkErr := check(token)
 		switch {
@@ -76,6 +79,9 @@ func checkGitHubToken(ctx context.Context, request *config.Request, console *Con
 		}
 		console.Printf("github: existing gh login is not usable: %v; starting the gh browser login", checkErr)
 		return true, nil
+	}
+	if readEnded || errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
+		return false, fmt.Errorf("read the existing gh login: %w", readErr)
 	}
 	console.Printf("github: existing gh login is not usable: %v; starting the gh browser login", readErr)
 	return true, nil

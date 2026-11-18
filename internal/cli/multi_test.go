@@ -752,6 +752,50 @@ var _ = Describe("RunClusters credential authentication", func() {
 		})
 	})
 
+	When("reading the existing gh login exceeds its deadline", func() {
+		It("should abort without clearing the configured token", func() {
+			request, runner := runClustersFixture(1)
+			request.Credentials.GitHubToken = "bad-token"
+			previousTimeout := githubAccessCheckTimeout
+			githubAccessCheckTimeout = 10 * time.Millisecond
+			defer func() { githubAccessCheckTimeout = previousTimeout }()
+			checkGitHubAccess = func(_ context.Context, token string) error {
+				if token == "bad-token" {
+					return fmt.Errorf("%w: 403 Forbidden", providers.ErrInsufficientGitHubAccess)
+				}
+				return nil
+			}
+			readExistingGitHubToken = func(ctx context.Context, _ clusterauth.CommandRunner) (string, error) {
+				<-ctx.Done()
+				return "", ctx.Err()
+			}
+
+			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})
+			Expect(err).Should(MatchError(ContainSubstring("read the existing gh login")))
+			Expect(errors.Is(err, context.DeadlineExceeded)).Should(BeTrue())
+			Expect(defaultGitHubAuth.calls).Should(Equal(0))
+			Expect(runner.requests).Should(BeEmpty())
+		})
+	})
+
+	When("the existing gh login cannot be read", func() {
+		It("should start the gh browser login", func() {
+			request, runner := runClustersFixture(1)
+			request.Credentials.GitHubToken = "bad-token"
+			checkGitHubAccess = func(context.Context, string) error {
+				return fmt.Errorf("%w: 403 Forbidden", providers.ErrInsufficientGitHubAccess)
+			}
+			readExistingGitHubToken = func(context.Context, clusterauth.CommandRunner) (string, error) {
+				return "", errors.New("gh: not logged in")
+			}
+
+			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard, interactive: true})).Should(Succeed())
+			Expect(defaultGitHubAuth.calls).Should(Equal(1))
+			Expect(runner.requests).Should(HaveLen(1))
+			Expect(runner.requests[0].Credentials.GitHubToken).Should(Equal("test-github-token"))
+		})
+	})
+
 	When("a configured GitHub token can list App installations", func() {
 		It("should use it without a login", func() {
 			request, runner := runClustersFixture(1)

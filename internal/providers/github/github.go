@@ -22,11 +22,11 @@ const (
 
 type client interface {
 	// GetRepository looks up a repository by owner and name.
-	GetRepository(string, string) (*gh.Repository, error)
+	GetRepository(context.Context, string, string) (*gh.Repository, error)
 	// GetFile reads a repository path at the requested branch.
-	GetFile(string, string, string, string) (*gh.RepositoryContent, error)
+	GetFile(context.Context, string, string, string, string) (*gh.RepositoryContent, error)
 	// UpdateFile commits replacement content using the current file SHA.
-	UpdateFile(string, string, string, string, string, string) (*gh.RepositoryContentResponse, error)
+	UpdateFile(context.Context, string, string, string, string, string, string) (*gh.RepositoryContentResponse, error)
 	// ListOrganizationInstallations lists the GitHub App installations for an organization.
 	ListOrganizationInstallations(context.Context, string) ([]*gh.Installation, error)
 	// ListUserInstallationRepositories lists the repositories the token can see for an installation.
@@ -36,14 +36,14 @@ type client interface {
 type apiClient struct{ client *gh.Client }
 
 // GetRepository fetches a repository from the GitHub API.
-func (c apiClient) GetRepository(owner, name string) (*gh.Repository, error) {
-	repository, _, err := c.client.Repositories.Get(context.Background(), owner, name)
+func (c apiClient) GetRepository(ctx context.Context, owner, name string) (*gh.Repository, error) {
+	repository, _, err := c.client.Repositories.Get(ctx, owner, name)
 	return repository, err
 }
 
 // GetFile fetches a file from the requested GitHub repository branch.
-func (c apiClient) GetFile(owner, name, path, branch string) (*gh.RepositoryContent, error) {
-	file, _, _, err := c.client.Repositories.GetContents(context.Background(), owner, name, path, &gh.RepositoryContentGetOptions{Ref: branch})
+func (c apiClient) GetFile(ctx context.Context, owner, name, path, branch string) (*gh.RepositoryContent, error) {
+	file, _, _, err := c.client.Repositories.GetContents(ctx, owner, name, path, &gh.RepositoryContentGetOptions{Ref: branch})
 	if err != nil {
 		return nil, err
 	}
@@ -54,9 +54,9 @@ func (c apiClient) GetFile(owner, name, path, branch string) (*gh.RepositoryCont
 }
 
 // UpdateFile commits content to a GitHub repository using the supplied file SHA.
-func (c apiClient) UpdateFile(owner, name, path, content, branch, sha string) (*gh.RepositoryContentResponse, error) {
+func (c apiClient) UpdateFile(ctx context.Context, owner, name, path, content, branch, sha string) (*gh.RepositoryContentResponse, error) {
 	message := "lkmabt trigger"
-	response, _, err := c.client.Repositories.UpdateFile(context.Background(), owner, name, path, &gh.RepositoryContentFileOptions{Message: &message, Content: []byte(content), Branch: &branch, SHA: &sha})
+	response, _, err := c.client.Repositories.UpdateFile(ctx, owner, name, path, &gh.RepositoryContentFileOptions{Message: &message, Content: []byte(content), Branch: &branch, SHA: &sha})
 	return response, err
 }
 
@@ -135,7 +135,7 @@ func (a *Adapter) ValidateFixture(ctx context.Context, fixture providers.Fixture
 	var repository *gh.Repository
 	err := providers.RetryOn5xx(ctx, a.retry, func() error {
 		var err error
-		repository, err = a.client.GetRepository(canonicalOwner, canonicalName)
+		repository, err = a.client.GetRepository(ctx, canonicalOwner, canonicalName)
 		return err
 	}, isGitHub5xx)
 	if err != nil {
@@ -170,7 +170,7 @@ func (a *Adapter) CheckFixtureWriteAccess(ctx context.Context) error {
 	var repository *gh.Repository
 	err := providers.RetryOn5xx(ctx, a.retry, func() error {
 		var err error
-		repository, err = a.client.GetRepository(canonicalOwner, canonicalName)
+		repository, err = a.client.GetRepository(ctx, canonicalOwner, canonicalName)
 		return err
 	}, isGitHub5xx)
 	if err != nil {
@@ -272,7 +272,7 @@ func (a *Adapter) ReadFile(ctx context.Context, fixture providers.FixtureReposit
 	var file *gh.RepositoryContent
 	err := providers.RetryOn5xx(ctx, a.retry, func() error {
 		var err error
-		file, err = a.client.GetFile(fixture.Owner, fixture.Name, path, branch)
+		file, err = a.client.GetFile(ctx, fixture.Owner, fixture.Name, path, branch)
 		return err
 	}, isGitHub5xx)
 	if err != nil {
@@ -297,7 +297,7 @@ func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepos
 	var updated *gh.RepositoryContentResponse
 	err = providers.RetryOn5xx(ctx, a.retry, func() error {
 		var err error
-		updated, err = a.client.UpdateFile(fixture.Owner, fixture.Name, path, content, branch, expectedSHA)
+		updated, err = a.client.UpdateFile(ctx, fixture.Owner, fixture.Name, path, content, branch, expectedSHA)
 		return err
 	}, isGitHub5xx)
 	if err != nil {
