@@ -17,8 +17,8 @@ Ginkgo/Gomega conventions for LKMABT. Apply in every test change.
 Always `When()` for scenario blocks, never `Context()`.
 
 ```go
-When("the instance is terminated", func() { ... })       // Do
-Context("when the instance is terminated", func() { ... }) // Don't
+When("the kubeconfig is missing", func() { ... })       // Do
+Context("when the kubeconfig is missing", func() { ... }) // Don't
 ```
 
 ### 2. `Should()`/`ShouldNot()` Not `To()`/`NotTo()`
@@ -31,12 +31,12 @@ Expect(count).Should(Equal(3))
 ### 3. Sentence Coherence — Describe/When/It Must Read as a Sentence
 
 ```go
-Describe("LaunchInstance", func() {
-    When("the EC2 API returns an error", func() {
-        It("should return the error", func() { ... })
+Describe("Ladder.Authenticate", func() {
+    When("a default-path kubeconfig is rejected", func() {
+        It("should refresh it through kflux", func() { ... })
     })
 })
-// Reads: "LaunchInstance, when the EC2 API returns an error, should return the error"
+// Reads: "Ladder.Authenticate, when a default-path kubeconfig is rejected, should refresh it through kflux"
 ```
 
 ### 4. Separate `When()` Blocks for Scenarios
@@ -44,10 +44,10 @@ Describe("LaunchInstance", func() {
 Group related scenarios (happy/error/edge) into distinct `When()` blocks.
 
 ```go
-Describe("GetInstanceAddress", func() {
-    When("the API returns an error", func() { ... })
-    When("no reservations are returned", func() { ... })
-    When("multiple addresses are available", func() { ... })
+Describe("PacAuthInspector.Missing", func() {
+    When("PaC created the Secret and it disappeared", func() { ... })
+    When("PaC never reconciled the PipelineRun", func() { ... })
+    When("the PipelineRun is still inside the grace period", func() { ... })
 })
 ```
 
@@ -55,12 +55,13 @@ Describe("GetInstanceAddress", func() {
 
 ```go
 // Single-return — inline freely
-Expect(cfg.SshUser()).Should(Equal("ec2-user"))
+Expect(platform.ManifestName("amd64")).Should(Equal("linux/x86_64"))
 // (value, error) — must capture both, can't inline
-id, err := cfg.LaunchInstance(ctx, name, tag, labels)
+platforms, err := platform.Combine("arm64", "aws")
 Expect(err).ShouldNot(HaveOccurred())
+Expect(platforms).Should(Equal([]string{"linux/arm64", "linux/amd64"}))
 // Error-only — be cautious: inlining panics if function returns nil unexpectedly
-err := cfg.TerminateInstance(ctx, "i-123")
+err := request.Validate()
 Expect(err).ShouldNot(HaveOccurred())
 ```
 
@@ -69,8 +70,8 @@ split the input setup from the function call for readability.
 
 ```go
 // Long input — split for readability
-data := map[string][]byte{"host": []byte("localhost")}
-Expect(createUserTaskSecret(r, ctx, tr, "my-secret", data)).To(Succeed())
+sources := collector.KubernetesSources(clients.Dynamic, manifest.Fixture.TenantNamespace)
+Expect(sources).Should(HaveLen(6))
 ```
 
 Don't blindly capture every return; don't blindly inline either. Think first.
@@ -80,15 +81,19 @@ Don't blindly capture every return; don't blindly inline either. Think first.
 When test cases share identical `Expect()` structure, use `DescribeTable`.
 
 ```go
-DescribeTable("instance state mapping",
-    func(ctx SpecContext, stateName types.InstanceStateName) {
-        mock.DescribeInstancesOutput = stateOutput(stateName)
-        state, err := cfg.GetState(nil, ctx, "i-123")
+DescribeTable("phase transition validation",
+    func(from, to model.Phase, wantErr bool) {
+        err := model.ValidateTransition(from, to)
+        if wantErr {
+            Expect(err).Should(HaveOccurred())
+            return
+        }
         Expect(err).ShouldNot(HaveOccurred())
-        Expect(state).Should(Equal(cloud.OKState))
     },
-    Entry("running instance", types.InstanceStateNameRunning),
-    Entry("pending instance", types.InstanceStateNamePending),
+    Entry("empty phase to preflight", model.Phase(""), model.PhasePreflight, false),
+    Entry("preflight to fixture-ready", model.PhasePreflight, model.PhaseFixtureReady, false),
+    Entry("completed to failed", model.PhaseCompleted, model.PhaseFailed, true),
+    Entry("completed to triggered", model.PhaseCompleted, model.PhaseTriggered, true),
 )
 ```
 
@@ -98,8 +103,8 @@ Test what *your* function does, not that `context.WithCancel` or `json.Marshal` 
 
 ```go
 // Do — verify your function handles cancellation
-When("the context is cancelled before launch", func() {
-    It("should return a context error", func() { ... })
+When("the context is canceled during a provider retry wait", func() {
+    It("should return the context error", func() { ... })
 })
 // Don't — verify stdlib behavior
 Expect(ctx.Err()).Should(Equal(context.Canceled)) // tests stdlib, not your code
@@ -112,8 +117,8 @@ isn't flexible enough. Never duplicate setup across `It()` blocks.
 
 ```go
 BeforeEach(func() {
-    mock = &mockEC2Client{}
-    cfg = AWSEc2DynamicConfig{InstanceType: "t4g.medium", ec2Client: mock}
+    runner = &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+    ladder = Ladder{Runner: runner, Home: GinkgoT().TempDir(), Log: &bytes.Buffer{}}
 })
 ```
 
