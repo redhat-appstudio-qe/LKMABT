@@ -3,11 +3,11 @@
 LKMABT validates multi-architecture builds on Konflux clusters. For every
 cluster in the clusters file it:
 
-1. checks that the cluster can run multi-platform builds;
-2. creates or reuses the tenant namespace, Application, and Components;
-3. appends one harmless comment to each fixture Dockerfile and commits it;
-4. waits for the matching PipelineRuns to succeed;
-5. verifies the pre-publication Buildah outputs cover `linux/amd64` and
+1. Checks that the cluster can run multi-platform builds;
+2. Creates or reuses the tenant namespace, Application, and Components;
+3. Appends one harmless comment to each fixture Dockerfile and commits it;
+4. Waits for the matching PipelineRuns to succeed;
+5. Verifies the pre-publication Buildah outputs cover `linux/amd64` and
    `linux/arm64`.
 
 The harness never copies, creates, forks, renames, or deletes repositories, and
@@ -107,7 +107,7 @@ Provider credentials are described in
 
 Every run needs network access to:
 
-- each cluster's API server, taken from `server` or from the kubeconfig. ROKS
+- Each cluster's API server, taken from `server` or from the kubeconfig. ROKS
   entries choose the master endpoint with `ibmcloud-endpoint`: `vpe` (default)
   and `private` endpoints are not publicly routable and are reachable only from
   the VPC or a connected network such as the VPC VPN; `link` uses the IBM Cloud
@@ -141,31 +141,33 @@ Start from the example and edit the copy:
 cp .lkmabt-clusters.yaml.example .lkmabt-clusters.yaml
 ```
 
-The copy is ignored by Git; keep it local. A minimal entry:
+The copy is ignored by Git; keep it local. 
+A ROSA cluster entry looks like this:
 
 ```yaml
 clusters:
   - name: kflux-ocp-p01
 ```
 
-| Field | Required | Purpose |
-| --- | --- | --- |
-| `name` | Yes | Unique identity used by `--cluster`, in logs, and as the report directory name. It also derives the kflux catalog name and the default kubeconfig path. |
-| `kubeconfig` | No | Kubeconfig path, `~/.kube/config-<catalog>` by default. `~` expands; relative paths resolve against the clusters file. Every kubeconfig is verified on every run. |
-| `server` | No | API server URL. Omit it to use the kubeconfig's own server. |
-| `type` | No | `ocp` (default) or `roks`. |
-| `ibmcloud` | ROKS only | IBM Cloud cluster name or ID passed to `ibmcloud ks cluster config`; defaults to `name`. |
-| `ibmcloud-endpoint` | ROKS only | `vpe` (default), `private`, or `link`. |
+A cluster's entry can also have the following fields:
+
+| Field               | Required  | Purpose                                                                                                                                                           |
+| ------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`              | Yes       | Unique identity used by `--cluster`, in logs, and as the report directory name. It also derives the kflux catalog name and the default kubeconfig path.           |
+| `kubeconfig`        | No        | Kubeconfig path, `~/.kube/config-<catalog>` by default. `~` expands; relative paths resolve against the clusters file. Every kubeconfig is verified on every run. |
+| `server`            | No        | API server URL. Omit it to use the kubeconfig's own server.                                                                                                       |
+| `type`              | No        | `ocp` (default) or `roks`.                                                                                                                                        |
+| `ibmcloud`          | ROKS only | IBM Cloud cluster name or ID passed to `ibmcloud ks cluster config`; defaults to `name`.                                                                          |
+| `ibmcloud-endpoint` | ROKS only | `vpe` (default), `private`, or `link`.                                                                                                                            |
 
 The kflux catalog name comes from `name`: a leading `kflux-` is removed and
 other names are unchanged. The host `kflux-ocp-p01.7ayg.p1.openshiftapps.com`
-is therefore catalog cluster `ocp-p01` through the name `kflux-ocp-p01`. List
-catalog names with `kflux cluster list`; an unknown catalog name fails with
-kflux's `unknown cluster` error. The `kflux` field was removed; a file that
-still sets it is rejected with a message to delete the field and keep the
+is therefore catalog cluster `ocp-p01` through the name `kflux-ocp-p01`. 
+List catalog names with `kflux cluster list`; an unknown catalog name fails with
+kflux's `unknown cluster` error. The `kflux` field was removed; a file that still sets it is rejected with a message to delete the field and keep the
 prefix on `name`.
 
-A ROKS entry:
+A ROKS cluster entry looks like this:
 
 ```yaml
 clusters:
@@ -175,16 +177,17 @@ clusters:
     ibmcloud-endpoint: vpe
 ```
 
-ROKS runs reuse an active `ibmcloud` session or run `ibmcloud login --sso`,
+ROKS cluster runs reuse an active `ibmcloud` session or run `ibmcloud login --sso`,
 write the entry's kubeconfig with `ibmcloud ks cluster config`, then verify it
-with `oc whoami`. If a ROKS kubeconfig is still rejected, open the cluster's
-OpenShift web console once from the IBM Cloud console and re-run. ROKS entries
-never fall through to kflux or `oc login`.
+with `oc whoami`. 
+If a ROKS kubeconfig is still rejected, open the cluster's
+OpenShift web console once from the IBM Cloud console and re-run. 
+ROKS entries never fall through to kflux or `oc login`.
 
-For non-ROKS entries, kflux refreshes default-path kubeconfigs; if `kflux` is
-missing, LKMABT clones and builds it into `~/.local/bin/kflux`. Any entry still
-rejected falls back to `oc login`. All available fields are documented in
-`.lkmabt-clusters.yaml.example`.
+For ROSA cluster entries, kflux refreshes default-path kubeconfigs; if `kflux` is
+missing, LKMABT clones and builds it into `~/.local/bin/kflux`. 
+Any entry still rejected falls back to `oc login`. 
+All available fields are documented in `.lkmabt-clusters.yaml.example`.
 
 ### 3. Verify fixture access
 
@@ -196,38 +199,32 @@ written. Checking now avoids a failed run.
 ## Authentication methods
 
 LKMABT needs a GitHub token for GitHub runs and a GitLab token for GitLab runs.
-Choose either method; `both` uses both credentials. Values in the process
-environment take precedence over `.lkmabt.env`. A GitHub token acquired through
-browser authentication is written to a private temporary directory as a `0600`
-file and deleted when the last cluster finishes. A prompted GitLab PAT is kept
-for the run and revoked after the last cluster; a configured `GITLAB_BOT_TOKEN`
+To provide these, choose either method; `both` uses both credentials. Values in the process
+environment take precedence over `.lkmabt.env`. 
+A GitHub token acquired through browser authentication is written to a private temporary directory as a `0600` file and deleted when the last cluster finishes. A prompted GitLab PAT is kept for the run and revoked after the last cluster; a configured `GITLAB_BOT_TOKEN`
 is never revoked.
 
 ### Browser authentication
 
-Use this method when you leave the provider tokens empty. It requires a
-terminal; a non-interactive run cannot open a browser and fails before any
-cluster work.
+Use this method when you want to leave the provider tokens empty in `.lkmabt.env`. This authentication method requires a terminal; a non-interactive run cannot open a browser and therefore fails before any cluster work.
 
-**GitHub.** LKMABT prints
-`github: authentication required; starting the gh browser login` and runs
-`gh auth login --web` in an isolated `GH_CONFIG_DIR`. It requests the `repo`,
-`read:org`, and `read:user` scopes. Complete the browser flow. Without a
-terminal, the run fails with:
+#### GitHub 
+
+LKMABT prints `github: authentication required; starting the gh browser login` and runs `gh auth login --web` in an isolated `GH_CONFIG_DIR`. It requests the `repo`, `read:org`, and `read:user` scopes. Complete the browser flow. Without a terminal, the run fails with:
 
 ```text
 GitHub authentication is required: set GITHUB_TOKEN or run in a terminal to use the gh browser login
 ```
 
-**GitLab.** LKMABT opens the prefilled personal access token page (scopes
-`api` and `write_repository`) and asks you to set the expiration to 1 day.
+#### GitLab
+
+LKMABT opens the prefilled personal access token page (scopes to `api` and `write_repository`) and asks you to set the expiration to 1 day.
 Create the token, then paste it at the hidden `Paste the personal access token:`
-prompt. PaC cannot use OAuth tokens, so there is no Web login. Interactive entry
+prompt. 
+PaC cannot use OAuth tokens, so there is no Web login. Interactive entry
 is supported only for `gitlab.com`; set `GITLAB_BOT_TOKEN` for self-managed
-instances, custom ports, or HTTP endpoints. The token is written into the tenant
-SCM Secret `gitlab-build-secret` so PaC can clone the fixture. Each cluster's
-finalization deletes its Secret; the acquired PAT is revoked once after the last
-cluster with `DELETE /personal_access_tokens/self`. Without a terminal, the run
+instances, custom ports, or HTTP endpoints. 
+The token is written into the tenant SCM Secret `gitlab-build-secret` so PaC can clone the fixture. Each cluster's finalization deletes its Secret; the acquired PAT is revoked once after the last cluster with `DELETE /personal_access_tokens/self`. Without a terminal, the run
 fails with:
 
 ```text
