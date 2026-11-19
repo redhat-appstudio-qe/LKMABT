@@ -31,9 +31,11 @@ resources.
   - [Browser authentication](#browser-authentication)
   - [Configured tokens](#configured-tokens)
 - [Running LKMABT](#running-lkmabt)
+  - [Selecting architectures](#selecting-architectures)
+  - [LKMABT under the hood](#lkmabt-under-the-hood)
   - [When the cluster GitHub App is not installed](#when-the-cluster-github-app-is-not-installed)
   - [During the run](#during-the-run)
-  - [Cleaning up a namespace](#cleaning-up-a-namespace)
+- [Cleaning up a namespace](#cleaning-up-a-namespace)
 - [Run logs and artifact retention](#run-logs-and-artifact-retention)
 
 ## Prerequisites
@@ -298,22 +300,46 @@ lkmabt both --env-file my.env
 ```
 
 - `github` and `gitlab` test one fixture; `both` tests both.
-- The optional architecture arguments select the architectures the triggered
-  builds must produce. One or more arguments follow the fixture command and
-  precede flags; separate them with spaces or commas (`s390x arm64`,
-  `s390x,arm64`, or shell-split `s390x, arm64`). Repeated platforms expand
-  once, in argument order.
 
-  | Argument | Builds |
-  | --- | --- |
-  | `arm64` | `linux/arm64` |
-  | `amd64` | `linux/amd64` |
-  | `s390x` | `linux/s390x` |
-  | `ppc64le` | `linux/ppc64le` |
-  | `aws` | `amd64` and `arm64` |
-  | `ibm` | `s390x` and `ppc64le` |
+### Selecting architectures
 
-  Omit every architecture argument to build and verify all four architectures.
+The optional architecture arguments select the architectures the triggered
+builds must produce. One or more arguments follow the fixture command and
+precede flags; separate them with spaces or commas (`s390x arm64`,
+`s390x,arm64`, or shell-split `s390x, arm64`). Repeated platforms expand once,
+in argument order. Omit every architecture argument to build and verify all
+four.
+
+| Argument | Builds |
+| --- | --- |
+| `arm64` | `linux/arm64` |
+| `amd64` | `linux/amd64` |
+| `s390x` | `linux/s390x` |
+| `ppc64le` | `linux/ppc64le` |
+| `aws` | `amd64` and `arm64` |
+| `ibm` | `s390x` and `ppc64le` |
+
+LKMABT applies the selection to every component:
+
+1. It rewrites the `build-platforms` parameter in each component's `.tekton`
+   push PipelineRun. Configuration commits use `[skip ci]`, so PaC creates no
+   build for them.
+2. It commits one harmless comment to each fixture Dockerfile. These trigger
+   commits start the builds.
+3. Each component's trigger commit produces one PipelineRun. The PipelineRun's
+   `build-images` matrix expands the platform list into one Buildah TaskRun per
+   selected architecture. Two architectures across three components therefore
+   produce three PipelineRuns and six architecture builds, not six
+   PipelineRuns.
+4. Preflight requires the cluster to declare every selected platform. Build
+   verification requires one successful Buildah output per platform, and the
+   final result line lists the tested architectures.
+
+The fixtures are shared; the configuration and Dockerfile commits are visible
+to other users.
+
+### LKMABT under the hood
+
 - Clusters run one at a time in clusters-file order. Each cluster finishes or
   fails before the next one starts. `both` runs the two providers concurrently
   inside a cluster; each provider gets its own live status line, and durable
@@ -384,18 +410,10 @@ selection. This applies to configured tokens and browser logins.
 
 ### During the run
 
-- Triggering first sets each fixture PipelineRun's `build-platforms`
-  parameter to the selected architectures when it differs from the committed
-  value, then appends one comment to each of the three Dockerfiles on the
-  fixture's default branch and commits it. Configuration commits use
-  `[skip ci]`, so only the Dockerfile trigger commits start builds. The
-  fixtures are shared; your commits are visible to other users.
-- Build-output verification requires one successful output per selected
-  architecture for every component; a missing or unlabeled platform fails as a
-  pipeline misconfiguration. A component is accepted only after its
-  PipelineRun reports `Succeeded=True`; successful Buildah TaskRuns alone are
-  not enough, so `waiting for PipelineRun ... to finish` means the run is still
-  in progress.
+- A component is accepted only after its PipelineRun reports `Succeeded=True`;
+  successful Buildah TaskRuns alone are not enough, so
+  `waiting for PipelineRun ... to finish` means the run is still in progress. A
+  missing or unlabeled platform fails as a pipeline misconfiguration.
 - A missing tenant namespace is requested through an OpenShift `ProjectRequest`,
   which binds the requester as project admin; if that API is unavailable or
   forbidden, LKMABT creates a bare `Namespace`. Cleanup labels are applied only
@@ -439,7 +457,7 @@ selection. This applies to configured tokens and browser logins.
   names the current holder. Use another `--tenant-namespace` or wait for that
   run.
 
-### Cleaning up a namespace
+## Cleaning up a namespace
 
 ```bash
 lkmabt cleanup --cluster <name> --run-id <run-id>
