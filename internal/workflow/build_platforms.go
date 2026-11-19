@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/redhat-appstudio/lkmabt/internal/platform"
+	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	"sigs.k8s.io/yaml"
 )
 
@@ -52,7 +53,7 @@ func (s *LiveStage) configureBuildPlatforms(ctx context.Context, components []st
 	prerequisites := make(map[string]string, len(updates))
 	committed := make([]string, 0, len(updates))
 	for _, update := range updates {
-		commit, err := s.Provider.UpdateFile(ctx, s.Fixture, update.path, s.Request.SourceBranch, update.content, update.sha)
+		commit, err := s.Provider.UpdateFile(ctx, s.Fixture, update.path, s.Request.SourceBranch, update.content, update.sha, providers.CommitMessageConfigure)
 		if err != nil {
 			return prerequisites, fmt.Errorf("configure %s: %w (%s)", update.path, err, committedSummary(committed))
 		}

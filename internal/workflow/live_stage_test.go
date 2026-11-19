@@ -138,7 +138,7 @@ func (p *githubAppProviderStub) ReadFile(context.Context, providers.FixtureRepos
 	return providers.FileVersion{}, nil
 }
 
-func (p *githubAppProviderStub) UpdateFile(context.Context, providers.FixtureRepository, string, string, string, string) (providers.Commit, error) {
+func (p *githubAppProviderStub) UpdateFile(context.Context, providers.FixtureRepository, string, string, string, string, string) (providers.Commit, error) {
 	return providers.Commit{}, nil
 }
 

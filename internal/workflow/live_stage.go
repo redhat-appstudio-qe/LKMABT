@@ -502,7 +502,7 @@ func (s *LiveStage) triggerComponent(ctx context.Context, manifest *model.RunMan
 	}
 	comment := fmt.Sprintf(TriggerCommentFormat, manifest.RunID, time.Now().Unix())
 	content := strings.TrimRight(file.Content, "\n") + "\n" + comment + "\n"
-	commit, err := s.Provider.UpdateFile(ctx, s.Fixture, path, s.Request.SourceBranch, content, file.SHA)
+	commit, err := s.Provider.UpdateFile(ctx, s.Fixture, path, s.Request.SourceBranch, content, file.SHA, providers.CommitMessageTrigger)
 	if err != nil {
 		return providers.Commit{}, fmt.Errorf("trigger %s: %w", component, err)
 	}

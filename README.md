@@ -387,8 +387,9 @@ selection. This applies to configured tokens and browser logins.
 - Triggering first sets each fixture PipelineRun's `build-platforms`
   parameter to the selected architectures when it differs from the committed
   value, then appends one comment to each of the three Dockerfiles on the
-  fixture's default branch and commits it. The fixtures are shared; your
-  commits are visible to other users.
+  fixture's default branch and commits it. Configuration commits use
+  `[skip ci]`, so only the Dockerfile trigger commits start builds. The
+  fixtures are shared; your commits are visible to other users.
 - Build-output verification requires one successful output per selected
   architecture for every component; a missing or unlabeled platform fails as a
   pipeline misconfiguration. A component is accepted only after its

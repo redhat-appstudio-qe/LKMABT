@@ -187,7 +187,7 @@ func (a *Adapter) ReadFile(ctx context.Context, fixture providers.FixtureReposit
 // commit created by the update. The commit SHA is the post-update branch head,
 // validated against the pre-update head so another run's commit cannot be
 // misattributed to this run's trigger.
-func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepository, path, branch, content, expectedSHA string) (providers.Commit, error) {
+func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepository, path, branch, content, expectedSHA, message string) (providers.Commit, error) {
 	current, err := a.ReadFile(ctx, fixture, path, branch)
 	if err != nil {
 		return providers.Commit{}, err
@@ -203,7 +203,7 @@ func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepos
 		return providers.Commit{}, err
 	}
 	if err := providers.RetryOn5xx(ctx, a.retry, func() error {
-		return a.client.UpdateFile(project, path, content, branch, expectedSHA, "lkmabt trigger")
+		return a.client.UpdateFile(project, path, content, branch, expectedSHA, message)
 	}, isGitLab5xx); err != nil {
 		return providers.Commit{}, err
 	}
@@ -217,7 +217,7 @@ func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepos
 	if !slices.Contains(after.ParentIDs, before.ID) {
 		return providers.Commit{}, fmt.Errorf("gitlab branch %s moved during the update of %s: head %s does not descend from %s", branch, path, after.ID, before.ID)
 	}
-	return providers.Commit{SHA: after.ID, Message: "lkmabt trigger", CreatedAt: time.Now().UTC()}, nil
+	return providers.Commit{SHA: after.ID, Message: message, CreatedAt: time.Now().UTC()}, nil
 }
 
 // branchHead reads the head commit of a branch, retrying GitLab 5xx responses.

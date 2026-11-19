@@ -18,6 +18,7 @@ import (
 type recordingProvider struct {
 	files    map[string]string
 	updated  map[string]string
+	messages map[string]string
 	failPath string
 	commits  int
 }
@@ -37,7 +38,7 @@ func (p *recordingProvider) ReadFile(_ context.Context, _ providers.FixtureRepos
 }
 
 // UpdateFile records the replacement content and returns a distinct commit.
-func (p *recordingProvider) UpdateFile(_ context.Context, _ providers.FixtureRepository, path, _ string, content, _ string) (providers.Commit, error) {
+func (p *recordingProvider) UpdateFile(_ context.Context, _ providers.FixtureRepository, path, _ string, content, _, message string) (providers.Commit, error) {
 	if path == p.failPath {
 		return providers.Commit{}, fmt.Errorf("provider rejected %s", path)
 	}
@@ -45,8 +46,12 @@ func (p *recordingProvider) UpdateFile(_ context.Context, _ providers.FixtureRep
 	if p.updated == nil {
 		p.updated = make(map[string]string)
 	}
+	if p.messages == nil {
+		p.messages = make(map[string]string)
+	}
 	p.updated[path] = content
-	return providers.Commit{SHA: fmt.Sprintf("setup-%d", p.commits)}, nil
+	p.messages[path] = message
+	return providers.Commit{SHA: fmt.Sprintf("setup-%d", p.commits), Message: message}, nil
 }
 
 var _ = Describe("build platform configuration", func() {
@@ -133,6 +138,8 @@ var _ = Describe("build platform configuration", func() {
 			Expect(prerequisites).Should(HaveKeyWithValue("front", "setup-3"))
 			Expect(provider.updated).Should(HaveLen(3))
 			Expect(provider.updated[".tekton/web.yaml"]).Should(ContainSubstring("    - linux/s390x\n    - linux/ppc64le\n"))
+			Expect(provider.messages[".tekton/web.yaml"]).Should(Equal(providers.CommitMessageConfigure))
+			Expect(provider.messages[".tekton/web.yaml"]).Should(ContainSubstring("[skip ci]"))
 		})
 
 		It("does not commit when a later manifest is invalid", func() {

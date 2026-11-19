@@ -65,6 +65,13 @@ type FileVersion struct {
 	URL     string `json:"url,omitempty"`
 }
 
+// Commit subjects used by the harness. Configuration commits skip PaC so a
+// platform change does not create a throwaway build per component.
+const (
+	CommitMessageTrigger   = "lkmabt trigger"
+	CommitMessageConfigure = "lkmabt configure [skip ci]"
+)
+
 type Commit struct {
 	SHA       string    `json:"sha"`
 	URL       string    `json:"url,omitempty"`
@@ -77,8 +84,9 @@ type Provider interface {
 	ValidateFixture(context.Context, FixtureRepository) (FixtureRepository, error)
 	// ReadFile returns the requested file content and its current version metadata.
 	ReadFile(context.Context, FixtureRepository, string, string) (FileVersion, error)
-	// UpdateFile replaces file content only when its current SHA matches expectedSHA.
-	UpdateFile(context.Context, FixtureRepository, string, string, string, string) (Commit, error)
+	// UpdateFile replaces file content only when its current SHA matches
+	// expectedSHA, using message as the commit subject.
+	UpdateFile(context.Context, FixtureRepository, string, string, string, string, string) (Commit, error)
 }
 
 // ParseRepository extracts owner and name from a repository URL.

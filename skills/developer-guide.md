@@ -155,7 +155,7 @@ definitions via import when the same GVR is needed across packages.
 
 1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries, and the cluster's GitHub App installation (GitHub runs; interactive runs wait for and can extend a missing installation wait)
 2. **Fixture Ready** — Validate test repositories are accessible, read current Dockerfile SHAs
-3. **Triggered** — Set each fixture PipelineRun's `build-platforms` parameter to the selected architectures, append trigger comments to Dockerfiles, commit changes
+3. **Triggered** — Set each fixture PipelineRun's `build-platforms` parameter to the selected architectures, append trigger comments to Dockerfiles, commit changes. Configuration commits use the `lkmabt configure [skip ci]` subject so PaC creates no throwaway PipelineRun for them
 4. **Builds Verified** — Wait for PipelineRuns to succeed (timeout configurable)
 5. **Build Outputs Verified** — Confirm Buildah TaskRuns provide one successful output per selected architecture
 6. **Completed** — Prompt for namespace cleanup

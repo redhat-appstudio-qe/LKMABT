@@ -26,7 +26,7 @@ type client interface {
 	// GetFile reads a repository path at the requested branch.
 	GetFile(context.Context, string, string, string, string) (*gh.RepositoryContent, error)
 	// UpdateFile commits replacement content using the current file SHA.
-	UpdateFile(context.Context, string, string, string, string, string, string) (*gh.RepositoryContentResponse, error)
+	UpdateFile(context.Context, string, string, string, string, string, string, string) (*gh.RepositoryContentResponse, error)
 	// ListOrganizationInstallations lists the GitHub App installations for an organization.
 	ListOrganizationInstallations(context.Context, string) ([]*gh.Installation, error)
 	// ListUserInstallationRepositories lists the repositories the token can see for an installation.
@@ -54,8 +54,7 @@ func (c apiClient) GetFile(ctx context.Context, owner, name, path, branch string
 }
 
 // UpdateFile commits content to a GitHub repository using the supplied file SHA.
-func (c apiClient) UpdateFile(ctx context.Context, owner, name, path, content, branch, sha string) (*gh.RepositoryContentResponse, error) {
-	message := "lkmabt trigger"
+func (c apiClient) UpdateFile(ctx context.Context, owner, name, path, content, branch, sha, message string) (*gh.RepositoryContentResponse, error) {
 	response, _, err := c.client.Repositories.UpdateFile(ctx, owner, name, path, &gh.RepositoryContentFileOptions{Message: &message, Content: []byte(content), Branch: &branch, SHA: &sha})
 	return response, err
 }
@@ -339,7 +338,7 @@ func (a *Adapter) ReadFile(ctx context.Context, fixture providers.FixtureReposit
 }
 
 // UpdateFile checks the current SHA, commits replacement content, and returns commit metadata.
-func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepository, path, branch, content, expectedSHA string) (providers.Commit, error) {
+func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepository, path, branch, content, expectedSHA, message string) (providers.Commit, error) {
 	current, err := a.ReadFile(ctx, fixture, path, branch)
 	if err != nil {
 		return providers.Commit{}, err
@@ -350,13 +349,13 @@ func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepos
 	var updated *gh.RepositoryContentResponse
 	err = providers.RetryOn5xx(ctx, a.retry, func() error {
 		var err error
-		updated, err = a.client.UpdateFile(ctx, fixture.Owner, fixture.Name, path, content, branch, expectedSHA)
+		updated, err = a.client.UpdateFile(ctx, fixture.Owner, fixture.Name, path, content, branch, expectedSHA, message)
 		return err
 	}, isGitHub5xx)
 	if err != nil {
 		return providers.Commit{}, err
 	}
-	return providers.Commit{SHA: updated.Commit.GetSHA(), URL: updated.Commit.GetHTMLURL(), Message: "lkmabt trigger", CreatedAt: time.Now().UTC()}, nil
+	return providers.Commit{SHA: updated.Commit.GetSHA(), URL: updated.Commit.GetHTMLURL(), Message: message, CreatedAt: time.Now().UTC()}, nil
 }
 
 // isGitHub5xx reports whether err contains an HTTP 5xx GitHub response.
