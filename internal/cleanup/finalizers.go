@@ -11,7 +11,10 @@ import (
 	"k8s.io/client-go/dynamic"
 )
 
-// StripFinalizers removes finalizers from resources of gvr in namespace and returns the number changed.
+// StripFinalizers removes finalizers from resources of gvr in namespace by
+// patching metadata.finalizers to null, and returns the number of objects
+// changed. A namespace that is already gone yields (0, nil). Patching stops at
+// the first error, returning the count stripped so far.
 func StripFinalizers(ctx context.Context, client dynamic.Interface, namespace string, gvr schema.GroupVersionResource) (int, error) {
 	if client == nil {
 		return 0, fmt.Errorf("dynamic client is required")
@@ -39,6 +42,9 @@ func StripFinalizers(ctx context.Context, client dynamic.Interface, namespace st
 	return stripped, nil
 }
 
+// finalizerGVRs lists the resource types whose finalizers can block namespace
+// deletion. Controllers re-add them after Delete, so one pass is never a
+// guarantee; they come back like my Uncle Motl at a buffet.
 var finalizerGVRs = []schema.GroupVersionResource{
 	{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "applications"},
 	{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "components"},
@@ -47,7 +53,9 @@ var finalizerGVRs = []schema.GroupVersionResource{
 	{Group: "tekton.dev", Version: "v1", Resource: "pipelineruns"},
 }
 
-// StripAllFinalizers removes finalizers from the configured cleanup resource types in namespace.
+// StripAllFinalizers removes finalizers from finalizerGVRs in namespace. It
+// visits every type even after a failure and returns the total count plus the
+// first error, so one unresolvable type does not hide the others.
 func StripAllFinalizers(ctx context.Context, client dynamic.Interface, namespace string) (int, error) {
 	total := 0
 	var firstErr error

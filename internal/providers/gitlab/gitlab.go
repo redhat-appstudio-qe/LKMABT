@@ -1,3 +1,6 @@
+// Package gitlab implements the providers.Provider contract against the GitLab
+// REST API. Requests authenticate with a Bearer token so both OAuth tokens from
+// an interactive login and personal access tokens work.
 package gitlab
 
 import (
@@ -15,6 +18,8 @@ import (
 )
 
 const (
+	// CanonicalFixtureURL is the project ValidateFixture accepts; every other
+	// fixture is rejected.
 	CanonicalFixtureURL = "https://gitlab.com/konflux-qe/dr_test_mathwizz_gl"
 	canonicalProject    = "konflux-qe/dr_test_mathwizz_gl"
 )
@@ -48,7 +53,7 @@ func (c apiClient) GetFileMetaData(project, path, branch string) (*gl.File, erro
 	return result, err
 }
 
-// GetFile fetches encoded file content from the requested GitLab branch.
+// GetFile fetches base64-encoded file content from the requested GitLab branch.
 func (c apiClient) GetFile(project, path, branch string) (string, error) {
 	result, _, err := c.client.RepositoryFiles.GetFile(project, path, &gl.GetFileOptions{Ref: &branch})
 	if err != nil {
@@ -58,6 +63,8 @@ func (c apiClient) GetFile(project, path, branch string) (string, error) {
 }
 
 // UpdateFile commits file content to GitLab using the supplied last commit ID.
+// GitLab rejects the update when another commit has touched the file since, which
+// is how expectedSHA guards against a stale read.
 func (c apiClient) UpdateFile(project, path, content, branch, expectedSHA, message string) error {
 	_, _, err := c.client.RepositoryFiles.UpdateFile(project, path, &gl.UpdateFileOptions{Branch: &branch, Content: &content, LastCommitID: &expectedSHA, CommitMessage: &message})
 	return err
@@ -81,6 +88,8 @@ func (c apiClient) RevokeToken(ctx context.Context) error {
 	return err
 }
 
+// Adapter implements the fixture repository contract against GitLab using the
+// supplied API client and retry policy.
 type Adapter struct {
 	client client
 	retry  providers.RetryPolicy
@@ -91,7 +100,8 @@ func New(client client) *Adapter {
 	return NewWithRetry(client, providers.DefaultRetryPolicy())
 }
 
-// NewWithRetry creates a GitLab adapter with the supplied retry policy.
+// NewWithRetry creates a GitLab adapter with the supplied retry policy. A zero
+// policy retries nothing.
 func NewWithRetry(client client, retry providers.RetryPolicy) *Adapter {
 	return &Adapter{client: client, retry: retry}
 }
@@ -101,7 +111,11 @@ func NewFromEnv() (*Adapter, error) {
 	return NewFromCredentials(os.Getenv("GITLAB_BOT_TOKEN"), os.Getenv("GITLAB_API_URL"))
 }
 
-// NewFromCredentials validates a token and creates a GitLab adapter for apiURL.
+// NewFromCredentials checks that token is non-empty, defaults apiURL to
+// https://gitlab.com/api/v4, and creates a GitLab adapter. It makes no API
+// request. Authentication uses a Bearer token, which accepts both OAuth tokens
+// from an interactive login and GITLAB_BOT_TOKEN personal access tokens; the
+// PRIVATE-TOKEN header rejects OAuth tokens.
 func NewFromCredentials(token, apiURL string) (*Adapter, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("GITLAB_BOT_TOKEN is required")
@@ -109,8 +123,6 @@ func NewFromCredentials(token, apiURL string) (*Adapter, error) {
 	if strings.TrimSpace(apiURL) == "" {
 		apiURL = "https://gitlab.com/api/v4"
 	}
-	// Bearer auth accepts both glab's OAuth tokens (interactive login) and
-	// GITLAB_BOT_TOKEN access tokens; PRIVATE-TOKEN rejects OAuth tokens.
 	gitlabClient, err := gl.NewOAuthClient(token, gl.WithBaseURL(apiURL))
 	if err != nil {
 		return nil, err
@@ -128,7 +140,10 @@ func (a *Adapter) RevokeToken(ctx context.Context) error {
 	return a.client.RevokeToken(ctx)
 }
 
-// ValidateFixture confirms the project is the canonical GitLab test fixture.
+// ValidateFixture checks that fixture names the canonical GitLab project, fetches
+// it, and returns the canonical identity. fixture.URL may be empty, but when set
+// it must equal CanonicalFixtureURL. 5xx responses are retried; other read errors
+// are returned wrapped.
 func (a *Adapter) ValidateFixture(ctx context.Context, fixture providers.FixtureRepository) (providers.FixtureRepository, error) {
 	if a == nil || a.client == nil {
 		return providers.FixtureRepository{}, fmt.Errorf("gitlab client is required")
@@ -151,7 +166,11 @@ func (a *Adapter) ValidateFixture(ctx context.Context, fixture providers.Fixture
 	return providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl", URL: CanonicalFixtureURL}, nil
 }
 
-// ReadFile returns decoded file content and version metadata from GitLab.
+// ReadFile returns decoded file content and version metadata from GitLab. It
+// reads metadata and raw content in two requests, each retrying 5xx responses.
+// SHA is the last commit touching the file, falling back to the commit ID when
+// GitLab omits it, and URL carries the project-relative file path rather than a
+// web URL.
 func (a *Adapter) ReadFile(ctx context.Context, fixture providers.FixtureRepository, path, branch string) (providers.FileVersion, error) {
 	project := fixture.Owner + "/" + fixture.Name
 	var metadata *gl.File
@@ -186,7 +205,9 @@ func (a *Adapter) ReadFile(ctx context.Context, fixture providers.FixtureReposit
 // UpdateFile checks the current SHA, commits replacement content, and returns the
 // commit created by the update. The commit SHA is the post-update branch head,
 // validated against the pre-update head so another run's commit cannot be
-// misattributed to this run's trigger.
+// misattributed to this run's trigger. The update request retries 5xx responses;
+// the surrounding branch-head reads do too. CreatedAt is local time and URL is
+// left empty.
 func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepository, path, branch, content, expectedSHA, message string) (providers.Commit, error) {
 	current, err := a.ReadFile(ctx, fixture, path, branch)
 	if err != nil {

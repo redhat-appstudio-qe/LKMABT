@@ -24,7 +24,9 @@ func kfluxBinaryPath(home string) string {
 	return filepath.Join(home, ".local", "bin", kfluxBinaryName)
 }
 
-// ensureKflux returns a runnable kflux path, cloning and building it when PATH has none.
+// ensureKflux returns a runnable kflux path. A kflux on PATH is used as-is;
+// otherwise the source is cloned when absent, rebuilt on every call, and installed
+// under ~/.local/bin.
 func (l Ladder) ensureKflux(ctx context.Context) (string, error) {
 	// An existing kflux on PATH is used as-is; no pinning, no upgrade.
 	if path, err := l.Runner.LookPath(kfluxBinaryName); err == nil {
@@ -52,7 +54,8 @@ func (l Ladder) ensureKflux(ctx context.Context) (string, error) {
 	return target, nil
 }
 
-// installBinary copies an executable to target with mode 0755.
+// installBinary copies an executable to target with mode 0755, creating the
+// target's parent directory.
 func installBinary(source, target string) error {
 	in, err := os.Open(source)
 	if err != nil {

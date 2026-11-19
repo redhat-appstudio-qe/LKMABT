@@ -9,7 +9,8 @@ const redactedValue = "[REDACTED]"
 
 var sensitiveFragments = []string{"token", "password", "secret", "authorization", "credential"}
 
-// IsSensitiveKey reports whether key contains a credential-related fragment.
+// IsSensitiveKey reports whether key contains a credential-related fragment,
+// matched case-insensitively as a substring. Values are never inspected.
 func IsSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
 	for _, fragment := range sensitiveFragments {
@@ -20,7 +21,10 @@ func IsSensitiveKey(key string) bool {
 	return false
 }
 
-// Redact recursively replaces values under sensitive map keys with a redaction marker.
+// Redact recursively replaces values under sensitive map keys with a redaction
+// marker. It traverses only map[string]any and []any values, so callers holding
+// typed structs should use RedactedJSON, which normalizes them through JSON
+// first.
 func Redact(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
@@ -44,7 +48,10 @@ func Redact(value any) any {
 	}
 }
 
-// RedactedJSON marshals value as indented JSON after redacting sensitive fields.
+// RedactedJSON marshals value as two-space-indented JSON after redacting
+// sensitive map keys. Matching uses JSON key names only; free-form values such
+// as condition messages or log text are not inspected. The result has no
+// trailing newline.
 func RedactedJSON(value any) ([]byte, error) {
 	data, err := json.Marshal(value)
 	if err != nil {

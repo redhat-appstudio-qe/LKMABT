@@ -18,24 +18,33 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+// TaskRunGVR selects v1 TaskRuns from the Tekton API group.
 var TaskRunGVR = schema.GroupVersionResource{Group: "tekton.dev", Version: "v1", Resource: "taskruns"}
 
+// DefaultLogTailLines bounds each failed-step log to its last 80 lines.
 const DefaultLogTailLines int64 = 80
 
+// FailedBuildLog is the run manifest entry describing a failed TaskRun step.
 type FailedBuildLog = model.FailedBuildLog
 
+// FailedBuildCollector records failed PipelineRun TaskRuns and captures their
+// failed-step logs. Dynamic is required; Kubernetes is optional and, when nil,
+// leaves LogPath empty. TailLines defaults to DefaultLogTailLines when zero or
+// negative.
 type FailedBuildCollector struct {
 	Dynamic    dynamic.Interface
 	Kubernetes kubernetes.Interface
 	TailLines  int64
 }
 
+// FailedStep identifies a terminated step container and its non-zero exit code.
 type FailedStep struct {
 	Container string
 	ExitCode  int64
 }
 
-// FindFailedStepContainers returns terminated TaskRun steps with non-zero exit codes.
+// FindFailedStepContainers returns terminated TaskRun steps with non-zero exit
+// codes. A step without a container name is reported as "step-<name>".
 func FindFailedStepContainers(taskRun *unstructured.Unstructured) []FailedStep {
 	if taskRun == nil {
 		return nil
@@ -79,7 +88,13 @@ func toInt64(value any) (int64, bool) {
 	}
 }
 
-// CollectFailedBuildLogs records failed TaskRuns and writes available failed-step logs.
+// CollectFailedBuildLogs records failed TaskRuns and writes available
+// failed-step logs. It returns one entry per failed step, or one entry without a
+// step when the TaskRun has no terminated non-zero step. An empty outputDir or a
+// missing pod name or Kubernetes client skips log files and leaves LogPath
+// empty; a failed log fetch also leaves it empty without failing collection.
+// Beyond argument validation and the initial directory creation, only listing
+// TaskRuns returns an error. Namespace and pipelineRunName are required.
 func (c FailedBuildCollector) CollectFailedBuildLogs(ctx context.Context, namespace, pipelineRunName, outputDir string) ([]FailedBuildLog, error) {
 	if c.Dynamic == nil {
 		return nil, fmt.Errorf("dynamic client is required")
@@ -135,7 +150,9 @@ func (c FailedBuildCollector) CollectFailedBuildLogs(ctx context.Context, namesp
 	return logs, nil
 }
 
-// writeContainerLog fetches a bounded container log and returns its path under failed-builds.
+// writeContainerLog fetches a bounded container log and returns its path under
+// failed-builds. Fetching stops after 30 seconds, and TailLines bounds the
+// response.
 func (c FailedBuildCollector) writeContainerLog(ctx context.Context, namespace, podName, container, taskRunName, outputDir string) (string, error) {
 	tailLines := c.TailLines
 	if tailLines <= 0 {

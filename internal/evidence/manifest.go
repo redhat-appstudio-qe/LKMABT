@@ -12,6 +12,9 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/model"
 )
 
+// ManifestStore persists run manifests and status snapshots under Root. Writes
+// are redacted and atomic. Save and Transition create the run directory when
+// missing; Create refuses an existing one.
 type ManifestStore struct {
 	Root string
 }
@@ -35,7 +38,9 @@ func (s ManifestStore) RunDirFor(manifest model.RunManifest) string {
 	return filepath.Join(s.Root, directory)
 }
 
-// ArtifactDirectoryName builds a provider-and-time-based directory name for a run.
+// ArtifactDirectoryName builds a provider-and-time-based directory name for a
+// run as <provider>-run-<HH:MM>_<D.M.YYYY>_<runID>. An empty provider becomes
+// "run".
 func ArtifactDirectoryName(provider string, createdAt time.Time, runID string) string {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
@@ -44,7 +49,10 @@ func ArtifactDirectoryName(provider string, createdAt time.Time, runID string) s
 	return fmt.Sprintf("%s-run-%s_%s", provider, createdAt.Format("15:04")+"_"+createdAt.Format("2.1.2006"), runID)
 }
 
-// Create initializes and persists a run manifest.
+// Create initializes and persists a run manifest. A zero CreatedAt defaults to
+// the current time and an empty ArtifactDirectory is generated. It creates a new
+// run directory, writes manifest.json and status.json, and fails if the
+// directory already exists.
 func (s ManifestStore) Create(manifest *model.RunManifest) error {
 	if manifest == nil || strings.TrimSpace(manifest.RunID) == "" {
 		return errors.New("run ID is required")
@@ -80,7 +88,9 @@ func (s ManifestStore) Create(manifest *model.RunManifest) error {
 	return nil
 }
 
-// Save updates a run manifest and its status file.
+// Save updates a run manifest and its status file. It fills an empty
+// ArtifactDirectory, sets UpdatedAt to the current time, and creates the run
+// directory when absent.
 func (s ManifestStore) Save(manifest *model.RunManifest) error {
 	if manifest == nil || manifest.RunID == "" {
 		return errors.New("run ID is required")
@@ -119,7 +129,9 @@ func (s ManifestStore) Transition(manifest *model.RunManifest, phase model.Phase
 	return nil
 }
 
-// Load reads the manifest for runID from its artifact directory.
+// Load reads the manifest for runID from its artifact directory. It checks the
+// legacy root/<runID> path first, then scans permanent run directories and
+// ignores the latest aggregate and dot-prefixed entries.
 func (s ManifestStore) Load(runID string) (model.RunManifest, error) {
 	directory, err := s.findRunDir(runID)
 	if err != nil {

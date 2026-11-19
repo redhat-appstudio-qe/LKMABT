@@ -14,7 +14,9 @@ type Store struct {
 	directory string
 }
 
-// NewStore creates a private directory for run-scoped credentials.
+// NewStore creates a private directory for run-scoped credentials. The directory
+// is created with mode 0700 in the OS temporary directory and must be removed
+// with Destroy.
 func NewStore() (*Store, error) {
 	directory, err := os.MkdirTemp("", storePrefix)
 	if err != nil {
@@ -23,7 +25,8 @@ func NewStore() (*Store, error) {
 	return &Store{directory: directory}, nil
 }
 
-// Directory returns the directory holding the credentials.
+// Directory returns the directory holding the credentials, or an empty string
+// for a nil store or one already destroyed.
 func (s *Store) Directory() string {
 	if s == nil {
 		return ""
@@ -31,7 +34,8 @@ func (s *Store) Directory() string {
 	return s.directory
 }
 
-// Write stores a credential in a 0600 file.
+// Write stores a credential in a 0600 file, overwriting any existing value. It
+// returns an error when the store is nil or not initialized.
 func (s *Store) Write(name, value string) error {
 	if s == nil || s.directory == "" {
 		return fmt.Errorf("credential store is not initialized")
@@ -42,7 +46,9 @@ func (s *Store) Write(name, value string) error {
 	return nil
 }
 
-// Destroy removes every stored credential and reports whether the directory is gone.
+// Destroy recursively removes every stored credential and reports whether the
+// directory is gone. It is safe to call on a nil or already destroyed store, and
+// clears the directory so later Write calls fail.
 func (s *Store) Destroy() error {
 	if s == nil || s.directory == "" {
 		return nil

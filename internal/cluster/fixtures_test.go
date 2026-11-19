@@ -225,6 +225,7 @@ var _ = Describe("FixtureService", func() {
 					scmCredentialsLabel: "scm",
 					scmHostnameLabel:    "gitlab.com",
 				},
+				"annotations": map[string]any{scmSecretRepositoryAnnotation: "o/r"},
 			},
 			"type": "kubernetes.io/basic-auth",
 			"data": map[string]any{"password": "existing-token"},
@@ -247,6 +248,47 @@ var _ = Describe("FixtureService", func() {
 		}
 		Expect(found).To(BeTrue())
 		Expect(password).To(Equal("existing-token"))
+	})
+
+	It("does not reuse a GitLab SCM Secret scoped to another repository", func() {
+		client := fixtureTestClient(&unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Secret",
+			"metadata": map[string]any{
+				"name":      "other-repo-secret",
+				"namespace": "tenant",
+				"labels": map[string]any{
+					scmCredentialsLabel: "scm",
+					scmHostnameLabel:    "gitlab.com",
+				},
+				"annotations": map[string]any{scmSecretRepositoryAnnotation: "other/repo"},
+			},
+			"type": "kubernetes.io/basic-auth",
+			"data": map[string]any{"password": "other-token"},
+		}})
+
+		if _, err := (fixtureTestService(client)).EnsureFixture(context.Background(), testFixtureSpec("gitlab", "new-token")); err != nil {
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		secret, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), GitLabCredentialSecretName, metav1.GetOptions{})
+		if err != nil {
+			Expect(err).NotTo(HaveOccurred())
+		}
+		password, found, err := unstructured.NestedString(secret.Object, "stringData", "password")
+		if err != nil {
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(found).To(BeTrue())
+		Expect(password).To(Equal("new-token"))
+		Expect(secret.GetAnnotations()).Should(HaveKeyWithValue(scmSecretRepositoryAnnotation, "o/r"))
+
+		other, err := client.Resource(SecretGVR).Namespace("tenant").Get(context.Background(), "other-repo-secret", metav1.GetOptions{})
+		if err != nil {
+			Expect(err).NotTo(HaveOccurred())
+		}
+		otherPassword, _, _ := unstructured.NestedString(other.Object, "data", "password")
+		Expect(otherPassword).To(Equal("other-token"))
 	})
 
 	It("preserves unrelated existing Secret", func() {

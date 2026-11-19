@@ -1,3 +1,5 @@
+// Package config parses command-line arguments and environment values into a
+// validated LKMABT request.
 package config
 
 import (
@@ -13,20 +15,38 @@ import (
 )
 
 const (
-	CommandRun                   = "run"
-	CommandCleanup               = "cleanup"
-	ProviderGitHub               = "github"
-	ProviderGitLab               = "gitlab"
-	ProviderBoth                 = "both"
-	DefaultStateDir              = ".lkmabt-runs"
-	DefaultGitHubRepo            = "https://github.com/redhat-appstudio-qe/dr_test_mathwizz"
-	DefaultGitLabRepo            = "https://gitlab.com/konflux-qe/dr_test_mathwizz_gl"
+	// CommandRun is the request command recorded for fixture runs; it is not a
+	// CLI subcommand.
+	CommandRun = "run"
+	// CommandCleanup is the request command for removing one run's namespace.
+	CommandCleanup = "cleanup"
+	// ProviderGitHub runs the GitHub fixture only.
+	ProviderGitHub = "github"
+	// ProviderGitLab runs the GitLab fixture only.
+	ProviderGitLab = "gitlab"
+	// ProviderBoth runs the GitHub and GitLab fixtures for every cluster.
+	ProviderBoth = "both"
+	// DefaultStateDir is the default run state directory, relative to the
+	// working directory.
+	DefaultStateDir = ".lkmabt-runs"
+	// DefaultGitHubRepo is the fixed GitHub fixture repository.
+	DefaultGitHubRepo = "https://github.com/redhat-appstudio-qe/dr_test_mathwizz"
+	// DefaultGitLabRepo is the fixed GitLab fixture repository.
+	DefaultGitLabRepo = "https://gitlab.com/konflux-qe/dr_test_mathwizz_gl"
+	// DefaultGitHubTenantNamespace is the persistent tenant namespace of the
+	// GitHub fixture.
 	DefaultGitHubTenantNamespace = "mathwizz-test-github"
+	// DefaultGitLabTenantNamespace is the persistent tenant namespace of the
+	// GitLab fixture.
 	DefaultGitLabTenantNamespace = "mathwizz-test-gitlab"
-	DefaultBranch                = "main"
-	DefaultEnvFile               = ".lkmabt.env"
+	// DefaultBranch is the default branch of the fixture repositories.
+	DefaultBranch = "main"
+	// DefaultEnvFile is the dotenv file Parse reads when --env-file is not given.
+	DefaultEnvFile = ".lkmabt.env"
 )
 
+// DefaultComponentPaths lists the fixture component Dockerfiles whose images
+// the run builds. Defaults copies the slice.
 var DefaultComponentPaths = []string{
 	"web-server/Dockerfile",
 	"history-worker/Dockerfile",
@@ -42,30 +62,48 @@ var DefaultTektonPaths = []string{
 	".tekton/konflux-test-mathwizz-frontend-push.yaml",
 }
 
+// Credentials holds the provider tokens resolved for one request. The zero
+// value leaves authentication to the caller's auth ladder.
 type Credentials struct {
-	GitHubToken  string
-	GitLabToken  string
+	// GitHubToken is the GitHub API token; empty means no token was found.
+	GitHubToken string
+	// GitLabToken is the GitLab API token; empty means no token was found.
+	GitLabToken string
+	// GitLabAPIURL is the GitLab API base URL; empty means the provider default.
 	GitLabAPIURL string
 	// GitLabTokenEphemeral marks a token acquired for this run only. Its SCM
 	// Secret is removed after the run.
 	GitLabTokenEphemeral bool
 }
 
+// Timeouts bounds each workflow phase; each value must be positive for a run.
 type Timeouts struct {
 	Preflight time.Duration
 	Trigger   time.Duration
 	Build     time.Duration
 }
 
+// Request is one parsed and validated invocation. Fields left empty by Parse
+// are filled in by later stages, such as the cluster connection.
 type Request struct {
-	Command          string
-	Provider         string
-	MultiProvider    bool
-	RunID            string
-	ClusterServer    string
-	ClustersFile     string
-	ClusterName      string
-	Kubeconfig       string
+	// Command is CommandRun or CommandCleanup.
+	Command string
+	// Provider is the selected fixture for a run; empty for cleanup.
+	Provider string
+	// MultiProvider reports whether both fixtures run in this invocation.
+	MultiProvider bool
+	// RunID names the cleanup target; run requests leave it empty and generate
+	// identifiers later.
+	RunID string
+	// ClusterServer is the cluster API URL, set during preflight or by cleanup.
+	ClusterServer string
+	// ClustersFile is the YAML cluster list.
+	ClustersFile string
+	// ClusterName and Kubeconfig identify the cleanup target or the current cluster.
+	ClusterName string
+	Kubeconfig  string
+	// StateDir is the run state root; a relative path resolves against the
+	// working directory.
 	StateDir         string
 	TenantNamespace  string
 	ApplicationName  string
@@ -73,12 +111,16 @@ type Request struct {
 	SourceBranch     string
 	ComponentPaths   []string
 	TektonPaths      []string
-	Platforms        []string
-	Timeouts         Timeouts
-	Credentials      Credentials
+	// Platforms holds canonical platform names; Parse expands architecture
+	// aliases before storing them here.
+	Platforms   []string
+	Timeouts    Timeouts
+	Credentials Credentials
 }
 
 // Defaults returns a request populated with the tool's default run settings.
+// Slice fields are fresh copies safe for the caller to modify; Parse applies
+// flags and environment values on top of these defaults.
 func Defaults() Request {
 	return Request{
 		ClustersFile:     clusterfile.DefaultPath,
@@ -99,6 +141,16 @@ func Defaults() Request {
 }
 
 // Parse builds and validates a request from command-line arguments and environment values.
+// The first argument selects the fixture (github, gitlab, or both) or cleanup.
+// Cleanup defines only --run-id, --cluster, --clusters-file, and --state-dir.
+// For a fixture command, optional architecture arguments follow the command and
+// must precede flags; without them every supported platform is selected.
+// Process environment values take precedence over env-file values, except that a
+// GitLab token and API URL must come from the same source. The default env file
+// is optional, but an explicitly named one must be readable and well formed;
+// an empty --env-file disables env-file reading. The env file is read only for
+// a fixture command. Flag parse errors are printed to stderr and returned.
+// Parse returns the request along with the validation error, if any.
 func Parse(args []string) (Request, error) {
 	if len(args) == 0 {
 		return Request{}, fmt.Errorf("usage: lkmabt <github|gitlab|both> [%s]... [flags] | lkmabt cleanup --cluster <name> --run-id <id> [flags]", strings.Join(platform.Names(), "|"))
@@ -192,7 +244,9 @@ func Parse(args []string) (Request, error) {
 }
 
 // architectureArguments consumes leading non-flag arguments and splits each on
-// commas, so `s390x arm64` and `s390x, arm64` select the same platforms.
+// commas, so `s390x arm64` and `s390x, arm64` select the same platforms. It
+// stops at the first argument beginning with "-" and returns the rest for flag
+// parsing; an empty entry in any argument is an error.
 func architectureArguments(args []string) (names, remaining []string, err error) {
 	remaining = args
 	for len(remaining) > 0 && !strings.HasPrefix(remaining[0], "-") {
@@ -216,9 +270,11 @@ func architectureArguments(args []string) (names, remaining []string, err error)
 }
 
 // credentialsFromEnv resolves provider credentials from the environment and env-file values.
-// A GitLab token and its API URL always come from the same source; when the
-// token's source has no URL but the other source does, the request fails
-// instead of silently sending the token to the default endpoint.
+// GITHUB_TOKEN prefers the process environment and falls back to the env file.
+// For GitLab, a process GITLAB_BOT_TOKEN wins over an env-file one. A GitLab token
+// and its API URL always come from the same source; when the token's source has
+// no URL but the other source does, the call fails instead of silently sending
+// the token to the default endpoint.
 func credentialsFromEnv(fileValues map[string]string, gitlab bool) (Credentials, error) {
 	credentials := Credentials{GitHubToken: envValue("GITHUB_TOKEN", fileValues)}
 	if !gitlab {
@@ -249,7 +305,8 @@ func credentialsFromEnv(fileValues map[string]string, gitlab bool) (Credentials,
 	return credentials, nil
 }
 
-// envValue returns a nonempty process value for key, falling back to fileValues.
+// envValue returns a trimmed, nonempty process value for key, falling back to
+// fileValues.
 func envValue(key string, fileValues map[string]string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 		return value
@@ -257,7 +314,10 @@ func envValue(key string, fileValues map[string]string) string {
 	return fileValues[key]
 }
 
-// readEnvFile parses KEY=VALUE entries from path, ignoring blank lines and comments.
+// readEnvFile parses KEY=VALUE entries from path, ignoring blank lines and
+// comments. An optional "export " prefix and one pair of surrounding single or
+// double quotes are stripped. A line without "=" or with an empty key is an
+// error that names the path and 1-based line number.
 func readEnvFile(path string) (map[string]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -284,7 +344,15 @@ func readEnvFile(path string) (map[string]string, error) {
 	return values, nil
 }
 
-// Validate checks that the request has supported commands, settings, and credentials.
+// Validate checks that the request has a supported command and a complete
+// configuration. Both commands require a clusters file and state directory; a
+// cleanup also requires a valid RunID and ClusterName. A run additionally
+// requires a supported provider, exactly the default number of component paths
+// with one Tekton path each, at least one supported platform without duplicates,
+// positive timeouts, a nonempty application and tenant namespace, the selected
+// provider's fixed fixture repository, and for both the GitHub fixture
+// repository and tenant namespace. Validate does not read the clusters file or
+// contact providers.
 func (r Request) Validate() error {
 	if r.Command == "" {
 		return errors.New("command is required")
@@ -362,7 +430,8 @@ func (r Request) Validate() error {
 	return nil
 }
 
-// validRunID reports whether value uses only allowed run ID characters and length.
+// validRunID reports whether value uses only allowed run ID characters and length:
+// 1 to 100 ASCII letters, digits, '-', '_', or '.'.
 func validRunID(value string) bool {
 	if value == "" || len(value) > 100 {
 		return false

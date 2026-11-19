@@ -9,7 +9,10 @@ import (
 	"sync"
 )
 
-// RunLog buffers run output until it can be attached to the run directory's log file.
+// RunLog buffers a provider run's output until its run directory exists and the
+// output can be attached to that directory's log file. Implementations must be
+// safe for concurrent Write and Attach calls; Attach after the first successful
+// call is a no-op.
 type RunLog interface {
 	// Write appends bytes to the log.
 	Write(p []byte) (int, error)
@@ -17,6 +20,8 @@ type RunLog interface {
 	Attach(path string) error
 }
 
+// runLog is the RunLog used by one provider run. It buffers output until Attach
+// creates the log file and writes later output directly to that file.
 type runLog struct {
 	mu     sync.Mutex
 	buffer bytes.Buffer
@@ -28,7 +33,8 @@ func newRunLog() *runLog {
 	return &runLog{}
 }
 
-// newAttachedRunLog returns a run log already writing to path.
+// newAttachedRunLog returns a run log already writing to path, creating the
+// parent directories and an empty file when needed.
 func newAttachedRunLog(path string) (*runLog, error) {
 	log := newRunLog()
 	if err := log.Attach(path); err != nil {
@@ -37,7 +43,8 @@ func newAttachedRunLog(path string) (*runLog, error) {
 	return log, nil
 }
 
-// Write appends to the attached file, or to the buffer while no file is attached.
+// Write appends to the attached file, or to the buffer while no file is
+// attached. It is safe for concurrent use.
 func (l *runLog) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -74,7 +81,9 @@ func (l *runLog) flushBuffer(w io.Writer) error {
 	return nil
 }
 
-// Attach creates path, flushes buffered output into it, and sends later writes there.
+// Attach creates path and its parent directories, flushes buffered output into
+// it, and sends later writes there. It is a no-op after a successful attach. If
+// the flush fails, the file is closed and the unwritten bytes stay buffered.
 func (l *runLog) Attach(path string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -96,7 +105,8 @@ func (l *runLog) Attach(path string) error {
 	return nil
 }
 
-// Close flushes and closes the attached file.
+// Close closes the attached file. Output buffered without an attachment is
+// discarded; calling Close again is a no-op.
 func (l *runLog) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

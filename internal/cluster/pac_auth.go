@@ -23,8 +23,12 @@ const (
 	PacAuthSecretGracePeriod = 2 * time.Minute
 )
 
-// MissingPacAuthSecretError reports a pending PipelineRun whose PaC git authentication Secret is gone.
+// MissingPacAuthSecretError reports a pending PipelineRun whose PaC git
+// authentication Secret is gone. Pending is how long the PipelineRun had been
+// pending when the Secret was found missing.
 type MissingPacAuthSecretError struct {
+	// Namespace, PipelineRun, Component, and Secret identify the pending
+	// PipelineRun and the missing Secret.
 	Namespace   string
 	PipelineRun string
 	Component   string
@@ -36,7 +40,8 @@ type MissingPacAuthSecretError struct {
 	Reconciled bool
 }
 
-// Error distinguishes a Secret PaC created and then deleted from one PaC never created.
+// Error distinguishes a Secret PaC created and then deleted from one PaC never
+// created, naming the check to run in each case.
 func (e *MissingPacAuthSecretError) Error() string {
 	state := fmt.Sprintf("PipelineRun %s/%s for component %s has been pending for %s and its PaC git authentication Secret %q",
 		e.Namespace, e.PipelineRun, e.Component, e.Pending.Round(time.Second), e.Secret)
@@ -52,14 +57,25 @@ func (e *MissingPacAuthSecretError) Error() string {
 
 // PacAuthInspector detects PipelineRuns that can never start because PaC's git Secret disappeared.
 type PacAuthInspector struct {
+	// Kubernetes reads the referenced Secrets; it is required.
 	Kubernetes kubernetes.Interface
-	Now        func() time.Time
-	Grace      time.Duration
+	// Now supplies the current time; nil means time.Now.
+	Now func() time.Time
+	// Grace is how long a PipelineRun may wait for its Secret before
+	// inspection; zero means PacAuthSecretGracePeriod.
+	Grace time.Duration
 }
 
-// Missing returns a typed error for the first non-terminal annotated PipelineRun
-// past its grace period whose Secret is absent. A failed Secret Get is reported
-// as an inspection error so the caller can warn without failing the wait.
+// Missing returns a typed error for the first non-terminal annotated
+// PipelineRun past its grace period whose Secret is absent. It skips
+// PipelineRuns without the git-auth annotation, those whose Succeeded condition
+// is True or False, and those without a creation timestamp. A failed Secret Get
+// is reported as an inspection error so the caller can warn without failing the
+// wait; (nil, nil) means no inspected PipelineRun is missing its Secret.
+//
+// A Secret PaC created and then lost usually means another actor—often a
+// concurrent run—removed it; one PaC never created means the watcher never
+// reconciled the PipelineRun. Either way, the build is waiting for gornisht.
 func (i PacAuthInspector) Missing(ctx context.Context, namespace string, pipelineRuns []unstructured.Unstructured) (*MissingPacAuthSecretError, error) {
 	if i.Kubernetes == nil {
 		return nil, fmt.Errorf("kubernetes client is required to inspect PaC git authentication Secrets")

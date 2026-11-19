@@ -11,7 +11,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TryAcquire takes an exclusive non-blocking lock on path and returns its release function.
+// TryAcquire takes an exclusive, non-blocking advisory lock on path and returns
+// an idempotent release function. It creates the file with mode 0600 when
+// absent, refuses symlinks and non-regular files, and never waits. Contention,
+// including a second acquisition in the same process, wraps ErrLocked; other
+// failures describe the open, stat, or flock error. Callers must invoke release
+// to unlock early; the lock also drops when the process exits.
+//
+// The O_NOFOLLOW and regular-file checks are deliberate: a lock file that
+// points somewhere else, or is a device, is not a lock—it is a suggestion.
 func TryAcquire(path string) (func(), error) {
 	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
 	if err != nil {

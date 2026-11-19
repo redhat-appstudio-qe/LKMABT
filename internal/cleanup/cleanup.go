@@ -19,16 +19,20 @@ import (
 	"k8s.io/client-go/dynamic"
 )
 
+// Namespace ownership labels written by LKMABT runs; RunIDLabel carries the
+// run identifier used as the deletion ownership check.
 const (
 	ManagedByLabel = "app.konflux-ci.org/managed-by"
 	RunIDLabel     = "app.konflux.org/run-id"
 	ManagedByValue = "lkmabt"
 )
 
+// NamespaceGVR addresses core/v1 namespaces.
 var NamespaceGVR = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
 
-// NamespaceInfo is a namespace's name, ownership labels, run ID, and object
-// identity; UID and ResourceVersion are the approval and delete preconditions.
+// NamespaceInfo is a namespace's name, labels, run ID, and object identity. UID
+// guards the deletion wait; UID and ResourceVersion are the DeleteApproved
+// preconditions.
 type NamespaceInfo struct {
 	Name            string
 	RunID           string
@@ -37,22 +41,31 @@ type NamespaceInfo struct {
 	Labels          map[string]string
 }
 
-// Owned reports whether the namespace carries both exact LKMABT ownership labels.
+// Owned reports whether Labels[ManagedByLabel] is exactly ManagedByValue and
+// RunID is non-blank. It does not verify that the namespace belongs to a
+// specific run; compare RunID for that.
 func (i NamespaceInfo) Owned() bool {
 	return i.Labels[ManagedByLabel] == ManagedByValue && strings.TrimSpace(i.RunID) != ""
 }
 
+// NamespaceNameLister enumerates namespace names from a cluster.
 type NamespaceNameLister interface {
 	// List returns the names of namespaces visible to the lister.
 	List(context.Context) ([]string, error)
 }
 
+// NamespaceService inspects, deletes, and waits on namespaces through a dynamic
+// client. NameLister defaults to OCNamespaceNameLister when nil, and
+// PollInterval <= 0 makes WaitDeleted poll every 250ms.
 type NamespaceService struct {
 	Dynamic      dynamic.Interface
 	NameLister   NamespaceNameLister
 	PollInterval time.Duration
 }
 
+// OCNamespaceNameLister lists namespaces by running an oc-compatible CLI.
+// Command defaults to $LKMABT_OC and then "oc"; Kubeconfig, when non-empty, is
+// passed to the CLI as KUBECONFIG.
 type OCNamespaceNameLister struct {
 	Command    string
 	Kubeconfig string
@@ -71,7 +84,7 @@ func (l OCNamespaceNameLister) List(ctx context.Context) ([]string, error) {
 	}
 	var stderr bytes.Buffer
 	command := exec.CommandContext(ctx, name, "get", "namespaces", "-o", "name", "--no-headers")
-	// List the selected cluster: bind the CLI to the run's kubeconfig, never the ambient one.
+	// Bind the CLI to the configured kubeconfig; an empty value inherits the ambient environment.
 	if kubeconfig := strings.TrimSpace(l.Kubeconfig); kubeconfig != "" {
 		command.Env = append(os.Environ(), "KUBECONFIG="+kubeconfig)
 	}
@@ -109,7 +122,9 @@ func parseNamespaceNames(output []byte) ([]string, error) {
 	return names, nil
 }
 
-// Inspect fetches one namespace and returns its name, labels, and run ID.
+// Inspect fetches one namespace and returns its name, labels, run ID, UID, and
+// resourceVersion. It fails when the dynamic client is nil or name is empty;
+// a missing namespace returns the API's NotFound error.
 func (s NamespaceService) Inspect(ctx context.Context, name string) (NamespaceInfo, error) {
 	if s.Dynamic == nil {
 		return NamespaceInfo{}, fmt.Errorf("dynamic client is required")
@@ -124,7 +139,10 @@ func (s NamespaceService) Inspect(ctx context.Context, name string) (NamespaceIn
 	return namespaceInfo(object), nil
 }
 
-// FindScoped returns every namespace named target or prefixed with "target-", owned or not.
+// FindScoped returns every namespace named target or prefixed with "target-",
+// sorted by name. Ownership is not filtered here; callers must check Owned and
+// the run ID before deleting. Namespaces deleted between listing and
+// inspection are skipped.
 func (s NamespaceService) FindScoped(ctx context.Context, target string) ([]NamespaceInfo, error) {
 	if s.Dynamic == nil {
 		return nil, fmt.Errorf("dynamic client is required")
@@ -161,8 +179,10 @@ func (s NamespaceService) FindScoped(ctx context.Context, target string) ([]Name
 }
 
 // Delete removes name only after confirming exact manager and run ID ownership
-// labels. It returns the UID it verified, so a later wait cannot strip
-// finalizers from a replacement namespace that reuses the name.
+// labels; an empty runID fails. It returns the UID it verified, so a later
+// WaitDeleted call cannot strip finalizers from a replacement namespace that
+// reuses the name. Finalizer-stripping errors are ignored so the delete request
+// still proceeds and WaitDeleted can retry the strip.
 func (s NamespaceService) Delete(ctx context.Context, name, runID string) (types.UID, error) {
 	if runID == "" {
 		return "", fmt.Errorf("run ID is required for namespace deletion")
@@ -186,9 +206,11 @@ func (s NamespaceService) Delete(ctx context.Context, name, runID string) (types
 
 // DeleteApproved removes an explicitly approved namespace after re-reading it and
 // confirming its name, identity, labels, and run ID are unchanged since the
-// approval. The delete request carries the approved UID and resourceVersion as
-// preconditions, so a replaced object fails the deletion. Finalizer stripping
-// runs after that re-inspection; its failure aborts the deletion.
+// approval. Any drift invalidates the approval. Finalizer stripping runs after
+// that re-inspection and aborts on error; the delete request then carries the
+// approved UID and resourceVersion as preconditions, so a replaced object fails
+// the deletion. A namespace that disappears between inspection and the delete
+// request is not an error.
 func (s NamespaceService) DeleteApproved(ctx context.Context, approved NamespaceInfo) error {
 	if strings.TrimSpace(approved.Name) == "" {
 		return fmt.Errorf("namespace name is required")
@@ -216,9 +238,12 @@ func (s NamespaceService) DeleteApproved(ctx context.Context, approved Namespace
 var finalizerStripInterval = 5 * time.Second
 
 // WaitDeleted polls until name no longer exists or ctx is canceled. It re-strips
-// finalizers because controllers can re-add them after Delete, which would
-// otherwise leave the namespace stuck terminating. A namespace whose UID no
-// longer matches the deleted one belongs to another actor and is never stripped.
+// finalizers at most every finalizerStripInterval because controllers can re-add
+// them after Delete, which would otherwise leave the namespace stuck
+// terminating. It has no internal deadline; callers bound the wait through ctx.
+// A namespace whose UID no longer matches uid belongs to another actor: the call
+// fails instead of stripping it. An empty uid disables that guard. If the last
+// strip also failed, the ctx error reports it.
 func (s NamespaceService) WaitDeleted(ctx context.Context, name string, uid types.UID) error {
 	if s.Dynamic == nil {
 		return fmt.Errorf("dynamic client is required")
@@ -259,8 +284,11 @@ func (s NamespaceService) WaitDeleted(ctx context.Context, name string, uid type
 	}
 }
 
-// DeletionBlocker summarizes why a terminating namespace has not disappeared.
-// It returns an empty string when the namespace is gone or reports no blockers.
+// DeletionBlocker summarizes why a terminating namespace has not disappeared,
+// joining the messages of True NamespaceContentRemaining and
+// NamespaceFinalizersRemaining conditions. It returns an empty string when the
+// namespace is gone, reports no blockers, or cannot be read; the result is
+// advisory only.
 func (s NamespaceService) DeletionBlocker(ctx context.Context, name string) string {
 	if s.Dynamic == nil {
 		return ""
@@ -290,7 +318,7 @@ func (s NamespaceService) DeletionBlocker(ctx context.Context, name string) stri
 	return strings.Join(blockers, "; ")
 }
 
-// namespaceInfo copies namespace identity and labels into the service's value representation.
+// namespaceInfo copies labels so later object mutations cannot alias the returned value.
 func namespaceInfo(object *unstructured.Unstructured) NamespaceInfo {
 	labels := object.GetLabels()
 	copyLabels := make(map[string]string, len(labels))

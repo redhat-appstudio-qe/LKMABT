@@ -27,7 +27,9 @@ func defaultTenantLockDirectory() (string, error) {
 	return filepath.Join(base, "lkmabt", "locks"), nil
 }
 
-// tenantLockPath returns the lock file that guards namespace on server.
+// tenantLockPath returns the lock file under tenantLockDirectory that guards
+// namespace on the serverIdentity of server. It fails when the lock directory
+// cannot be resolved.
 func tenantLockPath(server, namespace string) (string, error) {
 	root, err := tenantLockDirectory()
 	if err != nil {
@@ -38,9 +40,11 @@ func tenantLockPath(server, namespace string) (string, error) {
 }
 
 // acquireTenantNamespaceLock reserves namespace on server for this process and
-// returns its release function. A contended acquisition names the namespace,
-// server, and recorded holder, so two LKMABT processes cannot share a tenant
-// namespace and delete each other's resources.
+// returns the function that frees the reservation; the release function
+// tolerates repeated calls. The lock file records holder so a contended
+// acquisition can name the namespace, server, and recorded holder, and two
+// LKMABT processes therefore cannot share a tenant namespace and delete each
+// other's resources.
 func acquireTenantNamespaceLock(server, namespace, holder string) (func(), error) {
 	lockPath, err := tenantLockPath(server, namespace)
 	if err != nil {

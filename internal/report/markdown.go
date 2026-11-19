@@ -5,7 +5,10 @@ import (
 	"strings"
 )
 
-// RenderMarkdown renders the aggregate report as Markdown.
+// RenderMarkdown renders the aggregate report as Markdown: a header block and a
+// six-column table with one row per Row. Cell values are escaped for table use.
+// Markdown and HTML share the document model, so both reports agree on run
+// identity, architectures, and every result value.
 func RenderMarkdown(document Document) string {
 	builder := &strings.Builder{}
 	fmt.Fprintf(builder, "# LKMABT aggregate run %s\n\n", document.RunID)
@@ -22,7 +25,9 @@ func RenderMarkdown(document Document) string {
 	return builder.String()
 }
 
-// markdownLinks renders one row's artifact links as a comma-separated Markdown list.
+// markdownLinks renders one row's artifact links as a comma-separated Markdown
+// list, or "none" when the row has no links. Labels are escaped; targets must
+// already be safe relative URLs, since they are used verbatim in angle brackets.
 func markdownLinks(links []Link) string {
 	if len(links) == 0 {
 		return "none"
@@ -37,8 +42,9 @@ func markdownLinks(links []Link) string {
 // markdownCellEscapes lists characters that can open Markdown structure inside a table cell.
 const markdownCellEscapes = "\\|[]()*_`"
 
-// cell escapes a value for use inside one Markdown table cell. Raw HTML and
-// Markdown delimiters are neutralized; newlines become <br>.
+// cell escapes a value for use inside one Markdown table cell. "&", "<", and
+// ">" are entity-escaped and Markdown delimiters are backslash-escaped; CRLF
+// and LF become <br>.
 func cell(value string) string {
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	value = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)

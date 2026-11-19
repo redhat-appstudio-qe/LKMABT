@@ -21,9 +21,13 @@ type platformUpdate struct {
 }
 
 // configureBuildPlatforms commits the selected platforms to each fixture
-// PipelineRun and returns the configuration commit per component. All
-// manifests are read and validated before the first commit, so a malformed
-// fixture cannot leave partial configuration behind.
+// PipelineRun and returns the configuration commit per component. Components
+// align by index with s.Request.TektonPaths, and a component whose manifest is
+// already correct receives no commit and no map entry. All manifests are read
+// and validated before the first commit, so a malformed fixture cannot leave
+// partial configuration behind. Commits use the provider's configuration
+// message, which carries a "[skip ci]" marker. On a commit failure the error
+// names the path and reports the commits already pushed.
 func (s *LiveStage) configureBuildPlatforms(ctx context.Context, components []string) (map[string]string, error) {
 	if len(s.Request.TektonPaths) == 0 {
 		return nil, nil
@@ -73,9 +77,12 @@ func committedSummary(paths []string) string {
 }
 
 // setBuildPlatforms rewrites the top-level spec.params build-platforms value in
-// a fixture PipelineRun while leaving the rest of the manifest unchanged. The
-// result is parsed before it is returned, so a formatting mistake cannot reach
-// the fixture branch.
+// a fixture PipelineRun. Lines outside that value are preserved; blank and
+// comment lines between old list items are consumed. The platforms order is
+// preserved and becomes the exact list value. It fails when platforms is empty
+// or the manifest lacks a top-level spec, spec.params, the build-platforms
+// entry, or that entry's value. The result is parsed before it is returned, so
+// a formatting mistake cannot reach the fixture branch.
 func setBuildPlatforms(contents string, platforms []string) (string, error) {
 	if len(platforms) == 0 {
 		return "", fmt.Errorf("at least one build platform is required")
@@ -207,13 +214,16 @@ func setBuildPlatforms(contents string, platforms []string) (string, error) {
 	return result, nil
 }
 
-// indentWidth returns the number of leading spaces in a YAML line.
+// indentWidth returns the number of leading spaces in a YAML line; tabs are
+// not counted.
 func indentWidth(line string) int {
 	return len(line) - len(strings.TrimLeft(line, " "))
 }
 
 // validateBuildPlatforms parses a rewritten manifest and confirms that its
-// top-level build-platforms value is exactly the requested array.
+// top-level build-platforms value is exactly the requested array in order. It
+// rejects invalid YAML, a missing entry, a non-list value, non-string items,
+// and any mismatch with platforms.
 func validateBuildPlatforms(contents string, platforms []string) error {
 	var manifest map[string]any
 	if err := yaml.Unmarshal([]byte(contents), &manifest); err != nil {

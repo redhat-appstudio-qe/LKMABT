@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+// Canonical platform names. Build pipeline parameters use these values except
+// that linux/amd64 is spelled linux/x86_64 by fixture pipelines; see ManifestName.
 const (
 	LinuxAMD64   = "linux/amd64"
 	LinuxARM64   = "linux/arm64"
@@ -14,7 +16,8 @@ const (
 	LinuxPPC64LE = "linux/ppc64le"
 )
 
-// Architecture option names accepted after the fixture command.
+// Architecture option names accepted as positional arguments after the fixture
+// command. Group names expand to several platforms.
 const (
 	ArchitectureARM64   = "arm64"
 	ArchitectureAMD64   = "amd64"
@@ -25,6 +28,7 @@ const (
 )
 
 // Selection is one architecture argument and the canonical platforms it builds.
+// Name is one of the Architecture* constants.
 type Selection struct {
 	Name      string
 	Platforms []string
@@ -39,7 +43,8 @@ var selections = []Selection{
 	{Name: ArchitectureIBM, Platforms: []string{LinuxS390X, LinuxPPC64LE}},
 }
 
-// Names returns the architecture argument names in help order.
+// Names returns the architecture argument names in help order, which is also the
+// order used in Select's error message.
 func Names() []string {
 	names := make([]string, len(selections))
 	for index, selection := range selections {
@@ -48,7 +53,10 @@ func Names() []string {
 	return names
 }
 
-// Select resolves an architecture argument to its canonical platforms.
+// Select resolves an architecture argument to its canonical platforms. The name
+// must match an Architecture* constant exactly; Normalize's aliases such as
+// x86_64 are not accepted. The returned slice is a copy the caller may modify.
+// An unsupported name yields an error naming the accepted arguments.
 func Select(name string) ([]string, error) {
 	for _, selection := range selections {
 		if selection.Name == name {
@@ -59,7 +67,8 @@ func Select(name string) ([]string, error) {
 }
 
 // Combine resolves one or more architecture arguments to unique platforms in
-// argument order, so repeated or overlapping groups expand once.
+// argument order, so repeated or overlapping groups expand once. It fails when no
+// name is given or any name is unsupported.
 func Combine(names ...string) ([]string, error) {
 	if len(names) == 0 {
 		return nil, fmt.Errorf("at least one architecture is required")
@@ -88,6 +97,7 @@ func All() []string {
 }
 
 // ManifestName returns the platform spelling fixture build pipelines use.
+// linux/amd64 becomes linux/x86_64; every other value passes through unchanged.
 func ManifestName(canonical string) string {
 	if canonical == LinuxAMD64 {
 		return "linux/x86_64"
@@ -104,7 +114,11 @@ func ManifestNames(platforms []string) []string {
 	return result
 }
 
-// Normalize maps a supported platform alias to its canonical name, or "".
+// Normalize maps a supported platform alias to its canonical name, or "" when the
+// value is unknown. Accepted aliases are the canonical linux/<arch> names,
+// linux-x86_64, linux-aarch64, linux-s390x, linux-ppc64le, and the bare
+// architectures amd64, x86_64, arm64, aarch64, s390x, and ppc64le. Surrounding
+// whitespace is ignored, but letter case is not.
 func Normalize(value string) string {
 	switch strings.TrimSpace(value) {
 	case "linux/amd64", "linux/x86_64", "linux-x86_64", "amd64", "x86_64":
@@ -121,6 +135,7 @@ func Normalize(value string) string {
 }
 
 // Supported reports whether value is already a canonical supported platform.
+// Aliases Normalize accepts, such as x86_64, are not themselves supported values.
 func Supported(value string) bool {
 	return value != "" && Normalize(value) == value
 }
