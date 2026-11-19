@@ -9,7 +9,7 @@ collects runtime evidence.
 
 | Action | Command |
 |--------|---------|
-| Install | `go install ./cmd/lkmabt` |
+| Install | `./scripts/install.sh` |
 | Build | `go build -o bin/lkmabt ./cmd/lkmabt` |
 | Run all tests | `go test ./...` |
 | Test one package | `go test ./internal/cluster` |
@@ -20,12 +20,13 @@ collects runtime evidence.
 | Clean up a recorded run | `lkmabt cleanup --cluster <name> --run-id <run-id>` |
 
 Run from the repository root: the clusters file, `.lkmabt.env`, and
-`.lkmabt-runs/` resolve against the working directory. `go install` puts
-`lkmabt` in `$(go env GOPATH)/bin`, which must be on `PATH`.
+`.lkmabt-runs/` resolve against the working directory. `./scripts/install.sh`
+puts `lkmabt` in a writable directory already on `PATH`.
 
 ## Project Layout
 
 - `cmd/lkmabt/` — CLI entry point, argument parsing, signal handling
+- `scripts/install.sh` — installs `lkmabt` into a writable `PATH` directory
 - `internal/cli/` — command execution, aggregate run directory, sequential cluster execution, run logs
 - `internal/config/` — env-file and flag parsing
 - `internal/clusterfile/` — clusters-file schema (`name`, `type`, `ibmcloud`, `ibmcloud-endpoint`, `kubeconfig`, `server`); the kflux catalog name and default kubeconfig derive from `name`

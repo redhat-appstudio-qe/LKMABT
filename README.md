@@ -121,15 +121,15 @@ Every run needs network access to:
 ### 1. Install LKMABT
 
 ```bash
-go install ./cmd/lkmabt
+./scripts/install.sh
 ```
 
-`go install` writes the `lkmabt` binary to `$(go env GOPATH)/bin`. Put that
-directory on your `PATH`:
-
-```bash
-export PATH="$(go env GOPATH)/bin:$PATH"
-```
+The installer builds `lkmabt` and installs it into the first writable directory
+already on `PATH` (`$GOBIN`, `$(go env GOPATH)/bin`, `~/.local/bin`, `~/bin`,
+or `/usr/local/bin`). If none is writable, it installs into `~/.local/bin` and
+prints the one-line `PATH` change instead of leaving `lkmabt` undiscoverable.
+It builds with `GOWORK=off`, so a parent `go.work` that does not list this
+module cannot block installation.
 
 Every example below invokes `lkmabt` from `PATH`.
 
