@@ -176,9 +176,9 @@ func (a *Adapter) ReadFile(ctx context.Context, fixture providers.FixtureReposit
 	if err != nil {
 		return providers.FileVersion{}, fmt.Errorf("decode GitLab file %s: %w", path, err)
 	}
-	sha := metadata.CommitID
+	sha := metadata.LastCommitID
 	if sha == "" {
-		sha = metadata.LastCommitID
+		sha = metadata.CommitID
 	}
 	return providers.FileVersion{Path: path, Branch: branch, Content: string(decoded), SHA: sha, URL: metadata.FilePath}, nil
 }
