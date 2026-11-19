@@ -164,9 +164,11 @@ var _ = Describe("Parse", func() {
 			Expect(got.Credentials.GitLabAPIURL).Should(Equal("https://gitlab.example/api/v4"))
 
 			GinkgoT().Setenv("GITLAB_BOT_TOKEN", "env-token")
+			GinkgoT().Setenv("GITLAB_API_URL", "https://env.example/api/v4")
 			got, err = Parse([]string{"gitlab"})
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(got.Credentials.GitLabToken).Should(Equal("env-token"))
+			Expect(got.Credentials.GitLabAPIURL).Should(Equal("https://env.example/api/v4"))
 		})
 
 		It("ignores a missing default env file", func() {
@@ -182,28 +184,36 @@ var _ = Describe("Parse", func() {
 			Expect(err).Should(MatchError(ContainSubstring("read env file")))
 		})
 
-		It("keeps a process GitLab token away from a file API URL", func() {
+		It("ignores mixed GitLab sources for a GitHub-only run", func() {
+			envFile := GinkgoT().TempDir() + "/other.env"
+			Expect(os.WriteFile(envFile, []byte("GITLAB_API_URL=https://file.example/api/v4\n"), 0o600)).Should(Succeed())
+			GinkgoT().Setenv("GITHUB_TOKEN", "github-token")
+			GinkgoT().Setenv("GITLAB_BOT_TOKEN", "process-token")
+			GinkgoT().Setenv("GITLAB_API_URL", "")
+
+			got, err := Parse([]string{"github", "--env-file", envFile})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(got.Credentials.GitHubToken).Should(Equal("github-token"))
+		})
+
+		It("rejects a process GitLab token with only a file API URL", func() {
 			envFile := GinkgoT().TempDir() + "/other.env"
 			Expect(os.WriteFile(envFile, []byte("GITLAB_BOT_TOKEN=file-token\nGITLAB_API_URL=https://file.example/api/v4\n"), 0o600)).Should(Succeed())
 			GinkgoT().Setenv("GITLAB_BOT_TOKEN", "process-token")
 			GinkgoT().Setenv("GITLAB_API_URL", "")
 
-			got, err := Parse([]string{"gitlab", "--env-file", envFile})
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(got.Credentials.GitLabToken).Should(Equal("process-token"))
-			Expect(got.Credentials.GitLabAPIURL).Should(BeEmpty())
+			_, err := Parse([]string{"gitlab", "--env-file", envFile})
+			Expect(err).Should(MatchError(ContainSubstring("set both in the same source")))
 		})
 
-		It("keeps a file GitLab token away from a process API URL", func() {
+		It("rejects a file GitLab token with only a process API URL", func() {
 			envFile := GinkgoT().TempDir() + "/other.env"
 			Expect(os.WriteFile(envFile, []byte("GITLAB_BOT_TOKEN=file-token\n"), 0o600)).Should(Succeed())
 			GinkgoT().Setenv("GITLAB_BOT_TOKEN", "")
 			GinkgoT().Setenv("GITLAB_API_URL", "https://process.example/api/v4")
 
-			got, err := Parse([]string{"gitlab", "--env-file", envFile})
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(got.Credentials.GitLabToken).Should(Equal("file-token"))
-			Expect(got.Credentials.GitLabAPIURL).Should(BeEmpty())
+			_, err := Parse([]string{"gitlab", "--env-file", envFile})
+			Expect(err).Should(MatchError(ContainSubstring("set both in the same source")))
 		})
 	})
 

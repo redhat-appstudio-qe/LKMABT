@@ -65,17 +65,18 @@ func (d Document) EndedAtText() string {
 	return d.EndedAt.UTC().Format(time.RFC3339)
 }
 
-// Write renders report.md and report.html into directory.
-func Write(directory string, document Document) error {
-	if err := os.WriteFile(filepath.Join(directory, "report.md"), []byte(RenderMarkdown(document)), 0o640); err != nil {
-		return fmt.Errorf("write report.md: %w", err)
+// Write renders the run-named Markdown and HTML reports into directory.
+func Write(directory string, document Document, runName string) error {
+	markdownName, htmlName := runName+"-report.md", runName+"-report.html"
+	if err := os.WriteFile(filepath.Join(directory, markdownName), []byte(RenderMarkdown(document)), 0o640); err != nil {
+		return fmt.Errorf("write %s: %w", markdownName, err)
 	}
 	html, err := RenderHTML(document)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(directory, "report.html"), []byte(html), 0o640); err != nil {
-		return fmt.Errorf("write report.html: %w", err)
+	if err := os.WriteFile(filepath.Join(directory, htmlName), []byte(html), 0o640); err != nil {
+		return fmt.Errorf("write %s: %w", htmlName, err)
 	}
 	return nil
 }

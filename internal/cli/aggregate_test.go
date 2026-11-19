@@ -21,6 +21,7 @@ var _ = Describe("newAggregateRun", func() {
 			DeferCleanup(aggregate.Close)
 
 			Expect(aggregate.RunID).Should(MatchRegexp("^run-[0-9a-f-]{36}$"))
+			Expect(aggregate.Name).Should(MatchRegexp(`^multi-run-\d{2}:\d{2}_\d{1,2}\.\d{1,2}\.\d{4}_run-[0-9a-f-]+$`))
 			Expect(aggregate.Directory).Should(Equal(filepath.Join(stateDir, "latest")))
 			info, err := os.Lstat(aggregate.Directory)
 			Expect(err).ShouldNot(HaveOccurred())
@@ -37,7 +38,7 @@ var _ = Describe("newAggregateRun", func() {
 			Expect(metadata.RunID).Should(Equal(aggregate.RunID))
 			Expect(metadata.StartedAt.Equal(aggregate.StartedAt)).Should(BeTrue())
 
-			logPath := filepath.Join(aggregate.Directory, "run.log")
+			logPath := filepath.Join(aggregate.Directory, aggregate.Name+"-run.log")
 			logInfo, err := os.Stat(logPath)
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(logInfo.Mode().Perm()).Should(Equal(os.FileMode(0o640)))
@@ -50,7 +51,8 @@ var _ = Describe("newAggregateRun", func() {
 			stateDir := GinkgoT().TempDir()
 			first, err := newAggregateRun(stateDir)
 			Expect(err).ShouldNot(HaveOccurred())
-			Expect(os.WriteFile(filepath.Join(first.Directory, "report.md"), []byte("first run"), 0o640)).Should(Succeed())
+			reportName := first.Name + "-report.md"
+			Expect(os.WriteFile(filepath.Join(first.Directory, reportName), []byte("first run"), 0o640)).Should(Succeed())
 			Expect(first.Close()).Should(Succeed())
 
 			second, err := newAggregateRun(stateDir)
@@ -58,8 +60,8 @@ var _ = Describe("newAggregateRun", func() {
 			Expect(second.Directory).Should(Equal(filepath.Join(stateDir, "latest")))
 
 			rotated := filepath.Join(stateDir, evidence.ArtifactDirectoryName("multi", first.StartedAt, first.RunID))
-			Expect(os.ReadFile(filepath.Join(rotated, "report.md"))).Should(Equal([]byte("first run")))
-			Expect(filepath.Join(stateDir, "latest", "report.md")).ShouldNot(BeAnExistingFile())
+			Expect(os.ReadFile(filepath.Join(rotated, reportName))).Should(Equal([]byte("first run")))
+			Expect(filepath.Join(stateDir, "latest", reportName)).ShouldNot(BeAnExistingFile())
 		})
 
 		It("should append to the aggregate log", func() {
@@ -69,7 +71,7 @@ var _ = Describe("newAggregateRun", func() {
 
 			fmt.Fprintf(aggregate.Log, "cluster c1: started\n")
 			Expect(aggregate.Close()).Should(Succeed())
-			Expect(readFile(filepath.Join(aggregate.Directory, "run.log"))).Should(ContainSubstring("cluster c1: started\n"))
+			Expect(readFile(filepath.Join(aggregate.Directory, aggregate.Name+"-run.log"))).Should(ContainSubstring("cluster c1: started\n"))
 		})
 
 		It("should refuse a second run while the state directory is held", func() {
@@ -103,7 +105,7 @@ var _ = Describe("reportPaths", func() {
 		Expect(err).ShouldNot(HaveOccurred())
 
 		markdownPath, htmlPath := aggregate.reportPaths()
-		Expect(markdownPath).Should(Equal(filepath.Join(stateDir, "latest", "report.md")))
-		Expect(htmlPath).Should(Equal(filepath.Join(stateDir, "latest", "report.html")))
+		Expect(markdownPath).Should(Equal(filepath.Join(stateDir, "latest", aggregate.Name+"-report.md")))
+		Expect(htmlPath).Should(Equal(filepath.Join(stateDir, "latest", aggregate.Name+"-report.html")))
 	})
 })

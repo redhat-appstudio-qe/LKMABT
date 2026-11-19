@@ -154,24 +154,39 @@ func Parse(args []string) (Request, error) {
 			}
 		}
 	}
-	req.Credentials = credentialsFromEnv(fileValues)
+	credentials, err := credentialsFromEnv(fileValues, req.Provider == ProviderGitLab || req.Provider == ProviderBoth)
+	if err != nil {
+		return Request{}, err
+	}
+	req.Credentials = credentials
 	return req, req.Validate()
 }
 
 // credentialsFromEnv resolves provider credentials from the environment and env-file values.
-// A GitLab token and its API URL always come from the same source, so neither
-// the implicitly read env file nor the process environment can redirect the
-// other source's token.
-func credentialsFromEnv(fileValues map[string]string) Credentials {
+// A GitLab token and its API URL always come from the same source; when the
+// token's source has no URL but the other source does, the request fails
+// instead of silently sending the token to the default endpoint.
+func credentialsFromEnv(fileValues map[string]string, gitlab bool) (Credentials, error) {
 	credentials := Credentials{GitHubToken: envValue("GITHUB_TOKEN", fileValues)}
-	if token := strings.TrimSpace(os.Getenv("GITLAB_BOT_TOKEN")); token != "" {
-		credentials.GitLabToken = token
-		credentials.GitLabAPIURL = strings.TrimSpace(os.Getenv("GITLAB_API_URL"))
-		return credentials
+	if !gitlab {
+		return credentials, nil
 	}
-	credentials.GitLabToken = fileValues["GITLAB_BOT_TOKEN"]
-	credentials.GitLabAPIURL = fileValues["GITLAB_API_URL"]
-	return credentials
+	processToken := strings.TrimSpace(os.Getenv("GITLAB_BOT_TOKEN"))
+	processURL := strings.TrimSpace(os.Getenv("GITLAB_API_URL"))
+	fileToken := fileValues["GITLAB_BOT_TOKEN"]
+	fileURL := fileValues["GITLAB_API_URL"]
+	if processToken != "" {
+		if processURL == "" && fileURL != "" {
+			return Credentials{}, errors.New("GITLAB_BOT_TOKEN is set in the environment but GITLAB_API_URL is only in the env file; set both in the same source")
+		}
+		credentials.GitLabToken, credentials.GitLabAPIURL = processToken, processURL
+		return credentials, nil
+	}
+	if fileToken != "" && fileURL == "" && processURL != "" {
+		return Credentials{}, errors.New("GITLAB_BOT_TOKEN is set in the env file but GITLAB_API_URL is only in the environment; set both in the same source")
+	}
+	credentials.GitLabToken, credentials.GitLabAPIURL = fileToken, fileURL
+	return credentials, nil
 }
 
 // envValue returns a nonempty process value for key, falling back to fileValues.

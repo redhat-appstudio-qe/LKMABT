@@ -13,6 +13,7 @@ import (
 
 type aggregateRun struct {
 	RunID     string
+	Name      string
 	Directory string
 	StartedAt time.Time
 	Log       *runLog
@@ -27,19 +28,19 @@ type aggregateRun struct {
 func newAggregateRun(stateDir string) (*aggregateRun, error) {
 	startedAt := time.Now().UTC()
 	runID := "run-" + uuid.NewString()
+	name := evidence.ArtifactDirectoryName("multi", startedAt, runID)
 	store := evidence.NewManifestStore(stateDir)
 	directory, release, prepareErr := store.PrepareLatest(runID, startedAt)
 	if prepareErr != nil {
 		if errors.Is(prepareErr, evidence.ErrLatestLocked) {
 			return nil, fmt.Errorf("another LKMABT run is using state directory %s; wait for it to finish or pass a different --state-dir", stateDir)
 		}
-		name := evidence.ArtifactDirectoryName("multi", startedAt, runID)
 		directory = filepath.Join(stateDir, name)
 		if err := os.MkdirAll(directory, 0o750); err != nil {
 			return nil, fmt.Errorf("create aggregate run directory %s: %w", directory, err)
 		}
 	}
-	log, err := newAttachedRunLog(filepath.Join(directory, "run.log"))
+	log, err := newAttachedRunLog(filepath.Join(directory, aggregateFileName(name, "run.log")))
 	if err != nil {
 		if release != nil {
 			release()
@@ -49,7 +50,12 @@ func newAggregateRun(stateDir string) (*aggregateRun, error) {
 	if prepareErr != nil {
 		fmt.Fprintf(log, "warning: could not prepare the latest aggregate directory: %v\n", prepareErr)
 	}
-	return &aggregateRun{RunID: runID, Directory: directory, StartedAt: startedAt, Log: log, release: release}, nil
+	return &aggregateRun{RunID: runID, Name: name, Directory: directory, StartedAt: startedAt, Log: log, release: release}, nil
+}
+
+// aggregateFileName prefixes a top-level aggregate file with the run name.
+func aggregateFileName(runName, base string) string {
+	return runName + "-" + base
 }
 
 // Close closes the run log and releases the state-directory lock.
@@ -62,7 +68,12 @@ func (a *aggregateRun) Close() error {
 	return err
 }
 
-// reportPaths returns the Markdown and HTML report paths for the aggregate run.
+// reportPaths returns the run-named Markdown and HTML report paths for the aggregate run.
 func (a *aggregateRun) reportPaths() (string, string) {
-	return filepath.Join(a.Directory, "report.md"), filepath.Join(a.Directory, "report.html")
+	return filepath.Join(a.Directory, aggregateFileName(a.Name, "report.md")), filepath.Join(a.Directory, aggregateFileName(a.Name, "report.html"))
+}
+
+// runLogName returns the run-named aggregate log file.
+func (a *aggregateRun) runLogName() string {
+	return aggregateFileName(a.Name, "run.log")
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,10 +20,14 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/clusterauth"
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
+	"github.com/redhat-appstudio/lkmabt/internal/evidence"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
 )
+
+// testAggregateLog is the run-named aggregate log used by report-row fixtures.
+const testAggregateLog = "multi-run-10:46_8.10.2026_run-a-run.log"
 
 // artifactWritingRunner writes run artifacts for each request and records the outcome.
 type artifactWritingRunner struct {
@@ -347,17 +352,17 @@ var _ = Describe("reportRows", func() {
 	When("a cluster failed authentication", func() {
 		It("should emit one authentication row per provider with aggregate links only", func() {
 			aggregateDirectory := GinkgoT().TempDir()
-			Expect(os.WriteFile(filepath.Join(aggregateDirectory, "run.log"), []byte("aggregate\n"), 0o640)).Should(Succeed())
+			Expect(os.WriteFile(filepath.Join(aggregateDirectory, testAggregateLog), []byte("aggregate\n"), 0o640)).Should(Succeed())
 			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, AuthErr: errors.New("authentication failed: no readable kubeconfig at X")}}
 
-			rows := reportRows(aggregateDirectory, runs, []string{"github", "gitlab"})
+			rows := reportRows(aggregateDirectory, testAggregateLog, runs, []string{"github", "gitlab"})
 			Expect(rows).Should(HaveLen(2))
 			for _, row := range rows {
 				Expect(row.Cluster).Should(Equal("c1"))
 				Expect(row.Passed).Should(BeFalse())
 				Expect(row.Stage).Should(Equal(report.StageAuthentication))
 				Expect(row.Error).Should(Equal("authentication failed: no readable kubeconfig at X"))
-				Expect(row.Links).Should(Equal([]report.Link{{Label: "aggregate run.log", Target: "./run.log"}}))
+				Expect(row.Links).Should(Equal([]report.Link{{Label: "aggregate run.log", Target: "./" + testAggregateLog}}))
 			}
 		})
 	})
@@ -365,7 +370,7 @@ var _ = Describe("reportRows", func() {
 	When("provider results exist", func() {
 		It("should map stage, error, and artifact links", func() {
 			aggregateDirectory := GinkgoT().TempDir()
-			Expect(os.WriteFile(filepath.Join(aggregateDirectory, "run.log"), []byte("aggregate\n"), 0o640)).Should(Succeed())
+			Expect(os.WriteFile(filepath.Join(aggregateDirectory, testAggregateLog), []byte("aggregate\n"), 0o640)).Should(Succeed())
 			clusterDirectory := filepath.Join(aggregateDirectory, "c1")
 			artifacts := filepath.Join(clusterDirectory, "artifacts-github")
 			Expect(os.MkdirAll(artifacts, 0o750)).Should(Succeed())
@@ -374,7 +379,7 @@ var _ = Describe("reportRows", func() {
 			Expect(os.WriteFile(filepath.Join(artifacts, "manifest.json"), []byte("{}"), 0o640)).Should(Succeed())
 			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseBuildsVerified, ArtifactDirectory: "artifacts-github", Err: errors.New("build failed")}}}}
 
-			rows := reportRows(aggregateDirectory, runs, []string{"github"})
+			rows := reportRows(aggregateDirectory, testAggregateLog, runs, []string{"github"})
 			Expect(rows).Should(HaveLen(1))
 			row := rows[0]
 			Expect(row.Passed).Should(BeFalse())
@@ -391,13 +396,13 @@ var _ = Describe("reportRows", func() {
 	When("two clusters are listed", func() {
 		It("should keep clusters-file order across clusters", func() {
 			aggregateDirectory := GinkgoT().TempDir()
-			Expect(os.WriteFile(filepath.Join(aggregateDirectory, "run.log"), []byte("aggregate\n"), 0o640)).Should(Succeed())
+			Expect(os.WriteFile(filepath.Join(aggregateDirectory, testAggregateLog), []byte("aggregate\n"), 0o640)).Should(Succeed())
 			runs := []clusterRun{
 				{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted}}},
 				{Entry: clusterfile.Entry{Name: "c2"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted}}},
 			}
 
-			rows := reportRows(aggregateDirectory, runs, []string{"github"})
+			rows := reportRows(aggregateDirectory, testAggregateLog, runs, []string{"github"})
 			Expect(rows).Should(HaveLen(2))
 			Expect(rows[0].Cluster).Should(Equal("c1"))
 			Expect(rows[0].Provider).Should(Equal("github"))
@@ -457,15 +462,16 @@ var _ = Describe("finishAggregateRun", func() {
 
 			Expect(finishAggregateRun(aggregate, request, runs, console, nil)).Should(Succeed())
 
-			for _, name := range []string{"report.md", "report.html"} {
-				info, statErr := os.Stat(filepath.Join(aggregate.Directory, name))
+			markdownPath, htmlPath := aggregate.reportPaths()
+			for _, path := range []string{markdownPath, htmlPath} {
+				info, statErr := os.Stat(path)
 				Expect(statErr).ShouldNot(HaveOccurred())
 				Expect(info.Mode().Perm()).Should(Equal(os.FileMode(0o640)))
 			}
 			output := console.Out.(*bytes.Buffer).String()
 			Expect(output).Should(ContainSubstring("c1 github: passed (completed)"))
-			Expect(output).Should(ContainSubstring("report: " + filepath.Join(aggregate.Directory, "report.md")))
-			Expect(output).Should(ContainSubstring("report: " + filepath.Join(aggregate.Directory, "report.html")))
+			Expect(output).Should(ContainSubstring("report: " + markdownPath))
+			Expect(output).Should(ContainSubstring("report: " + htmlPath))
 		})
 	})
 
@@ -480,7 +486,8 @@ var _ = Describe("finishAggregateRun", func() {
 
 			err = finishAggregateRun(aggregate, request, runs, console, nil)
 			Expect(err).Should(MatchError(ContainSubstring("cluster c1 github run: build failed")))
-			_, statErr := os.Stat(filepath.Join(aggregate.Directory, "report.md"))
+			markdownPath, _ := aggregate.reportPaths()
+			_, statErr := os.Stat(markdownPath)
 			Expect(statErr).ShouldNot(HaveOccurred())
 		})
 	})
@@ -498,7 +505,8 @@ var _ = Describe("finishAggregateRun", func() {
 			output := console.Out.(*bytes.Buffer).String()
 			Expect(output).Should(ContainSubstring("c1 github: failed (completed)"))
 			Expect(output).ShouldNot(ContainSubstring("finalization failed"))
-			markdown := readFile(filepath.Join(aggregate.Directory, "report.md"))
+			markdownPath, _ := aggregate.reportPaths()
+			markdown := readFile(markdownPath)
 			Expect(markdown).Should(ContainSubstring("finalization failed: delete denied"))
 		})
 	})
@@ -523,15 +531,16 @@ var _ = Describe("RunClusters", func() {
 			Expect(RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})).Should(Succeed())
 
 			aggregateDirectory := singleAggregateDirectory(stateDir)
+			runName := latestRunName(stateDir)
 
-			for _, name := range []string{"report.md", "report.html", "run.log", "c1", "c2"} {
+			for _, name := range []string{runName + "-report.md", runName + "-report.html", runName + "-run.log", "c1", "c2"} {
 				_, statErr := os.Stat(filepath.Join(aggregateDirectory, name))
 				Expect(statErr).ShouldNot(HaveOccurred())
 			}
 			Expect(readFile(filepath.Join(aggregateDirectory, "c1", "run.log"))).Should(ContainSubstring("cluster c1: running both"))
 			Expect(readFile(filepath.Join(aggregateDirectory, "c2", "run.log"))).Should(ContainSubstring("cluster c2: running both"))
 
-			markdown := readFile(filepath.Join(aggregateDirectory, "report.md"))
+			markdown := readFile(filepath.Join(aggregateDirectory, runName+"-report.md"))
 			positions := make([]int, 0, 4)
 			for _, row := range []string{"| c1 | github |", "| c1 | gitlab |", "| c2 | github |", "| c2 | gitlab |"} {
 				index := strings.Index(markdown, row)
@@ -563,8 +572,7 @@ var _ = Describe("RunClusters", func() {
 			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
 			Expect(err).Should(MatchError(ContainSubstring("cluster c2 gitlab run: gitlab failed")))
 
-			aggregateDirectory := singleAggregateDirectory(stateDir)
-			markdown := readFile(filepath.Join(aggregateDirectory, "report.md"))
+			markdown := readFile(latestReportPath(stateDir, "md"))
 			Expect(markdown).Should(ContainSubstring("| c1 | github | passed |"))
 			Expect(markdown).Should(ContainSubstring("| c2 | gitlab | failed |"))
 			Expect(markdown).Should(ContainSubstring("| c1 | gitlab | passed |"))
@@ -589,7 +597,7 @@ var _ = Describe("RunClusters", func() {
 			Expect(err).Should(HaveOccurred())
 
 			aggregateDirectory := singleAggregateDirectory(stateDir)
-			markdown := readFile(filepath.Join(aggregateDirectory, "report.md"))
+			markdown := readFile(latestReportPath(stateDir, "md"))
 			Expect(markdown).Should(ContainSubstring("| c-missing | github | failed | authentication |"))
 			_, statErr := os.Stat(filepath.Join(aggregateDirectory, "c-missing"))
 			Expect(statErr).Should(HaveOccurred())
@@ -636,8 +644,9 @@ var _ = Describe("rejectDuplicateServers", func() {
 			entriesList, readErr := os.ReadDir(stateDir)
 			Expect(readErr).ShouldNot(HaveOccurred())
 			for _, entry := range entriesList {
-				_, statErr := os.Stat(filepath.Join(stateDir, entry.Name(), "report.md"))
-				Expect(statErr).Should(HaveOccurred())
+				reports, globErr := filepath.Glob(filepath.Join(stateDir, entry.Name(), "*-report.md"))
+				Expect(globErr).ShouldNot(HaveOccurred())
+				Expect(reports).Should(BeEmpty())
 			}
 		})
 	})
@@ -680,7 +689,8 @@ var _ = Describe("RunClusters under the aggregate layout", func() {
 			Expect(output.String()).Should(ContainSubstring("\ncluster c2\n"))
 			Expect(output.String()).Should(ContainSubstring("report: "))
 			aggregateDirectory := singleAggregateDirectory(stateDir)
-			for _, name := range []string{"report.md", "report.html"} {
+			runName := latestRunName(stateDir)
+			for _, name := range []string{runName + "-report.md", runName + "-report.html"} {
 				_, statErr := os.Stat(filepath.Join(aggregateDirectory, name))
 				Expect(statErr).ShouldNot(HaveOccurred())
 			}
@@ -966,7 +976,7 @@ var _ = Describe("RunClusters credential authentication", func() {
 			Expect(err).Should(MatchError(ContainSubstring("revoke GitLab token: revoke denied")))
 			Expect(defaultGitLabRevoke.calls).Should(Equal(1))
 			Expect(runner.requests).Should(HaveLen(2))
-			markdown := readFile(filepath.Join(singleAggregateDirectory(request.StateDir), "report.md"))
+			markdown := readFile(latestReportPath(request.StateDir, "md"))
 			Expect(markdown).Should(ContainSubstring("- Result: **failed**"))
 			Expect(markdown).Should(ContainSubstring("revoke GitLab token: revoke denied"))
 		})
@@ -1102,8 +1112,7 @@ var _ = Describe("RunClusters credential authentication", func() {
 			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
 			Expect(err).Should(MatchError(ContainSubstring("temporary credentials are still present")))
 			Expect(runner.requests).Should(HaveLen(1))
-			aggregateDirectory := singleAggregateDirectory(request.StateDir)
-			markdown := readFile(filepath.Join(aggregateDirectory, "report.md"))
+			markdown := readFile(latestReportPath(request.StateDir, "md"))
 			Expect(markdown).Should(ContainSubstring("| credentials | auth | failed | cleanup | temporary credentials are still present |"))
 			Expect(markdown).Should(ContainSubstring("- Result: **failed**"))
 		})
@@ -1140,4 +1149,19 @@ func runClustersFixture(clusterCount int) (config.Request, *artifactWritingRunne
 // singleAggregateDirectory returns the real latest aggregate directory under stateDir.
 func singleAggregateDirectory(stateDir string) string {
 	return filepath.Join(stateDir, "latest")
+}
+
+// latestRunName returns the aggregate run name recorded in the latest directory.
+func latestRunName(stateDir string) string {
+	var metadata struct {
+		RunID     string    `json:"runID"`
+		StartedAt time.Time `json:"startedAt"`
+	}
+	Expect(json.Unmarshal([]byte(readFile(filepath.Join(stateDir, "latest", ".aggregate.json"))), &metadata)).Should(Succeed())
+	return evidence.ArtifactDirectoryName("multi", metadata.StartedAt, metadata.RunID)
+}
+
+// latestReportPath returns a run-named report path under the latest directory.
+func latestReportPath(stateDir, extension string) string {
+	return filepath.Join(singleAggregateDirectory(stateDir), latestRunName(stateDir)+"-report."+extension)
 }

@@ -213,9 +213,12 @@ Namespaces are labeled with `app.konflux-ci.org/managed-by=lkmabt` and
 ### Artifact Retention
 All runtime evidence is stored under `.lkmabt-runs/`:
 - `latest/` is a real directory holding the current aggregate run. At the next
-  invocation the previous run is renamed in place to
+  invocation the previous run is renamed in place to its
   `multi-run-<hh:mm_d.m.yyyy>_<aggregate-run-id>/` using the run ID and start
   time in `.aggregate.json`, and a fresh `latest/` is created.
+- The top-level reports and aggregate log are prefixed with the aggregate run
+  name, so `ls latest/` shows when the run started; cluster and provider logs
+  keep their directory-scoped `run.log` name.
 - A run holds `.latest.lock` for its whole duration, so a second run against the
   same state directory fails immediately instead of writing into the live
   `latest/`; if rotation fails for a filesystem reason, the new run is written
@@ -372,9 +375,9 @@ its permanent timestamped directory:
 .lkmabt-runs/
 ├── latest/                                          # Current aggregate run (real directory)
 │   ├── .aggregate.json                              # Run ID and start time used for rotation
-│   ├── report.md
-│   ├── report.html
-│   ├── run.log
+│   ├── <aggregate-run-name>-report.md
+│   ├── <aggregate-run-name>-report.html
+│   ├── <aggregate-run-name>-run.log
 │   └── <cluster>/
 │       ├── run.log
 │       └── <provider>-run-<hh:mm_d.m.yyyy>_<run-id>/   (run.log, manifest.json, status.json, workload/, failed-builds/, logs/, collection-report.json)

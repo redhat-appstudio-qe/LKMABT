@@ -248,8 +248,9 @@ missing default file is fine, so environment-only credentials work. Pass
 does not exist is an error. `cleanup` needs no provider credentials and does
 not read the file. The copy is ignored by Git; keep it local. The parser reads
 `KEY=VALUE` lines and does not execute the file. A GitLab token and its API URL
-come from the same source: LKMABT never pairs a process token with a file URL
-or a file token with a process URL.
+must come from the same source: when the token's source has no URL but the
+other source does, LKMABT fails with an error instead of sending the token to
+the default endpoint.
 
 | Variable | Notes |
 | --- | --- |
@@ -444,9 +445,9 @@ Runtime evidence is stored under `.lkmabt-runs/`.
 .lkmabt-runs/
 ├── latest/                                          # Current aggregate run, a real directory
 │   ├── .aggregate.json                              # Run ID and start time used for rotation
-│   ├── report.md                                    # Markdown report
-│   ├── report.html                                  # HTML report
-│   ├── run.log                                      # Aggregate run log
+│   ├── <aggregate-run-name>-report.md               # Markdown report
+│   ├── <aggregate-run-name>-report.html             # HTML report
+│   ├── <aggregate-run-name>-run.log                 # Aggregate run log
 │   └── <cluster-name>/                              # One directory per clusters-file entry
 │       ├── run.log                                  # Cluster-level log
 │       └── <provider>-run-<hh:mm_d.m.yyyy>_<run-id>/
@@ -463,15 +464,20 @@ Runtime evidence is stored under `.lkmabt-runs/`.
 │           ├── failed-builds/                       # Logs from failed TaskRun steps
 │           └── collection-report.json               # Artifact collection outcome
 ├── .latest.lock                                     # Held for the run by the state-directory owner
-└── multi-run-<hh:mm_d.m.yyyy>_<aggregate-run-id>/   # Previous aggregate runs
+└── <aggregate-run-name>/                            # Previous aggregate runs
 ```
 
+- `<aggregate-run-name>` is
+  `multi-run-<hh:mm_d.m.yyyy>_<aggregate-run-id>`.
 - `<provider>` is `github` or `gitlab`; `<run-id>` is the provider run ID used
   by `cleanup`.
 - `latest/` holds the most recently started aggregate run and is written in
-  place. At the next invocation the previous `latest/` is renamed to
-  `multi-run-<hh:mm_d.m.yyyy>_<aggregate-run-id>/` using the run ID and start
-  time in `.aggregate.json`, and a fresh `latest/` is created.
+  place. At the next invocation the previous `latest/` is renamed to its
+  `<aggregate-run-name>/` using the run ID and start time in `.aggregate.json`,
+  and a fresh `latest/` is created.
+- The top-level reports and aggregate log carry the aggregate run name, so
+  `ls latest/` shows when the run started. Cluster and provider logs keep their
+  directory-scoped `run.log` name.
 - No run is stored twice and `latest` is not a symlink.
 - A run holds `.latest.lock` for its whole duration. A second run against the
   same state directory fails immediately with an actionable message instead of

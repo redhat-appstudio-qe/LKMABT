@@ -369,13 +369,13 @@ func resultSummary(results []ProviderResult) string {
 
 // finishAggregateRun renders both reports, prints the summary, and reports the aggregate failure.
 func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []clusterRun, console *Console, cleanupErr error) error {
-	rows := reportRows(aggregate.Directory, runs, providerNames(request.Provider))
+	rows := reportRows(aggregate.Directory, aggregate.runLogName(), runs, providerNames(request.Provider))
 	if cleanupErr != nil {
-		rows = append(rows, report.Row{Cluster: "credentials", Provider: "auth", Stage: report.StageCleanup, Error: cleanupErr.Error(), Links: report.Links(aggregate.Directory, "", "")})
+		rows = append(rows, report.Row{Cluster: "credentials", Provider: "auth", Stage: report.StageCleanup, Error: cleanupErr.Error(), Links: report.Links(aggregate.Directory, aggregate.runLogName(), "", "")})
 	}
 	document := report.Document{RunID: aggregate.RunID, ClustersFile: request.ClustersFile, StartedAt: aggregate.StartedAt, EndedAt: time.Now().UTC(), Passed: allPassed(rows), Rows: rows}
 	step := console.StartStep("Write reports 📝")
-	writeErr := report.Write(aggregate.Directory, document)
+	writeErr := report.Write(aggregate.Directory, document, aggregate.Name)
 	step.End(writeErr == nil)
 	console.Printf("")
 	for _, row := range rows {
@@ -430,17 +430,17 @@ func runCluster(ctx context.Context, request config.Request, entry clusterfile.E
 }
 
 // reportRows builds one row per cluster and provider in clusters-file order.
-func reportRows(aggregateDirectory string, runs []clusterRun, providers []string) []report.Row {
+func reportRows(aggregateDirectory, aggregateLog string, runs []clusterRun, providers []string) []report.Row {
 	rows := make([]report.Row, 0, len(runs)*len(providers))
 	for _, run := range runs {
 		if run.AuthErr != nil {
 			for _, provider := range providers {
-				rows = append(rows, report.Row{Cluster: run.Entry.Name, Provider: provider, Passed: false, Stage: report.StageAuthentication, Error: run.AuthErr.Error(), Links: report.Links(aggregateDirectory, "", "")})
+				rows = append(rows, report.Row{Cluster: run.Entry.Name, Provider: provider, Passed: false, Stage: report.StageAuthentication, Error: run.AuthErr.Error(), Links: report.Links(aggregateDirectory, aggregateLog, "", "")})
 			}
 			continue
 		}
 		for _, result := range run.Results {
-			rows = append(rows, report.Row{Cluster: run.Entry.Name, Provider: result.Provider, Passed: result.Err == nil, Stage: string(result.Stage), Error: errorText(result.Err), Links: report.Links(aggregateDirectory, run.Entry.Name, result.ArtifactDirectory)})
+			rows = append(rows, report.Row{Cluster: run.Entry.Name, Provider: result.Provider, Passed: result.Err == nil, Stage: string(result.Stage), Error: errorText(result.Err), Links: report.Links(aggregateDirectory, aggregateLog, run.Entry.Name, result.ArtifactDirectory)})
 		}
 	}
 	return rows

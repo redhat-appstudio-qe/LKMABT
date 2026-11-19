@@ -11,6 +11,9 @@ import (
 // linkFixtureProvider is the provider run-directory name used by the link fixtures.
 const linkFixtureProvider = "github-run-10:46_8.10.2026_run-a"
 
+// linkFixtureAggregateLog is the run-named aggregate log used by the link fixtures.
+const linkFixtureAggregateLog = "multi-run-10:46_8.10.2026_run-a-run.log"
+
 // writeFixtureFile creates a fixture file with parent directories.
 func writeFixtureFile(path string) {
 	Expect(os.MkdirAll(filepath.Dir(path), 0o750)).Should(Succeed())
@@ -19,7 +22,7 @@ func writeFixtureFile(path string) {
 
 // writeLinkFixture populates root with the standard aggregate/cluster/provider artifact layout.
 func writeLinkFixture(root string) {
-	writeFixtureFile(filepath.Join(root, "run.log"))
+	writeFixtureFile(filepath.Join(root, linkFixtureAggregateLog))
 	writeFixtureFile(filepath.Join(root, "c1", "run.log"))
 	provider := linkFixtureProvider
 	writeFixtureFile(filepath.Join(root, "c1", provider, "run.log"))
@@ -36,10 +39,10 @@ var _ = Describe("Links", func() {
 			aggregate := GinkgoT().TempDir()
 			writeLinkFixture(aggregate)
 
-			links := Links(aggregate, "c1", linkFixtureProvider)
+			links := Links(aggregate, linkFixtureAggregateLog, "c1", linkFixtureProvider)
 
 			Expect(links[:8]).Should(Equal([]Link{
-				{Label: "aggregate run.log", Target: "./run.log"},
+				{Label: "aggregate run.log", Target: "./" + linkFixtureAggregateLog},
 				{Label: "cluster directory", Target: "./c1/"},
 				{Label: "cluster run.log", Target: "./c1/run.log"},
 				{Label: "run directory", Target: "./c1/" + linkFixtureProvider + "/"},
@@ -62,7 +65,7 @@ var _ = Describe("Links", func() {
 			Expect(os.Remove(filepath.Join(aggregate, "c1", linkFixtureProvider, "collection-report.json"))).Should(Succeed())
 			Expect(os.Remove(filepath.Join(aggregate, "c1", linkFixtureProvider, "logs", "pod-a.log"))).Should(Succeed())
 
-			links := Links(aggregate, "c1", linkFixtureProvider)
+			links := Links(aggregate, linkFixtureAggregateLog, "c1", linkFixtureProvider)
 
 			for _, link := range links {
 				Expect(link.Target).ShouldNot(ContainSubstring("collection-report.json"))
@@ -76,10 +79,10 @@ var _ = Describe("Links", func() {
 			aggregate := GinkgoT().TempDir()
 			writeLinkFixture(aggregate)
 
-			links := Links(aggregate, "c1", "")
+			links := Links(aggregate, linkFixtureAggregateLog, "c1", "")
 
 			Expect(links).Should(Equal([]Link{
-				{Label: "aggregate run.log", Target: "./run.log"},
+				{Label: "aggregate run.log", Target: "./" + linkFixtureAggregateLog},
 				{Label: "cluster directory", Target: "./c1/"},
 				{Label: "cluster run.log", Target: "./c1/run.log"},
 			}))
@@ -92,11 +95,11 @@ var _ = Describe("Links", func() {
 			aggregate := GinkgoT().TempDir()
 			writeLinkFixture(aggregate)
 
-			links := Links(aggregate, "", "")
-			Expect(links).Should(Equal([]Link{{Label: "aggregate run.log", Target: "./run.log"}}))
+			links := Links(aggregate, linkFixtureAggregateLog, "", "")
+			Expect(links).Should(Equal([]Link{{Label: "aggregate run.log", Target: "./" + linkFixtureAggregateLog}}))
 
-			Expect(os.Remove(filepath.Join(aggregate, "run.log"))).Should(Succeed())
-			links = Links(aggregate, "", "")
+			Expect(os.Remove(filepath.Join(aggregate, linkFixtureAggregateLog))).Should(Succeed())
+			links = Links(aggregate, linkFixtureAggregateLog, "", "")
 			Expect(links).ShouldNot(BeNil())
 			Expect(links).Should(HaveLen(0))
 		})
@@ -108,7 +111,7 @@ var _ = Describe("Links", func() {
 			writeLinkFixture(aggregate)
 			writeFixtureFile(filepath.Join(aggregate, "c1", linkFixtureProvider, "logs", "sub", "deep.log"))
 
-			links := Links(aggregate, "c1", linkFixtureProvider)
+			links := Links(aggregate, linkFixtureAggregateLog, "c1", linkFixtureProvider)
 
 			Expect(links).Should(ContainElement(Link{
 				Label:  "c1/" + linkFixtureProvider + "/logs/sub/deep.log",
@@ -122,7 +125,7 @@ var _ = Describe("Links", func() {
 			aggregate := GinkgoT().TempDir()
 			writeLinkFixture(aggregate)
 
-			links := Links(aggregate, "c9", linkFixtureProvider)
+			links := Links(aggregate, linkFixtureAggregateLog, "c9", linkFixtureProvider)
 
 			for _, link := range links {
 				Expect(link.Target).ShouldNot(Equal("./c9/"))

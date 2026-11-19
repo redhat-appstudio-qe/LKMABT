@@ -49,7 +49,7 @@ Run from the repository root: the clusters file, `.lkmabt.env`, and
 - **Qodo:** onboarded — invoke Qodo skills (`qodo-review`, `qodo-get-rules`, etc.) before every commit.
 - **Fixtures:** only `redhat-appstudio-qe/dr_test_mathwizz` and `konflux-qe/dr_test_mathwizz_gl`; never create, fork, rename, or delete repositories
 - **Tests:** Ginkgo v2 + Gomega, TDD, colocated external `_test` packages (see `skills/testing-standards.md`)
-- **Artifacts:** `.lkmabt-runs/` is gitignored local evidence; credential-like fields are redacted before writing
+- **Artifacts:** `.lkmabt-runs/` is gitignored local evidence; top-level reports and logs are prefixed with the aggregate run name, and credential-like fields are redacted before writing
 
 ## Gotchas
 
