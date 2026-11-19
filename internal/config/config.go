@@ -198,17 +198,18 @@ func architectureArguments(args []string) (names, remaining []string, err error)
 	for len(remaining) > 0 && !strings.HasPrefix(remaining[0], "-") {
 		argument := remaining[0]
 		remaining = remaining[1:]
-		added := false
-		for _, part := range strings.Split(argument, ",") {
+		parts := strings.Split(argument, ",")
+		// A single trailing comma is the shell form `s390x, arm64`; any other
+		// empty entry is malformed.
+		if len(parts) > 1 && strings.TrimSpace(parts[len(parts)-1]) == "" {
+			parts = parts[:len(parts)-1]
+		}
+		for _, part := range parts {
 			name := strings.TrimSpace(part)
 			if name == "" {
-				continue
+				return nil, nil, fmt.Errorf("architecture argument %q contains an empty entry", argument)
 			}
 			names = append(names, name)
-			added = true
-		}
-		if !added {
-			return nil, nil, fmt.Errorf("architecture argument %q names no platforms", argument)
 		}
 	}
 	return names, remaining, nil

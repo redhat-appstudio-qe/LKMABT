@@ -99,11 +99,18 @@ var _ = Describe("Parse", func() {
 			Expect(err).Should(MatchError(ContainSubstring("riscv64")))
 		})
 
-		It("rejects an architecture argument with no names", func() {
-			GinkgoT().Setenv("GITHUB_TOKEN", "token")
-			_, err := Parse([]string{"github", ","})
-			Expect(err).Should(MatchError(ContainSubstring("names no platforms")))
-		})
+		DescribeTable("rejects malformed architecture lists",
+			func(arguments []string) {
+				GinkgoT().Setenv("GITHUB_TOKEN", "token")
+				_, err := Parse(append([]string{ProviderGitHub}, arguments...))
+				Expect(err).Should(MatchError(ContainSubstring("contains an empty entry")))
+			},
+			Entry("leading empty entry", []string{",arm64"}),
+			Entry("interior empty entry", []string{"arm64,,s390x"}),
+			Entry("multiple trailing commas", []string{"arm64,,"}),
+			Entry("only commas", []string{","}),
+			Entry("empty argument", []string{""}),
+		)
 
 		It("rejects an unsupported architecture", func() {
 			GinkgoT().Setenv("GITHUB_TOKEN", "token")
