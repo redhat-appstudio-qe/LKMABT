@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -110,5 +111,43 @@ var _ = Describe("VerifyBuilds retrigger", func() {
 		Expect(manifest.TriggerCommits[0].Retriggers).Should(Equal(1))
 		Expect(manifest.PipelineRuns).Should(HaveLen(1))
 		Expect(manifest.PipelineRuns[0].Name).Should(Equal("run-new"))
+	})
+
+	It("does not retrigger when a duplicate run for the commit failed", func() {
+		const (
+			component = "mathwizz-web-server"
+			sha       = "old-sha"
+		)
+		failed := pipelineRun("run-failed", component, sha, "uid-failed", "False")
+		pending := annotatedPipelineRun("run-pending", component, sha, "uid-pending", "Unknown", "git-auth-secret", time.Now().Add(-5*time.Minute))
+		var retriggered atomic.Bool
+		provider := &retriggeringProvider{
+			recordingProvider: &recordingProvider{files: map[string]string{"web-server/Dockerfile": "FROM base\n"}},
+			retriggered:       &retriggered,
+		}
+		stage := &LiveStage{
+			Request: config.Request{
+				ComponentPaths: []string{"web-server/Dockerfile"},
+				SourceBranch:   "main",
+				Timeouts:       config.Timeouts{Trigger: time.Second, Build: time.Second},
+			},
+			Fixture:  providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"},
+			Clients:  &cluster.ClientSet{Dynamic: namespaceDynamicClient(&failed, &pending), Kubernetes: kubernetesfake.NewSimpleClientset()},
+			Provider: provider,
+		}
+		manifest := &model.RunManifest{
+			RunID: "run-1",
+			Fixture: model.FixtureIdentity{
+				TenantNamespace: "mathwizz-test",
+				Components:      []string{component},
+			},
+			TriggerCommits: []model.TriggerCommit{{Component: component, SHA: sha}},
+		}
+
+		err := stage.VerifyBuilds(context.Background(), manifest)
+		var failure *PipelineRunFailedError
+		Expect(errors.As(err, &failure)).Should(BeTrue())
+		Expect(failure.Name).Should(Equal("run-failed"))
+		Expect(retriggered.Load()).Should(BeFalse())
 	})
 })

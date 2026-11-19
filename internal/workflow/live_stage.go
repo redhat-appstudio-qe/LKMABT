@@ -858,12 +858,14 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 }
 
 // matchedFailedPipelineRun returns the first matched PipelineRun reporting
-// failure, so callers can fail before other checks hide it.
+// failure, even when another run for the same commit is still pending, so
+// callers can fail before other checks hide it.
 func matchedFailedPipelineRun(pipelineRuns []unstructured.Unstructured, commits []model.TriggerCommit) *PipelineRunFailedError {
 	for _, commit := range commits {
-		candidates := matchingPipelineRuns(pipelineRuns, commit)
-		if len(candidates) == 1 && pipelineRunConditionStatus(candidates[0]) == "False" {
-			return &PipelineRunFailedError{Namespace: candidates[0].GetNamespace(), Name: candidates[0].GetName(), Component: commit.Component}
+		for _, candidate := range matchingPipelineRuns(pipelineRuns, commit) {
+			if pipelineRunConditionStatus(candidate) == "False" {
+				return &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
+			}
 		}
 	}
 	return nil
