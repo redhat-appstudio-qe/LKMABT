@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -20,10 +21,13 @@ var (
 
 type BuildOutputInspector struct {
 	Dynamic dynamic.Interface
-	Now     func() time.Time
+	// Platforms lists the canonical platforms each PipelineRun must produce.
+	// Empty means every supported platform.
+	Platforms []string
+	Now       func() time.Time
 }
 
-// Verify collects build evidence and requires outputs for both supported Linux architectures.
+// Verify collects build evidence and requires outputs for every requested platform.
 func (i BuildOutputInspector) Verify(ctx context.Context, identities []model.PipelineRunIdentity) ([]model.BuildOutputEvidence, error) {
 	if i.Dynamic == nil {
 		return nil, fmt.Errorf("dynamic client is required")
@@ -31,13 +35,22 @@ func (i BuildOutputInspector) Verify(ctx context.Context, identities []model.Pip
 	if len(identities) == 0 {
 		return nil, fmt.Errorf("at least one PipelineRun is required")
 	}
+	expected := i.Platforms
+	if len(expected) == 0 {
+		expected = platform.All()
+	}
+	for _, buildPlatform := range expected {
+		if !platform.Supported(buildPlatform) {
+			return nil, fmt.Errorf("unsupported build platform %q", buildPlatform)
+		}
+	}
 	now := time.Now
 	if i.Now != nil {
 		now = i.Now
 	}
 	evidence := make([]model.BuildOutputEvidence, 0, len(identities))
 	for _, identity := range identities {
-		output, err := i.verifyPipelineRun(ctx, identity, now().UTC())
+		output, err := i.verifyPipelineRun(ctx, identity, expected, now().UTC())
 		if err != nil {
 			return nil, err
 		}
@@ -47,7 +60,7 @@ func (i BuildOutputInspector) Verify(ctx context.Context, identities []model.Pip
 }
 
 // verifyPipelineRun validates one PipelineRun and extracts its successful Buildah outputs.
-func (i BuildOutputInspector) verifyPipelineRun(ctx context.Context, identity model.PipelineRunIdentity, verifiedAt time.Time) (model.BuildOutputEvidence, error) {
+func (i BuildOutputInspector) verifyPipelineRun(ctx context.Context, identity model.PipelineRunIdentity, expected []string, verifiedAt time.Time) (model.BuildOutputEvidence, error) {
 	if strings.TrimSpace(identity.Namespace) == "" || strings.TrimSpace(identity.Name) == "" {
 		return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun identity is incomplete")
 	}
@@ -92,14 +105,12 @@ func (i BuildOutputInspector) verifyPipelineRun(ctx context.Context, identity mo
 		createdOutputs[platform] = output
 		outputDigests[platform] = digest
 	}
-	platforms := make([]string, 0, len(createdOutputs))
-	for _, platform := range []string{"linux/amd64", "linux/arm64"} {
-		if createdOutputs[platform] != "" {
-			platforms = append(platforms, platform)
+	platforms := make([]string, 0, len(expected))
+	for _, buildPlatform := range expected {
+		if createdOutputs[buildPlatform] == "" {
+			return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun %s/%s build outputs do not prove %s", identity.Namespace, identity.Name, strings.Join(expected, ", "))
 		}
-	}
-	if len(platforms) != 2 {
-		return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun %s/%s build outputs do not prove linux/amd64 and linux/arm64", identity.Namespace, identity.Name)
+		platforms = append(platforms, buildPlatform)
 	}
 	verifiedIdentity := identity
 	verifiedIdentity.UID = pipelineRun.GetUID()
@@ -238,14 +249,7 @@ func isBuildPlatform(value string) bool {
 	return normalizeBuildPlatform(value) != ""
 }
 
-// normalizeBuildPlatform maps supported platform aliases to canonical Linux platform names.
+// normalizeBuildPlatform maps supported platform aliases to canonical names.
 func normalizeBuildPlatform(value string) string {
-	switch strings.TrimSpace(value) {
-	case "linux/amd64", "linux/x86_64", "linux-x86_64":
-		return "linux/amd64"
-	case "linux/arm64":
-		return "linux/arm64"
-	default:
-		return ""
-	}
+	return platform.Normalize(value)
 }

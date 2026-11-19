@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 )
 
 const (
@@ -30,6 +31,15 @@ var DefaultComponentPaths = []string{
 	"web-server/Dockerfile",
 	"history-worker/Dockerfile",
 	"frontend/Dockerfile",
+}
+
+// DefaultTektonPaths lists the fixture PipelineRuns whose build-platforms
+// parameter is set to the selected architectures. Entries align with
+// DefaultComponentPaths.
+var DefaultTektonPaths = []string{
+	".tekton/konflux-test-mathwizz-web-server-push.yaml",
+	".tekton/konflux-test-mathwizz-history-worker-push.yaml",
+	".tekton/konflux-test-mathwizz-frontend-push.yaml",
 }
 
 type Credentials struct {
@@ -62,6 +72,8 @@ type Request struct {
 	SourceRepository string
 	SourceBranch     string
 	ComponentPaths   []string
+	TektonPaths      []string
+	Platforms        []string
 	Timeouts         Timeouts
 	Credentials      Credentials
 }
@@ -76,6 +88,8 @@ func Defaults() Request {
 		TenantNamespace:  DefaultGitHubTenantNamespace,
 		ApplicationName:  "mathwizz",
 		ComponentPaths:   append([]string(nil), DefaultComponentPaths...),
+		TektonPaths:      append([]string(nil), DefaultTektonPaths...),
+		Platforms:        platform.All(),
 		Timeouts: Timeouts{
 			Preflight: 10 * time.Minute,
 			Trigger:   5 * time.Minute,
@@ -87,7 +101,7 @@ func Defaults() Request {
 // Parse builds and validates a request from command-line arguments and environment values.
 func Parse(args []string) (Request, error) {
 	if len(args) == 0 {
-		return Request{}, errors.New("usage: lkmabt <github|gitlab|both> [flags] | lkmabt cleanup --cluster <name> --run-id <id> [flags]")
+		return Request{}, fmt.Errorf("usage: lkmabt <github|gitlab|both> [%s] [flags] | lkmabt cleanup --cluster <name> --run-id <id> [flags]", strings.Join(platform.Names(), "|"))
 	}
 	req := Defaults()
 	var remaining []string
@@ -106,6 +120,16 @@ func Parse(args []string) (Request, error) {
 			req.TenantNamespace = DefaultGitLabTenantNamespace
 		}
 		remaining = args[1:]
+		// The optional architecture argument follows the fixture command and
+		// precedes flags, so a flag value can never be read as an architecture.
+		if len(remaining) > 0 && !strings.HasPrefix(remaining[0], "-") {
+			platforms, err := platform.Select(remaining[0])
+			if err != nil {
+				return Request{}, err
+			}
+			req.Platforms = platforms
+			remaining = remaining[1:]
+		}
 	default:
 		return Request{}, fmt.Errorf("unsupported command %q", args[0])
 	}
@@ -257,6 +281,22 @@ func (r Request) Validate() error {
 		}
 		if len(r.ComponentPaths) != len(DefaultComponentPaths) {
 			return fmt.Errorf("exactly %d component paths are required", len(DefaultComponentPaths))
+		}
+		if len(r.TektonPaths) != len(r.ComponentPaths) {
+			return fmt.Errorf("exactly %d Tekton pipeline paths are required", len(r.ComponentPaths))
+		}
+		if len(r.Platforms) == 0 {
+			return errors.New("at least one build platform is required")
+		}
+		seenPlatforms := make(map[string]struct{}, len(r.Platforms))
+		for _, buildPlatform := range r.Platforms {
+			if !platform.Supported(buildPlatform) {
+				return fmt.Errorf("unsupported build platform %q", buildPlatform)
+			}
+			if _, duplicate := seenPlatforms[buildPlatform]; duplicate {
+				return fmt.Errorf("duplicate build platform %q", buildPlatform)
+			}
+			seenPlatforms[buildPlatform] = struct{}{}
 		}
 		if r.Provider == ProviderBoth {
 			if r.SourceRepository != DefaultGitHubRepo || r.TenantNamespace != DefaultGitHubTenantNamespace {

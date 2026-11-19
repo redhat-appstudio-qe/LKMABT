@@ -21,6 +21,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/collector"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -65,6 +66,7 @@ func (b *syncBuffer) String() string {
 type fakePreflightCluster struct {
 	server       string
 	accessChecks *[]cluster.AccessCheck
+	scheduling   *cluster.SchedulingSpec
 }
 
 // Server returns the configured API server.
@@ -78,8 +80,11 @@ func (f fakePreflightCluster) CheckAccess(_ context.Context, checks []cluster.Ac
 	return nil
 }
 
-// CheckScheduling passes every scheduling check.
-func (f fakePreflightCluster) CheckScheduling(context.Context, cluster.SchedulingSpec) []cluster.CheckResult {
+// CheckScheduling records the requested platforms and passes every check.
+func (f fakePreflightCluster) CheckScheduling(_ context.Context, spec cluster.SchedulingSpec) []cluster.CheckResult {
+	if f.scheduling != nil {
+		*f.scheduling = spec
+	}
 	return nil
 }
 
@@ -410,6 +415,24 @@ var _ = Describe("LiveStage", func() {
 			})
 		})
 	})
+	Describe("LiveStage platform preflight", func() {
+		It("checks the selected build platforms", func() {
+			var scheduling cluster.SchedulingSpec
+			stage := &LiveStage{
+				Request: config.Request{
+					ClusterServer:   "https://api.example",
+					TenantNamespace: "tenant",
+					Platforms:       []string{platform.LinuxS390X, platform.LinuxPPC64LE},
+				},
+				PreflightCluster: fakePreflightCluster{server: "https://api.example", scheduling: &scheduling},
+				Namespace:        cleanup.NamespaceService{Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), NameLister: testNameLister{}},
+			}
+
+			Expect(stage.Preflight(context.Background(), &model.RunManifest{RunID: "run-1"})).Should(Succeed())
+			Expect(scheduling.Platforms).Should(Equal([]string{platform.LinuxS390X, platform.LinuxPPC64LE}))
+		})
+	})
+
 	Describe("LiveStage GitHub App preflight", func() {
 		When("the cluster publishes an installed app", func() {
 			It("should verify the app against the fixture", func() {

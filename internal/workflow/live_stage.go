@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/collector"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -86,7 +88,7 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 		Namespace:  cluster.MultiPlatformControllerNamespace,
 		Deployment: cluster.MultiPlatformControllerDeployment,
 		ConfigMap:  cluster.MultiPlatformControllerConfigMap,
-		Platforms:  []string{"linux/amd64", "linux/arm64"},
+		Platforms:  s.platforms(),
 	}}
 	preflightCluster := s.PreflightCluster
 	if preflightCluster == nil {
@@ -114,6 +116,15 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 	}
 	manifest.TargetClusterServer = s.Request.ClusterServer
 	return nil
+}
+
+// platforms returns the requested platforms, defaulting to every supported
+// platform for requests built without config.Parse.
+func (s *LiveStage) platforms() []string {
+	if len(s.Request.Platforms) == 0 {
+		return platform.All()
+	}
+	return s.Request.Platforms
 }
 
 // accessChecks lists the API versions preflight must verify.
@@ -465,12 +476,20 @@ func (s *LiveStage) TriggerComponents(ctx context.Context, manifest *model.RunMa
 	}, s.progress); err != nil {
 		return fmt.Errorf("wait for PaC onboarding: %w", err)
 	}
+	prerequisites, err := s.configureBuildPlatforms(ctx, components)
+	if err != nil {
+		return err
+	}
 	for index, component := range components {
 		commit, err := s.triggerComponent(ctx, manifest, component, paths[index])
 		if err != nil {
 			return err
 		}
-		manifest.TriggerCommits = append(manifest.TriggerCommits, model.TriggerCommit{Component: component, SHA: commit.SHA, URL: commit.URL, CreatedAt: commit.CreatedAt})
+		trigger := model.TriggerCommit{Component: component, SHA: commit.SHA, URL: commit.URL, CreatedAt: commit.CreatedAt}
+		if prerequisite := prerequisites[component]; prerequisite != "" {
+			trigger.PrerequisiteSHAs = []string{prerequisite}
+		}
+		manifest.TriggerCommits = append(manifest.TriggerCommits, trigger)
 	}
 	return nil
 }
@@ -888,7 +907,7 @@ func matchingPipelineRuns(objects []unstructured.Unstructured, commit model.Trig
 		}
 		if labels["pipelinesascode.tekton.dev/sha"] == commit.SHA {
 			exact = append(exact, object)
-		} else if labels["pipelinesascode.tekton.dev/sha"] != "" && afterTrigger(object, commit) {
+		} else if sha := labels["pipelinesascode.tekton.dev/sha"]; sha != "" && afterTrigger(object, commit) && !slices.Contains(commit.PrerequisiteSHAs, sha) {
 			fallback = append(fallback, object)
 		}
 	}
@@ -1003,7 +1022,7 @@ func (e *PipelineRunFailedError) Error() string {
 
 // VerifyBuildOutputs checks recorded PipelineRuns and appends their output evidence to the manifest.
 func (s *LiveStage) VerifyBuildOutputs(ctx context.Context, manifest *model.RunManifest) error {
-	evidence, err := (cluster.BuildOutputInspector{Dynamic: s.Clients.Dynamic}).Verify(ctx, manifest.PipelineRuns)
+	evidence, err := (cluster.BuildOutputInspector{Dynamic: s.Clients.Dynamic, Platforms: s.platforms()}).Verify(ctx, manifest.PipelineRuns)
 	if err != nil {
 		return err
 	}

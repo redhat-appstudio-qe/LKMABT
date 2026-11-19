@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 	appsv1 "k8s.io/api/apps/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -269,8 +270,14 @@ func controllerDeploymentReady(deployment *appsv1.Deployment) bool {
 	return desired > 0 && deployment.Status.ObservedGeneration >= deployment.Generation && deployment.Status.ReadyReplicas >= desired && deployment.Status.AvailableReplicas >= desired && deployment.Status.UpdatedReplicas >= desired
 }
 
-// configuredPlatformMode returns the host-config scheduling mode for a platform.
-func configuredPlatformMode(data map[string]string, platform string) string {
+// configuredPlatformMode returns the host-config scheduling mode for a
+// platform. Static hosts declare their platform per host instead of in a
+// platform list.
+func configuredPlatformMode(data map[string]string, target string) string {
+	wanted := platform.Normalize(target)
+	if wanted == "" {
+		return ""
+	}
 	for _, entry := range []struct {
 		key  string
 		mode string
@@ -280,9 +287,14 @@ func configuredPlatformMode(data map[string]string, platform string) string {
 		{key: "dynamic-pool-platforms", mode: "dynamic-pool"},
 	} {
 		for _, configured := range strings.Split(data[entry.key], ",") {
-			if strings.TrimSpace(configured) == platform {
+			if platform.Normalize(strings.TrimSpace(configured)) == wanted {
 				return entry.mode
 			}
+		}
+	}
+	for key, value := range data {
+		if strings.HasPrefix(key, "host.") && strings.HasSuffix(key, ".platform") && platform.Normalize(strings.TrimSpace(value)) == wanted {
+			return "static"
 		}
 	}
 	return ""

@@ -39,16 +39,18 @@ Full branch, verification, and PR rules: `skills/pr-workflow.md`.
 
 ## What the Tool Does
 
-LKMABT validates that the multi-platform-controller handles `linux/amd64` and
-`linux/arm64` build orchestration on ROKS Konflux clusters:
+LKMABT validates that the multi-platform-controller builds the selected
+architectures on ROKS Konflux clusters. The default selection is every Linux
+platform: `linux/amd64`, `linux/arm64`, `linux/s390x`, and `linux/ppc64le`.
 
 1. Triggers builds against fixed test repositories (GitHub and GitLab)
 2. Waits for successful PipelineRuns
-3. Verifies pre-publication build outputs for both architectures
+3. Verifies pre-publication build outputs for every selected architecture
 4. Collects runtime evidence and artifacts
 
 The harness never creates, forks, or deletes repositories. It reuses fixed
-fixtures and appends harmless comments to trigger PipelineRuns.
+fixtures, sets their PipelineRun `build-platforms` parameter to the selection,
+and appends harmless comments to trigger PipelineRuns.
 
 ## Package Organization
 
@@ -107,6 +109,11 @@ fixtures and appends harmless comments to trigger PipelineRuns.
 - `FixtureIdentity`, `PipelineRunIdentity`, `TriggerCommit` represent test run entities
 - Phase transitions are strictly validated
 
+**`internal/platform/`** — Architecture selection
+- Maps the optional CLI architecture argument (`arm64`, `amd64`, `s390x`, `ppc64le`, `aws`, `ibm`) to canonical platforms
+- Owns canonical names, TaskRun platform alias normalization, and the fixture pipeline spelling (`linux/x86_64` for `linux/amd64`)
+- `platform.All()` is the default selection; adding a future OS (Windows, iOS) means adding canonical platforms and a selection entry
+
 **`internal/collector/`** — Failure artifact collection
 - On test failure, collects PipelineRuns, TaskRuns, Pods, logs
 - Evidence is redacted and stored under `.lkmabt-runs/`
@@ -148,9 +155,9 @@ definitions via import when the same GVR is needed across packages.
 
 1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries, and the cluster's GitHub App installation (GitHub runs; interactive runs wait for and can extend a missing installation wait)
 2. **Fixture Ready** — Validate test repositories are accessible, read current Dockerfile SHAs
-3. **Triggered** — Append trigger comments to Dockerfiles, commit changes
+3. **Triggered** — Set each fixture PipelineRun's `build-platforms` parameter to the selected architectures, append trigger comments to Dockerfiles, commit changes
 4. **Builds Verified** — Wait for PipelineRuns to succeed (timeout configurable)
-5. **Build Outputs Verified** — Confirm Buildah TaskRuns contain node evidence for `linux/amd64` and `linux/arm64`
+5. **Build Outputs Verified** — Confirm Buildah TaskRuns provide one successful output per selected architecture
 6. **Completed** — Prompt for namespace cleanup
 
 On failure, transition to **Failed** phase and collect artifacts. Clusters run
@@ -407,15 +414,17 @@ conditions. Container logs capture the actual failure message.
 
 ### Build Output Verification
 Build output verification (`internal/cluster/build_outputs.go`) confirms that
-Buildah TaskRuns contain node evidence for both architectures. The harness:
-- Reads TaskRun YAML artifacts from `.tekton.dev~1results~1TASKRUN_ARTIFACTS_PATH~1outputs~1taskrun.yaml`
-- Extracts `provenance.buildConfig.tasks[].invocation.environment.labels["konflux.dev/node-arch"]`
-- Expects exactly one `linux/amd64` and one `linux/arm64` entry per component
+Buildah TaskRuns contain one successful output per selected platform. The
+harness:
+- Reads the `PLATFORM` result, then TaskRun labels, annotations, and `PLATFORM` params
+- Normalizes aliases such as `linux/x86_64` to `linux/amd64` and accepts `linux-s390x` and `linux-ppc64le`
+- Requires every platform in `Request.Platforms` per component and records the observed outputs and digests
+- Fails as a pipeline misconfiguration when a Buildah TaskRun has no recognizable platform
 
 If verification fails, check that:
-1. The multi-platform-controller is running and has valid `host-config` entries
+1. The multi-platform-controller is running and its `host-config` declares every selected platform
 2. The PipelineRuns completed successfully (builds-verified phase passed)
-3. The Buildah TaskRuns wrote TASKRUN_ARTIFACTS results
+3. The fixture PipelineRun `build-platforms` parameter and `build-images` matrix use the selected platforms
 
 ### Provider API Rate Limits
 GitHub and GitLab providers include retry logic with exponential backoff for 5xx

@@ -6,6 +6,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 )
 
 var _ = Describe("Parse", func() {
@@ -48,6 +50,43 @@ var _ = Describe("Parse", func() {
 			got, err := Parse([]string{"both"})
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(got.Provider).Should(Equal(ProviderBoth))
+		})
+
+		It("defaults to every supported build platform", func() {
+			GinkgoT().Setenv("GITHUB_TOKEN", "token")
+			got, err := Parse([]string{"github"})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(got.Platforms).Should(Equal([]string{"linux/amd64", "linux/arm64", "linux/s390x", "linux/ppc64le"}))
+		})
+
+		DescribeTable("selects architectures from the second argument",
+			func(architecture string, want []string) {
+				GinkgoT().Setenv("GITHUB_TOKEN", "token")
+				GinkgoT().Setenv("GITLAB_BOT_TOKEN", "token")
+				got, err := Parse([]string{ProviderGitHub, architecture, "--clusters-file", "clusters.yaml"})
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(got.Platforms).Should(Equal(want))
+				Expect(got.ClustersFile).Should(Equal("clusters.yaml"))
+			},
+			Entry("arm64", "arm64", []string{platform.LinuxARM64}),
+			Entry("amd64", "amd64", []string{platform.LinuxAMD64}),
+			Entry("s390x", "s390x", []string{platform.LinuxS390X}),
+			Entry("ppc64le", "ppc64le", []string{platform.LinuxPPC64LE}),
+			Entry("aws", "aws", []string{platform.LinuxAMD64, platform.LinuxARM64}),
+			Entry("ibm", "ibm", []string{platform.LinuxS390X, platform.LinuxPPC64LE}),
+		)
+
+		It("rejects an unsupported architecture", func() {
+			GinkgoT().Setenv("GITHUB_TOKEN", "token")
+			_, err := Parse([]string{"github", "riscv64"})
+			Expect(err).Should(MatchError(ContainSubstring("unsupported architecture")))
+			Expect(err).Should(MatchError(ContainSubstring("ppc64le")))
+		})
+
+		It("does not accept an architecture after flags", func() {
+			GinkgoT().Setenv("GITHUB_TOKEN", "token")
+			_, err := Parse([]string{"github", "--clusters-file", "clusters.yaml", "arm64"})
+			Expect(err).Should(MatchError(ContainSubstring("unexpected arguments: arm64")))
 		})
 
 		It("should default the clusters file to the working directory", func() {

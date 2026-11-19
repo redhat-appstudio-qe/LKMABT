@@ -2,8 +2,9 @@
 
 Local multi-architecture build validation harness for ROKS Konflux clusters.
 Triggers builds against fixed test repositories, waits for PipelineRuns,
-verifies `linux/amd64` and `linux/arm64` pre-publication build outputs, and
-collects runtime evidence.
+verifies the selected architectures' pre-publication build outputs (all four of
+`linux/amd64`, `linux/arm64`, `linux/s390x`, and `linux/ppc64le` by default),
+and collects runtime evidence.
 
 ## Quick Commands
 
@@ -54,7 +55,8 @@ puts `lkmabt` in a writable directory already on `PATH`.
 
 ## Gotchas
 
-- **Build output verification** reads TaskRun YAML artifacts and expects one `linux/amd64` and one `linux/arm64` node label per component; a missing label fails as pipeline misconfiguration, not harness error (see `skills/developer-guide.md`)
+- **Architecture selection** — the optional second argument after `github`, `gitlab`, or `both` is `arm64`, `amd64`, `s390x`, `ppc64le`, `aws` (amd64+arm64), or `ibm` (s390x+ppc64le); omitted means all four Linux platforms. Triggering rewrites each fixture PipelineRun's `build-platforms` parameter before the Dockerfile comment, and preflight, verification, and evidence follow the selection (see `skills/developer-guide.md`)
+- **Build output verification** reads TaskRun results and platform metadata and expects one successful output per selected architecture per component; a missing or unlabeled platform fails as pipeline misconfiguration, not harness error (see `skills/developer-guide.md`)
 - **One process per state directory** — a run holds `.lkmabt-runs/.latest.lock` until it finishes; a second run against the same `--state-dir` fails immediately with an actionable message instead of writing into the live `latest/`, so wait for the first run or use another state directory
 - **Cluster names are not kflux catalog names** — `name` is the report and `--cluster` identity; the kflux catalog name is `name` with a leading `kflux-` removed, unchanged otherwise. Host `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is catalog cluster `ocp-p01` through the name `kflux-ocp-p01`, an unknown catalog name surfaces kflux's `unknown cluster` error, and the default kubeconfig is `~/.kube/config-<catalog>`
 - **GitHub App installation is per cluster** — `preflight` reads the app slug from `konflux-info/konflux-public-info` and verifies that app is installed for the fixture organization. An interactive run prints the installation steps, opens the installation page, and waits until an organization administrator installs the app; failed checks are retried and progress is reported every 5 minutes, and when the preflight timeout expires the run asks whether to keep waiting. Declining, or a non-interactive run, fails with the installation URL. An app limited to selected repositories must include the fixture; a confirmed selection that omits it fails the wait immediately with the installation settings URL, while selections the token cannot list log a warning and continue. After an approved wait that outlives the preflight deadline, the remaining preflight steps continue on the run context

@@ -42,6 +42,40 @@ var _ = Describe("RealCluster scheduling", func() {
 		}
 	})
 
+	It("accepts platforms provided by static hosts", func() {
+		replicas := int32(1)
+		clients := kubernetesfake.NewSimpleClientset(
+			&appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: MultiPlatformControllerDeployment, Namespace: MultiPlatformControllerNamespace, Generation: 1},
+				Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
+				Status:     appsv1.DeploymentStatus{ObservedGeneration: 1, ReadyReplicas: 1, AvailableReplicas: 1, UpdatedReplicas: 1},
+			},
+			&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: MultiPlatformControllerConfigMap, Namespace: MultiPlatformControllerNamespace, Labels: map[string]string{MultiPlatformControllerConfigLabel: "hosts"}},
+				Data: map[string]string{
+					"host.s390x-dev.address":    "127.0.0.1",
+					"host.s390x-dev.platform":   "linux/s390x",
+					"host.ppc64le-dev.address":  "127.0.0.1",
+					"host.ppc64le-dev.platform": "linux/ppc64le",
+					"host.amd64-dev.address":    "127.0.0.1",
+					"host.amd64-dev.platform":   "linux/x86_64",
+				},
+			},
+		)
+		result := (&RealCluster{Clients: &ClientSet{Kubernetes: clients}}).CheckScheduling(context.Background(), SchedulingSpec{
+			Namespace:  MultiPlatformControllerNamespace,
+			Deployment: MultiPlatformControllerDeployment,
+			ConfigMap:  MultiPlatformControllerConfigMap,
+			Platforms:  []string{"linux/s390x", "linux/ppc64le", "linux/amd64"},
+		})
+		Expect(result).To(HaveLen(4))
+		Expect(result[0].Passed).Should(BeTrue())
+		for _, check := range result[1:] {
+			Expect(check.Passed).To(BeTrue(), check.Name)
+			Expect(check.Details).Should(ContainSubstring("static"))
+		}
+	})
+
 	It("rejects an unconfigured platform", func() {
 		replicas := int32(1)
 		clients := kubernetesfake.NewSimpleClientset(

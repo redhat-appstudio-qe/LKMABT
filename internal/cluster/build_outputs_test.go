@@ -8,6 +8,7 @@ import (
 
 	"github.com/redhat-appstudio/lkmabt/internal/cluster"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -16,11 +17,39 @@ import (
 
 var _ = Describe("BuildOutputInspector", func() {
 	It("verifies both linux platforms", func() {
-		inspector := cluster.BuildOutputInspector{Dynamic: buildOutputClientWithPlatformLabels("linux/amd64", "linux/arm64")}
+		inspector := cluster.BuildOutputInspector{Dynamic: buildOutputClientWithPlatformLabels("linux/amd64", "linux/arm64"), Platforms: []string{"linux/amd64", "linux/arm64"}}
 		evidence, err := inspector.Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(evidence).To(HaveLen(1))
 		Expect(evidence[0].Platforms).To(Equal([]string{"linux/amd64", "linux/arm64"}))
+	})
+
+	It("verifies every supported platform by default", func() {
+		inspector := cluster.BuildOutputInspector{Dynamic: buildOutputClientWithPlatformLabels(platform.LinuxAMD64, platform.LinuxARM64, platform.LinuxS390X, platform.LinuxPPC64LE)}
+		evidence, err := inspector.Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(evidence[0].Platforms).Should(Equal(platform.All()))
+	})
+
+	It("verifies only the selected platforms", func() {
+		inspector := cluster.BuildOutputInspector{
+			Dynamic:   buildOutputClientWithPlatformLabels(platform.LinuxAMD64, platform.LinuxARM64, platform.LinuxS390X),
+			Platforms: []string{platform.LinuxS390X},
+		}
+		evidence, err := inspector.Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(evidence[0].Platforms).Should(Equal([]string{platform.LinuxS390X}))
+		Expect(evidence[0].CreatedOutputs).Should(HaveKey(platform.LinuxAMD64))
+	})
+
+	It("rejects a missing selected IBM platform", func() {
+		inspector := cluster.BuildOutputInspector{
+			Dynamic:   buildOutputClientWithPlatformLabels(platform.LinuxS390X),
+			Platforms: []string{platform.LinuxS390X, platform.LinuxPPC64LE},
+		}
+		_, err := inspector.Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+		Expect(err).Should(HaveOccurred())
+		Expect(err.Error()).Should(ContainSubstring(platform.LinuxPPC64LE))
 	})
 
 	It("accepts completed Buildah tasks before validation tasks finish", func() {
@@ -32,13 +61,13 @@ var _ = Describe("BuildOutputInspector", func() {
 		validation.Object["status"].(map[string]any)["conditions"] = []any{map[string]any{"type": "Succeeded", "status": "False"}}
 		client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, amd64, arm64, validation)
 
-		evidence, err := (cluster.BuildOutputInspector{Dynamic: client}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+		evidence, err := (cluster.BuildOutputInspector{Dynamic: client, Platforms: []string{"linux/amd64", "linux/arm64"}}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(evidence).To(HaveLen(1))
 	})
 
 	It("rejects missing arm64 platform", func() {
-		inspector := cluster.BuildOutputInspector{Dynamic: buildOutputClientWithPlatformLabels("linux/amd64")}
+		inspector := cluster.BuildOutputInspector{Dynamic: buildOutputClientWithPlatformLabels("linux/amd64"), Platforms: []string{"linux/amd64", "linux/arm64"}}
 		_, err := inspector.Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("linux/arm64"))
@@ -49,7 +78,7 @@ var _ = Describe("BuildOutputInspector", func() {
 		taskRun := buildahTaskRunWithNoPlatform("build-task", "tenant", "uid-1", "quay.io/example/image", "sha256:abc")
 		client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, taskRun)
 
-		_, err := (cluster.BuildOutputInspector{Dynamic: client}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+		_, err := (cluster.BuildOutputInspector{Dynamic: client, Platforms: []string{"linux/amd64", "linux/arm64"}}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("pipeline misconfiguration"))
 	})
@@ -60,7 +89,7 @@ var _ = Describe("BuildOutputInspector", func() {
 		arm64 := taskRunWithDeclaredPlatform("build-task-arm64", "tenant", "uid-1", "linux/arm64", "quay.io/example/arm64", "sha256:arm64")
 		client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, amd64, arm64)
 
-		evidence, err := (cluster.BuildOutputInspector{Dynamic: client}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+		evidence, err := (cluster.BuildOutputInspector{Dynamic: client, Platforms: []string{"linux/amd64", "linux/arm64"}}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(evidence).To(HaveLen(1))
 		Expect(evidence[0].CreatedOutputs["linux/amd64"]).To(Equal("quay.io/example/amd64"))
@@ -74,12 +103,27 @@ var _ = Describe("BuildOutputInspector", func() {
 			arm64 := taskRunWithImageOutputs("build-task-arm64", "linux/arm64", "linux/arm64", "quay.io/example/arm64", "sha256:arm64")
 			client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, amd64, arm64)
 
-			evidence, err := (cluster.BuildOutputInspector{Dynamic: client}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+			evidence, err := (cluster.BuildOutputInspector{Dynamic: client, Platforms: []string{"linux/amd64", "linux/arm64"}}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(evidence).Should(HaveLen(1))
 			Expect(evidence[0].Platforms).Should(Equal([]string{"linux/amd64", "linux/arm64"}))
 			Expect(evidence[0].CreatedOutputs).Should(HaveKeyWithValue("linux/amd64", "quay.io/example/amd64"))
 			Expect(evidence[0].OutputDigests).Should(HaveKeyWithValue("linux/arm64", "sha256:arm64"))
+		})
+
+		It("normalizes the s390x and ppc64le aliases", func() {
+			pipeline := pipelineRunObject("build", "tenant", "uid-1", "True")
+			s390x := taskRunWithImageOutputs("build-task-s390x", "linux-s390x", "linux-s390x", "quay.io/example/s390x", "sha256:s390x")
+			ppc64le := taskRunWithImageOutputs("build-task-ppc64le", "linux-ppc64le", "linux/ppc64le", "quay.io/example/ppc64le", "sha256:ppc64le")
+			client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, s390x, ppc64le)
+
+			evidence, err := (cluster.BuildOutputInspector{
+				Dynamic:   client,
+				Platforms: []string{platform.LinuxS390X, platform.LinuxPPC64LE},
+			}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(evidence[0].Platforms).Should(Equal([]string{platform.LinuxS390X, platform.LinuxPPC64LE}))
+			Expect(evidence[0].CreatedOutputs).Should(HaveKeyWithValue(platform.LinuxS390X, "quay.io/example/s390x"))
 		})
 
 		It("fails closed for an unknown target platform", func() {
@@ -88,7 +132,7 @@ var _ = Describe("BuildOutputInspector", func() {
 			arm64 := taskRunWithImageOutputs("build-task-arm64", "linux/arm64", "linux/arm64", "quay.io/example/arm64", "sha256:arm64")
 			client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, unknown, arm64)
 
-			_, err := (cluster.BuildOutputInspector{Dynamic: client}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+			_, err := (cluster.BuildOutputInspector{Dynamic: client, Platforms: []string{"linux/amd64", "linux/arm64"}}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
 			Expect(err).Should(MatchError(ContainSubstring("pipeline misconfiguration")))
 		})
 	})
@@ -99,7 +143,7 @@ var _ = Describe("BuildOutputInspector", func() {
 		arm64 := taskRunWithDeclaredPlatform("build-task-arm64", "tenant", "uid-1", "linux/arm64", "quay.io/example/arm64", "sha256:arm64")
 		client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, amd64, arm64)
 
-		_, err := (cluster.BuildOutputInspector{Dynamic: client}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+		_, err := (cluster.BuildOutputInspector{Dynamic: client, Platforms: []string{"linux/amd64", "linux/arm64"}}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("IMAGE_DIGEST"))
 	})
@@ -120,7 +164,7 @@ var _ = Describe("BuildOutputInspector", func() {
 			}
 			client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, amd64, arm64)
 
-			evidence, err := (cluster.BuildOutputInspector{Dynamic: client}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+			evidence, err := (cluster.BuildOutputInspector{Dynamic: client, Platforms: []string{"linux/amd64", "linux/arm64"}}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(evidence).Should(HaveLen(1))
 			Expect(evidence[0].Platforms).Should(Equal([]string{"linux/amd64", "linux/arm64"}))
@@ -132,7 +176,7 @@ var _ = Describe("BuildOutputInspector", func() {
 		failed := taskRunWithDeclaredPlatform("build-task", "tenant", "uid-1", "linux/amd64", "quay.io/example/amd64", "sha256:amd64")
 		failed.Object["status"].(map[string]any)["conditions"] = []any{map[string]any{"type": "Succeeded", "status": "False"}}
 		client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, failed)
-		_, err := (cluster.BuildOutputInspector{Dynamic: client}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+		_, err := (cluster.BuildOutputInspector{Dynamic: client, Platforms: []string{"linux/amd64", "linux/arm64"}}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("build TaskRun"))
 	})

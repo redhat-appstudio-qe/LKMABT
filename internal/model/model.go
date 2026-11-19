@@ -84,6 +84,9 @@ type TriggerCommit struct {
 	SHA       string    `json:"sha"`
 	URL       string    `json:"url,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
+	// PrerequisiteSHAs lists earlier fixture-configuration commits. PipelineRuns
+	// for those commits are not evidence that the trigger commit was built.
+	PrerequisiteSHAs []string `json:"prerequisiteSHAs,omitempty"`
 }
 
 type BuildOutputEvidence struct {
