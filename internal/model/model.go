@@ -84,9 +84,12 @@ type TriggerCommit struct {
 	SHA       string    `json:"sha"`
 	URL       string    `json:"url,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
-	// PrerequisiteSHAs lists earlier fixture-configuration commits. PipelineRuns
-	// for those commits are not evidence that the trigger commit was built.
+	// PrerequisiteSHAs lists earlier fixture-configuration or superseded trigger
+	// commits. PipelineRuns for those commits are not evidence that the current
+	// trigger commit was built.
 	PrerequisiteSHAs []string `json:"prerequisiteSHAs,omitempty"`
+	// Retriggers counts automatic retriggers after PaC failed to reconcile a run.
+	Retriggers int `json:"retriggers,omitempty"`
 }
 
 type BuildOutputEvidence struct {

@@ -449,8 +449,9 @@ selection. This applies to configured tokens and browser logins.
   counts. A pending PipelineRun whose annotated PaC git-auth Secret is missing
   past two minutes fails with the Secret name and whether PaC created it: a
   lost created Secret hints at a concurrent run, while a PipelineRun without
-  the PaC finalizer was never reconciled by the PaC watcher. Other Secret read
-  errors warn once.
+  the PaC finalizer was never reconciled by the PaC watcher. An unreconciled
+  run triggers one automatic retrigger of that component before the run fails.
+  Other Secret read errors warn once.
 - Two LKMABT processes cannot share one tenant namespace on the same API server.
   Each run and `cleanup` hold a non-blocking per-user file lock keyed by API
   server and namespace; a contended run fails before creating artifacts and

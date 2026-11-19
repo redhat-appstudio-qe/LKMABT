@@ -509,6 +509,55 @@ func (s *LiveStage) triggerComponent(ctx context.Context, manifest *model.RunMan
 	return commit, nil
 }
 
+// retriggerCount returns how many automatic retriggers a component has had.
+func retriggerCount(manifest *model.RunManifest, component string) int {
+	for index := range manifest.TriggerCommits {
+		if manifest.TriggerCommits[index].Component == component {
+			return manifest.TriggerCommits[index].Retriggers
+		}
+	}
+	return 0
+}
+
+// retriggerComponent commits a fresh Dockerfile trigger for one component and
+// supersedes its previous trigger in the manifest.
+func (s *LiveStage) retriggerComponent(ctx context.Context, manifest *model.RunManifest, component string) error {
+	triggerIndex := -1
+	for index := range manifest.TriggerCommits {
+		if manifest.TriggerCommits[index].Component == component {
+			triggerIndex = index
+			break
+		}
+	}
+	if triggerIndex < 0 {
+		return fmt.Errorf("cannot retrigger %s: run manifest has no trigger commit", component)
+	}
+	componentIndex := -1
+	for index, name := range manifest.Fixture.Components {
+		if name == component {
+			componentIndex = index
+			break
+		}
+	}
+	if componentIndex < 0 || componentIndex >= len(s.Request.ComponentPaths) {
+		return fmt.Errorf("cannot retrigger %s: no Dockerfile path for the component", component)
+	}
+	previousSHA := manifest.TriggerCommits[triggerIndex].SHA
+	commit, err := s.triggerComponent(ctx, manifest, component, s.Request.ComponentPaths[componentIndex])
+	if err != nil {
+		return err
+	}
+	trigger := &manifest.TriggerCommits[triggerIndex]
+	trigger.SHA = commit.SHA
+	trigger.URL = commit.URL
+	trigger.CreatedAt = commit.CreatedAt
+	trigger.Retriggers++
+	if previousSHA != "" && previousSHA != commit.SHA && !slices.Contains(trigger.PrerequisiteSHAs, previousSHA) {
+		trigger.PrerequisiteSHAs = append(trigger.PrerequisiteSHAs, previousSHA)
+	}
+	return nil
+}
+
 // fixtureFromManifest reconstructs a provider repository from saved fixture identity.
 func fixtureFromManifest(identity model.FixtureIdentity) providers.FixtureRepository {
 	return providers.FixtureRepository{
@@ -518,6 +567,9 @@ func fixtureFromManifest(identity model.FixtureIdentity) providers.FixtureReposi
 	}
 }
 
+// maxPacRetriggersPerComponent bounds automatic retriggers for a PipelineRun PaC never reconciled.
+const maxPacRetriggersPerComponent = 1
+
 // VerifyBuilds waits for successful Buildah TaskRuns and records their PipelineRun identities.
 func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifest) error {
 	namespace := manifest.Fixture.TenantNamespace
@@ -525,8 +577,31 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 		return fmt.Errorf("run manifest does not contain a tenant namespace")
 	}
 	inspector := cluster.PacAuthInspector{Kubernetes: s.Clients.Kubernetes}
+	var identities []model.PipelineRunIdentity
+	for {
+		var err error
+		identities, err = s.waitForBuilds(ctx, manifest, namespace, inspector)
+		if err == nil {
+			break
+		}
+		missing, retry := unreconciledPacRun(err)
+		if !retry || s.Provider == nil || retriggerCount(manifest, missing.Component) >= maxPacRetriggersPerComponent {
+			s.collectFailedBuildLogs(ctx, namespace, manifest, err)
+			return err
+		}
+		s.notice("PaC did not reconcile PipelineRun %s for %s; retriggering it once", missing.PipelineRun, missing.Component)
+		if retryErr := s.retriggerComponent(ctx, manifest, missing.Component); retryErr != nil {
+			return errors.Join(err, retryErr)
+		}
+	}
+	manifest.PipelineRuns = append(manifest.PipelineRuns, identities...)
+	return nil
+}
+
+// waitForBuilds waits for one attempt at successful Buildah TaskRuns.
+func (s *LiveStage) waitForBuilds(ctx context.Context, manifest *model.RunManifest, namespace string, inspector cluster.PacAuthInspector) ([]model.PipelineRunIdentity, error) {
 	inspectionWarned := false
-	identities, err := waitForBuildTaskRuns(ctx, s.Request.Timeouts.Trigger, s.Request.Timeouts.Build, 10*time.Second, namespace, manifest.TriggerCommits, func(ctx context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error) {
+	return waitForBuildTaskRuns(ctx, s.Request.Timeouts.Trigger, s.Request.Timeouts.Build, 10*time.Second, namespace, manifest.TriggerCommits, func(ctx context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error) {
 		components, err := s.Clients.Dynamic.Resource(cluster.ComponentGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, nil, fmt.Errorf("list components while waiting for builds: %w", err)
@@ -562,18 +637,27 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 		}
 		return pipelineRuns.Items, taskRuns.Items, nil
 	}, s.progress)
-	if err != nil {
-		var pipelineRunError *PipelineRunFailedError
-		if errors.As(err, &pipelineRunError) && s.FailedBuildCollector != nil && manifest.ArtifactDirectory != "" {
-			logs, collectErr := s.FailedBuildCollector.CollectFailedBuildLogs(ctx, namespace, pipelineRunError.Name, path.Join(s.Request.StateDir, manifest.ArtifactDirectory))
-			if collectErr == nil {
-				manifest.FailedBuildLogs = append(manifest.FailedBuildLogs, logs...)
-			}
-		}
-		return err
+}
+
+// unreconciledPacRun reports a missing PaC Secret for a PipelineRun PaC never reconciled.
+func unreconciledPacRun(err error) (*cluster.MissingPacAuthSecretError, bool) {
+	var missing *cluster.MissingPacAuthSecretError
+	if errors.As(err, &missing) && !missing.Reconciled {
+		return missing, true
 	}
-	manifest.PipelineRuns = append(manifest.PipelineRuns, identities...)
-	return nil
+	return nil, false
+}
+
+// collectFailedBuildLogs appends logs for a failed PipelineRun.
+func (s *LiveStage) collectFailedBuildLogs(ctx context.Context, namespace string, manifest *model.RunManifest, runErr error) {
+	var pipelineRunError *PipelineRunFailedError
+	if !errors.As(runErr, &pipelineRunError) || s.FailedBuildCollector == nil || manifest.ArtifactDirectory == "" {
+		return
+	}
+	logs, err := s.FailedBuildCollector.CollectFailedBuildLogs(ctx, namespace, pipelineRunError.Name, path.Join(s.Request.StateDir, manifest.ArtifactDirectory))
+	if err == nil {
+		manifest.FailedBuildLogs = append(manifest.FailedBuildLogs, logs...)
+	}
 }
 
 // paCStatusError returns an error when a component's PaC status reports onboarding failure.

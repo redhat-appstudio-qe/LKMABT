@@ -176,8 +176,10 @@ and pending duration. The diagnostic reads PaC's `secret-created` annotation
 and finalizer: a Secret PaC created and then lost points at a concurrent run, a
 PipelineRun without the `pipelinesascode.tekton.dev/finalizer` was never
 reconciled by the PaC watcher, and a reconciled run with
-`secret-created=false` has not finished Secret creation. A Secret read
-that fails for any other reason warns once and keeps waiting. A matched
+`secret-created=false` has not finished Secret creation. An unreconciled run
+causes one automatic component retrigger and a second build wait; a second
+unreconciled run fails with the same diagnosis. A Secret read that fails for any
+other reason warns once and keeps waiting. A matched
 PipelineRun with a `Succeeded=False` condition, or a failed Buildah TaskRun
 under a still-pending PipelineRun, fails the wait immediately instead of waiting
 for more TaskRuns. Successful Buildah TaskRuns do not finish the wait while the
