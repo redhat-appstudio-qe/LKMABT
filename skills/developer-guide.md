@@ -66,12 +66,12 @@ and appends harmless comments to trigger PipelineRuns.
 
 **`internal/clusterfile/`** — Clusters-file schema
 - Strict parsing of `name`, `type`, `ibmcloud`, `ibmcloud-endpoint`, `kubeconfig`, and `server` per entry
-- `name` is the report/`--cluster` identity; the kflux catalog name is that name with a leading `kflux-` removed, and names without the prefix are unchanged
+- `name` is the report/`--cluster` identity; the kflux catalog name is that name with a leading `kflux-` removed, and authentication resolves a real host label through `kflux cluster list --output json` when the derived name is not itself a catalog entry
 - `type: roks` defaults `ibmcloud` to `name` and `ibmcloud-endpoint` to `vpe`; IBM Cloud fields are rejected on `ocp` entries
 - Resolves kubeconfig paths (`~` expansion, relative-to-file); the default is `~/.kube/config-<catalog>`, kflux's own per-cluster path
 
 **`internal/clusterauth/`** — Authentication ladder
-- Every non-ROKS kubeconfig is verified with `oc whoami` on every run: an expired token leaves the file readable, so readability proves nothing. A rejected one is refreshed through `kflux cluster login` (default kubeconfig path) or `oc login` (any path) and otherwise fails at `authentication`. `type: roks` entries are verified and refreshed through the IBM Cloud CLI
+- Every non-ROKS kubeconfig is verified with `oc whoami` on every run: an expired token leaves the file readable, so readability proves nothing. A rejected default-path kubeconfig is refreshed through `kflux cluster login`; before login, `kflux cluster list --output json` resolves real host labels such as `stone-stage-p01` to catalog aliases such as `stg-p01`, and the alias names the default kubeconfig. If a batch kflux login fails, each cluster is retried individually so an unknown catalog cannot block valid ones. A custom-path kubeconfig or an unresolved cluster falls back to `oc login` only when the entry has a server or a readable kubeconfig; a missing kubeconfig with no server fails with guidance rather than using the ambient context. `type: roks` entries are verified and refreshed through the IBM Cloud CLI
 - ROKS: `ibmcloud target` probes for an active session, `ibmcloud login --sso` runs when absent, `ibmcloud ks cluster config --cluster <ibmcloud> --endpoint <ibmcloud-endpoint>` writes the entry's kubeconfig through `KUBECONFIG`, and a second `oc whoami` verifies the result
 - Non-interactive checks are bounded (`oc whoami` 60s, `ibmcloud target`/`ks cluster config` 2m) so one stalled credential plugin fails that cluster instead of blocking the run; only `ibmcloud login --sso` stays interactive
 
@@ -153,11 +153,11 @@ definitions via import when the same GVR is needed across packages.
 
 ## Workflow Execution Flow
 
-1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries, and the cluster's GitHub App installation (GitHub runs; interactive runs wait for and can extend a missing installation wait)
+1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries (a static `host.<name>.platform` entry must also have `address`, `user`, and `secret`), and the cluster's GitHub App installation (GitHub runs; interactive runs wait for and can extend a missing installation wait)
 2. **Fixture Ready** — Validate test repositories are accessible, read current Dockerfile SHAs
 3. **Triggered** — Set each fixture PipelineRun's `build-platforms` parameter to the selected architectures, append trigger comments to Dockerfiles, commit changes. Configuration commits use the `lkmabt configure [skip ci]` subject so PaC creates no throwaway PipelineRun for them
-4. **Builds Verified** — Wait for PipelineRuns to succeed (timeout configurable)
-5. **Build Outputs Verified** — Confirm Buildah TaskRuns provide one successful output per selected architecture
+4. **Builds Verified** — Wait for PipelineRuns to succeed (timeout configurable); capture each component's build-output evidence on the poll that observes its success, while its PipelineRun and TaskRuns still exist
+5. **Build Outputs Verified** — Confirm the captured evidence provides one successful output per selected architecture, fetching only components that were not captured
 6. **Completed** — Prompt for namespace cleanup
 
 On failure, transition to **Failed** phase and collect artifacts. Clusters run
@@ -185,6 +185,15 @@ under a still-pending PipelineRun, fails the wait immediately instead of waiting
 for more TaskRuns. Successful Buildah TaskRuns do not finish the wait while the
 PipelineRun is still pending; the pipeline must report `Succeeded=True`, so
 image-index or later tasks cannot fail after LKMABT calls the run passed.
+
+Build-output evidence is captured on the same poll that observes a component
+succeed, from the PipelineRun and TaskRun objects already listed, so PaC
+`max-keep-runs` cleanup cannot erase it while slower components build. Cached
+evidence satisfies verification even after the PipelineRun is pruned. If a
+PipelineRun that was observed at least once disappears before its evidence is
+captured, the wait fails immediately with
+`PipelineRunDisappearedError` naming the component and the last observed
+PipelineRun, instead of waiting for the build timeout.
 
 ### Tenant Namespace Locking
 `LiveRunner.Run` and `cleanupRun` take a non-blocking `flock` on
@@ -378,6 +387,12 @@ rather than continuously:
 **Rationale**: reduces storage overhead for successful runs; redaction prevents
 accidental credential leakage in shared artifacts.
 
+Required sources retry transient failures (network timeouts, API 408/429/5xx)
+twice with exponential backoff before the collector declares artifacts
+incomplete; `workload/pods.json` remains mandatory. Optional pod logs are
+best-effort per container: one failed log stream no longer discards the rest,
+and the collection report records how many were missed.
+
 ## Artifact Layout
 
 Each run writes into `.lkmabt-runs/latest/`; the next invocation renames it to
@@ -425,6 +440,7 @@ harness:
 - Normalizes aliases such as `linux/x86_64` to `linux/amd64` and accepts `linux-s390x` and `linux-ppc64le`
 - Requires every platform in `Request.Platforms` per component and records the observed outputs and digests
 - Fails as a pipeline misconfiguration when a Buildah TaskRun has no recognizable platform
+- Captures evidence as each component succeeds and reuses it during `Build Outputs Verified`; a PipelineRun pruned after capture does not invalidate the result, while an observed run pruned before capture fails fast
 
 If verification fails, check that:
 1. The multi-platform-controller is running and its `host-config` declares every selected platform
@@ -456,12 +472,16 @@ resources and finalizers. If cleanup still fails, check:
 
 ### Cluster Names Versus kflux Catalog Names
 `name` in the clusters file is the report and `--cluster` identity. The kflux
-catalog name is derived from it: a leading `kflux-` is removed and any other
-name is used unchanged. A name like the API server's first label therefore
-matches the catalog, e.g. host `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is
-catalog cluster `ocp-p01` through the name `kflux-ocp-p01`. An unknown catalog
-name surfaces kflux's own `unknown cluster` error. `type: roks` entries never
-call kflux; the catalog name only names the default kubeconfig path.
+catalog name is derived from it: a leading `kflux-` is removed. When the result
+is not itself a catalog cluster, authentication resolves the entry name (or an
+explicit server host) to a catalog host label from
+`kflux cluster list --output json`; for example `stone-stage-p01` resolves to
+`stg-p01`, and the catalog alias names the default kubeconfig path
+`~/.kube/config-stg-p01`. If no catalog matches, set `server` or `kubeconfig`;
+LKMABT does not run an `oc login` against the ambient context when the target
+kubeconfig is missing. A batch kflux login failure is retried per cluster so an
+unknown name cannot block the valid ones. `type: roks` entries never call
+kflux; the catalog name only names the default kubeconfig path.
 
 ### ROKS First-Time Login
 `type: roks` authenticates with `ibmcloud login --sso` and
