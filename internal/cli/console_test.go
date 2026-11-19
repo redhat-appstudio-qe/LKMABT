@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -59,6 +60,19 @@ func (p *overlapPrompt) Confirm(context.Context, string) (bool, error) {
 	time.Sleep(10 * time.Millisecond)
 	p.inFlight.Add(-1)
 	return true, nil
+}
+
+// cancelingPrompt blocks until released, then reports the context outcome.
+type cancelingPrompt struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+// Confirm signals entry, waits for release, and returns the context error.
+func (p *cancelingPrompt) Confirm(ctx context.Context, _ string) (bool, error) {
+	close(p.entered)
+	<-p.release
+	return false, ctx.Err()
 }
 
 var _ = Describe("Console.Printf", func() {
@@ -232,6 +246,36 @@ var _ = Describe("Console.Confirm", func() {
 			group.Wait()
 			Expect(prompt.overlaps.Load()).Should(BeZero())
 			Expect(results).Should(ConsistOf(true, true, true, true, true, true, true, true))
+		})
+	})
+})
+
+var _ = Describe("Console.Close", func() {
+	When("an animated step is active", func() {
+		It("should erase the live region and drop buffered output", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, animate: true, frameInterval: time.Hour}
+			console.StartStep("Verify builds (github) 🏗️")
+			fmt.Fprint(&console.pending, "stale pending\n")
+			console.partial = []byte("stale partial")
+			Expect(console.renderedLines).Should(Equal(1))
+			Expect(console.spinning).Should(BeTrue())
+
+			console.Close()
+
+			Expect(console.spinning).Should(BeFalse())
+			Expect(console.renderedLines).Should(BeZero())
+			Expect(console.pending.Len()).Should(BeZero())
+			Expect(console.partial).Should(BeNil())
+			Expect(out.String()).ShouldNot(ContainSubstring("stale"))
+			Expect(out.String()).Should(HaveSuffix("\x1b[1A\r\x1b[2K\n\x1b[1A"))
+		})
+	})
+
+	When("the console is nil", func() {
+		It("should do nothing", func() {
+			var console *Console
+			Expect(func() { console.Close() }).ShouldNot(Panic())
 		})
 	})
 })

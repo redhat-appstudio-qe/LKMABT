@@ -19,8 +19,10 @@ func notify(notice func(string, ...any), format string, args ...any) {
 	notice(format, args...)
 }
 
-// awaitPoll waits one polling interval, calling status on each heartbeat.
-// It reports false when the context ends before the interval elapses.
+// awaitPoll waits one polling interval, calling status on each heartbeat tick.
+// heartbeat must be a running ticker. It reports false when the context ends
+// before the interval elapses and true when the interval completes. status runs
+// synchronously in the caller's goroutine.
 func awaitPoll(ctx context.Context, interval time.Duration, heartbeat *time.Ticker, status func()) bool {
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
@@ -36,7 +38,9 @@ func awaitPoll(ctx context.Context, interval time.Duration, heartbeat *time.Tick
 	}
 }
 
-// componentPaCState returns the PaC onboarding state recorded on a component.
+// componentPaCState returns the PaC onboarding state recorded in a component's
+// build.appstudio.openshift.io/status annotation. It returns an empty string
+// when the object, annotation, or JSON is missing or malformed.
 func componentPaCState(object *unstructured.Unstructured) string {
 	if object == nil {
 		return ""
@@ -52,7 +56,8 @@ func componentPaCState(object *unstructured.Unstructured) string {
 	return annotation.PaC.State
 }
 
-// paCWaitStatus renders enabled/total and the pending component names.
+// paCWaitStatus renders enabled/total and the pending component names in the
+// requested order. Components with no matching object count as pending.
 func paCWaitStatus(names []string, objects []unstructured.Unstructured) string {
 	byName := make(map[string]*unstructured.Unstructured, len(objects))
 	for index := range objects {
@@ -73,20 +78,28 @@ func paCWaitStatus(names []string, objects []unstructured.Unstructured) string {
 	return fmt.Sprintf("PaC onboarding: %d/%d enabled; pending %s", enabled, len(names), strings.Join(pending, ", "))
 }
 
-// buildWaitStatus names each component's current build phase.
-func buildWaitStatus(commits []model.TriggerCommit, pipelineRuns, taskRuns []unstructured.Unstructured, now time.Time) string {
+// buildWaitStatus names each component's current build phase in trigger order.
+// captured marks components whose outputs were already evidenced; a nil
+// captured treats every component as uncaptured.
+func buildWaitStatus(commits []model.TriggerCommit, pipelineRuns, taskRuns []unstructured.Unstructured, now time.Time, captured func(string) bool) string {
 	parts := make([]string, 0, len(commits))
 	for _, commit := range commits {
-		parts = append(parts, commit.Component+": "+buildComponentStatus(commit, pipelineRuns, taskRuns, now))
+		parts = append(parts, commit.Component+": "+buildComponentStatus(commit, pipelineRuns, taskRuns, now, captured))
 	}
 	return "builds: " + strings.Join(parts, "; ")
 }
 
-// buildComponentStatus describes one component as missing, failed, running, or succeeded.
-func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []unstructured.Unstructured, now time.Time) string {
+// buildComponentStatus describes one component as missing, failed, running, or
+// succeeded. A captured component with no matching PipelineRun reports success
+// from the recorded evidence. now supplies the age shown for pending runs.
+func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []unstructured.Unstructured, now time.Time, captured func(string) bool) string {
+	isCaptured := captured != nil && captured(commit.Component)
 	candidates := matchingPipelineRuns(pipelineRuns, commit)
 	switch len(candidates) {
 	case 0:
+		if isCaptured {
+			return "succeeded (outputs captured)"
+		}
 		return "no PipelineRun"
 	case 1:
 	default:
@@ -124,7 +137,8 @@ func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []u
 	}
 }
 
-// buildAge renders how long a PipelineRun has been pending, or unknown when it has no timestamp.
+// buildAge renders how long a PipelineRun has been pending, rounded to the
+// second, or "an unknown duration" when it has no creation timestamp.
 func buildAge(object *unstructured.Unstructured, now time.Time) string {
 	created := object.GetCreationTimestamp().Time
 	if created.IsZero() {
@@ -133,11 +147,16 @@ func buildAge(object *unstructured.Unstructured, now time.Time) string {
 	return now.Sub(created).Round(time.Second).String()
 }
 
-// candidatePipelineRunsForCommits lists the PipelineRuns a build wait would match each trigger to.
-func candidatePipelineRunsForCommits(objects []unstructured.Unstructured, commits []model.TriggerCommit) []unstructured.Unstructured {
+// candidatePipelineRunsForCommits lists the PipelineRuns a build wait would
+// match each uncaptured trigger to, deduplicated by namespace and name and kept
+// in trigger order. A nil captured treats every trigger as uncaptured.
+func candidatePipelineRunsForCommits(objects []unstructured.Unstructured, commits []model.TriggerCommit, captured func(string) bool) []unstructured.Unstructured {
 	result := make([]unstructured.Unstructured, 0, len(commits))
 	seen := make(map[string]bool, len(commits))
 	for _, commit := range commits {
+		if captured != nil && captured(commit.Component) {
+			continue
+		}
 		for _, candidate := range matchingPipelineRuns(objects, commit) {
 			key := candidate.GetNamespace() + "/" + candidate.GetName()
 			if seen[key] {

@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,9 +19,12 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// AccessCheck describes one API resource preflight check.
 type AccessCheck struct {
-	Name      string
-	Resource  schema.GroupVersionResource
+	Name string
+	// Resource identifies the API group, version, and resource.
+	Resource schema.GroupVersionResource
+	// Namespace scopes the verb authorization and is required when Verbs is set.
 	Namespace string
 	// Verbs requests a SelfSubjectAccessReview for each verb in Namespace.
 	Verbs []string
@@ -28,12 +32,15 @@ type AccessCheck struct {
 	Guidance string
 }
 
+// CheckResult is the outcome of one preflight check.
 type CheckResult struct {
 	Name    string `json:"name"`
 	Passed  bool   `json:"passed"`
 	Details string `json:"details,omitempty"`
 }
 
+// MultiPlatformController* name the multi-platform-controller objects that
+// preflight checks.
 const (
 	MultiPlatformControllerNamespace   = "multi-platform-controller"
 	MultiPlatformControllerDeployment  = "multi-platform-controller"
@@ -41,6 +48,9 @@ const (
 	MultiPlatformControllerConfigLabel = "build.appstudio.redhat.com/multi-platform-config"
 )
 
+// SchedulingSpec names the controller objects and platforms to verify.
+// Namespace, Deployment, and ConfigMap are required; an empty Platforms list
+// checks only controller readiness and the config map label.
 type SchedulingSpec struct {
 	Namespace  string
 	Deployment string
@@ -48,19 +58,24 @@ type SchedulingSpec struct {
 	Platforms  []string
 }
 
+// PipelineRunSelector restricts PipelineRun lookups by label.
 type PipelineRunSelector struct {
 	Labels map[string]string
 }
 
+// Cluster is the cluster operations the workflow depends on.
 type Cluster interface {
 	// Server returns the API server URL for the connected cluster.
 	Server(context.Context) (string, error)
-	// CheckAccess checks whether requested API group versions are served.
+	// CheckAccess checks served API group versions and, when requested, verb
+	// authorization in the check namespace.
 	CheckAccess(context.Context, []AccessCheck) []CheckResult
 	// CheckScheduling validates controller readiness and platform configuration.
 	CheckScheduling(context.Context, SchedulingSpec) []CheckResult
 }
 
+// ClientSet holds one REST config and the typed, dynamic, and discovery clients
+// built from it.
 type ClientSet struct {
 	Config     *rest.Config
 	Kubernetes kubernetes.Interface
@@ -68,7 +83,9 @@ type ClientSet struct {
 	Discovery  discovery.DiscoveryInterface
 }
 
-// NewClientSet loads kubeconfig and creates clients for the selected cluster.
+// NewClientSet creates clients from the kubeconfig at path. An empty path uses
+// the ambient KUBECONFIG resolution chain. Client configuration, including the
+// default request timeout, comes from NewClientSetFromConfig.
 func NewClientSet(kubeconfig string) (*ClientSet, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if kubeconfig != "" {
@@ -82,10 +99,11 @@ func NewClientSet(kubeconfig string) (*ClientSet, error) {
 	return NewClientSetFromConfig(config)
 }
 
-// ServerFromKubeconfig returns the API server URL recorded in the kubeconfig at path.
+// ServerFromKubeconfig returns the API server URL recorded in the kubeconfig at
+// path, without a trailing slash. An empty path uses the ambient kubeconfig
+// resolution.
 func ServerFromKubeconfig(path string) (string, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	// An empty path keeps the ambient KUBECONFIG/default kubeconfig resolution.
 	if path != "" {
 		loadingRules.ExplicitPath = path
 	}
@@ -96,7 +114,10 @@ func ServerFromKubeconfig(path string) (string, error) {
 	return strings.TrimRight(config.Host, "/"), nil
 }
 
-// NewClientSetFromConfig creates Kubernetes, dynamic, and discovery clients from a REST config.
+// NewClientSetFromConfig creates Kubernetes, dynamic, and discovery clients from
+// config, which must not be nil. When config.Timeout is zero, the returned
+// ClientSet uses a copy with a 20-second request timeout; an explicit timeout
+// and all other fields are preserved.
 func NewClientSetFromConfig(config *rest.Config) (*ClientSet, error) {
 	if config == nil {
 		return nil, fmt.Errorf("rest config is nil")
@@ -120,11 +141,13 @@ func NewClientSetFromConfig(config *rest.Config) (*ClientSet, error) {
 	return &ClientSet{Config: config, Kubernetes: kubernetesClient, Dynamic: dynamicClient, Discovery: discoveryClient}, nil
 }
 
+// RealCluster implements Cluster against a live API server.
 type RealCluster struct {
 	Clients *ClientSet
 }
 
-// Server returns the configured cluster host without trailing slashes.
+// Server returns the configured cluster host without trailing slashes. It
+// performs no API call and ignores the context.
 func (c *RealCluster) Server(context.Context) (string, error) {
 	if c == nil || c.Clients == nil || c.Clients.Config == nil {
 		return "", fmt.Errorf("cluster clients are not initialized")
@@ -132,8 +155,11 @@ func (c *RealCluster) Server(context.Context) (string, error) {
 	return strings.TrimRight(c.Clients.Config.Host, "/"), nil
 }
 
-// CheckAccess checks whether each requested API group version is served by the cluster
-// and, when verbs are listed, whether the current user may perform them in the namespace.
+// CheckAccess reports whether each check's API group version is served by the
+// cluster and, when Verbs is non-empty, whether the current user may perform
+// every verb in the check namespace. The context bounds the authorization
+// reviews; discovery requests use the client's configured timeout. Failures are
+// returned as failed results, never as errors.
 func (c *RealCluster) CheckAccess(ctx context.Context, checks []AccessCheck) []CheckResult {
 	results := make([]CheckResult, 0, len(checks))
 	for _, check := range checks {
@@ -212,7 +238,9 @@ func withGuidance(details, guidance string) string {
 	return details + "; " + guidance
 }
 
-// CheckScheduling verifies controller readiness and host-config coverage for each platform.
+// CheckScheduling verifies that the controller deployment is available and that
+// host-config declares and configures every requested platform. Failures are
+// returned as results.
 func (c *RealCluster) CheckScheduling(ctx context.Context, spec SchedulingSpec) []CheckResult {
 	if c == nil || c.Clients == nil || c.Clients.Kubernetes == nil {
 		return []CheckResult{{Name: "multi-platform-controller", Details: "kubernetes client is not initialized"}}
@@ -237,22 +265,34 @@ func (c *RealCluster) CheckScheduling(ctx context.Context, spec SchedulingSpec) 
 	results := []CheckResult{{Name: spec.Deployment, Passed: true, Details: "controller deployment is available"}}
 	for _, platform := range spec.Platforms {
 		result := CheckResult{Name: spec.Namespace + "/" + platform}
-		mode := configuredPlatformMode(configMap.Data, platform)
-		if mode == "" {
+		scheduling := configuredPlatform(configMap.Data, platform)
+		if scheduling.mode == "" {
 			result.Details = "platform is not configured in host-config"
 			results = append(results, result)
 			continue
 		}
-		if mode == "dynamic" || mode == "dynamic-pool" {
+		if scheduling.mode == "static" {
+			host, details := staticHostForPlatform(configMap.Data, platform, scheduling.hosts)
+			if host == "" {
+				result.Details = details
+				results = append(results, result)
+				continue
+			}
+			result.Passed = true
+			result.Details = fmt.Sprintf("platform is configured via static host %s", host)
+			results = append(results, result)
+			continue
+		}
+		if scheduling.mode == "dynamic" || scheduling.mode == "dynamic-pool" {
 			prefix := "dynamic." + strings.ReplaceAll(platform, "/", "-") + "."
 			if strings.TrimSpace(configMap.Data[prefix+"type"]) == "" {
-				result.Details = fmt.Sprintf("%s platform has no provider type", mode)
+				result.Details = fmt.Sprintf("%s platform has no provider type", scheduling.mode)
 				results = append(results, result)
 				continue
 			}
 		}
 		result.Passed = true
-		result.Details = fmt.Sprintf("platform is configured via %s host scheduling", mode)
+		result.Details = fmt.Sprintf("platform is configured via %s host scheduling", scheduling.mode)
 		results = append(results, result)
 	}
 	return results
@@ -270,13 +310,20 @@ func controllerDeploymentReady(deployment *appsv1.Deployment) bool {
 	return desired > 0 && deployment.Status.ObservedGeneration >= deployment.Generation && deployment.Status.ReadyReplicas >= desired && deployment.Status.AvailableReplicas >= desired && deployment.Status.UpdatedReplicas >= desired
 }
 
-// configuredPlatformMode returns the host-config scheduling mode for a
-// platform. Static hosts declare their platform per host instead of in a
-// platform list.
-func configuredPlatformMode(data map[string]string, target string) string {
+// platformScheduling describes how host-config provides a platform.
+type platformScheduling struct {
+	mode  string
+	hosts []string
+}
+
+// configuredPlatform returns the host-config scheduling mode for a platform.
+// Static hosts declare their platform per host instead of in a platform list;
+// every matching host is returned so one incomplete entry cannot mask a usable
+// host.
+func configuredPlatform(data map[string]string, target string) platformScheduling {
 	wanted := platform.Normalize(target)
 	if wanted == "" {
-		return ""
+		return platformScheduling{}
 	}
 	for _, entry := range []struct {
 		key  string
@@ -288,14 +335,52 @@ func configuredPlatformMode(data map[string]string, target string) string {
 	} {
 		for _, configured := range strings.Split(data[entry.key], ",") {
 			if platform.Normalize(strings.TrimSpace(configured)) == wanted {
-				return entry.mode
+				return platformScheduling{mode: entry.mode}
 			}
 		}
 	}
+	hosts := make([]string, 0)
 	for key, value := range data {
-		if strings.HasPrefix(key, "host.") && strings.HasSuffix(key, ".platform") && platform.Normalize(strings.TrimSpace(value)) == wanted {
-			return "static"
+		if !strings.HasPrefix(key, "host.") || !strings.HasSuffix(key, ".platform") {
+			continue
+		}
+		if platform.Normalize(strings.TrimSpace(value)) != wanted {
+			continue
+		}
+		host := strings.TrimSuffix(strings.TrimPrefix(key, "host."), ".platform")
+		if host != "" {
+			hosts = append(hosts, host)
 		}
 	}
-	return ""
+	if len(hosts) == 0 {
+		return platformScheduling{}
+	}
+	slices.Sort(hosts)
+	return platformScheduling{mode: "static", hosts: hosts}
+}
+
+// missingStaticHostFields lists required host-config fields absent from a
+// static host entry. Concurrency is optional and validated by the controller.
+func missingStaticHostFields(data map[string]string, host string) []string {
+	missing := make([]string, 0, 3)
+	for _, field := range []string{"address", "user", "secret"} {
+		if strings.TrimSpace(data["host."+host+"."+field]) == "" {
+			missing = append(missing, field)
+		}
+	}
+	return missing
+}
+
+// staticHostForPlatform returns a complete static host for the platform, or a
+// detail string naming every incomplete matching host.
+func staticHostForPlatform(data map[string]string, target string, hosts []string) (string, string) {
+	unavailable := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		if missing := missingStaticHostFields(data, host); len(missing) > 0 {
+			unavailable = append(unavailable, fmt.Sprintf("%s (missing %s)", host, strings.Join(missing, ", ")))
+			continue
+		}
+		return host, ""
+	}
+	return "", fmt.Sprintf("no usable static host for %s: %s", target, strings.Join(unavailable, "; "))
 }

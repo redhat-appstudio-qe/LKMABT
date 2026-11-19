@@ -190,6 +190,39 @@ var _ = Describe("BuildOutputInspector", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("build TaskRun"))
 	})
+
+	Describe("VerifyListed", func() {
+		It("verifies the supplied objects without a dynamic client", func() {
+			pipeline := pipelineRunObject("build", "tenant", "uid-1", "True")
+			amd64 := taskRunWithDeclaredPlatform("build-task-amd64", "tenant", "uid-1", "linux/amd64", "quay.io/example/amd64", "sha256:amd64")
+			// The supplied arm64 TaskRun is not visible to any client; it must be used.
+			arm64 := taskRunWithDeclaredPlatform("build-task-arm64", "tenant", "uid-1", "linux/arm64", "quay.io/example/arm64", "sha256:arm64")
+			inspector := cluster.BuildOutputInspector{Platforms: []string{"linux/amd64", "linux/arm64"}}
+
+			evidence, err := inspector.VerifyListed(buildIdentity(), pipeline, []unstructured.Unstructured{*amd64, *arm64})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(evidence.Platforms).Should(Equal([]string{"linux/amd64", "linux/arm64"}))
+			Expect(evidence.CreatedOutputs).Should(HaveKeyWithValue("linux/arm64", "quay.io/example/arm64"))
+		})
+
+		It("rejects a PipelineRun that has not succeeded", func() {
+			pipeline := pipelineRunObject("build", "tenant", "uid-1", "Unknown")
+			amd64 := taskRunWithDeclaredPlatform("build-task-amd64", "tenant", "uid-1", "linux/amd64", "quay.io/example/amd64", "sha256:amd64")
+			inspector := cluster.BuildOutputInspector{Platforms: []string{"linux/amd64"}}
+
+			_, err := inspector.VerifyListed(buildIdentity(), pipeline, []unstructured.Unstructured{*amd64})
+			Expect(err).Should(MatchError(ContainSubstring("has not succeeded")))
+		})
+
+		It("rejects missing expected platforms", func() {
+			pipeline := pipelineRunObject("build", "tenant", "uid-1", "True")
+			amd64 := taskRunWithDeclaredPlatform("build-task-amd64", "tenant", "uid-1", "linux/amd64", "quay.io/example/amd64", "sha256:amd64")
+			inspector := cluster.BuildOutputInspector{Platforms: []string{"linux/amd64", "linux/arm64"}}
+
+			_, err := inspector.VerifyListed(buildIdentity(), pipeline, []unstructured.Unstructured{*amd64})
+			Expect(err).Should(MatchError(ContainSubstring("linux/arm64")))
+		})
+	})
 })
 
 // buildOutputClientWithPlatformLabels creates a fake client with one successful TaskRun per platform.

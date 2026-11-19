@@ -15,19 +15,30 @@ import (
 )
 
 var (
+	// PipelineRunGVR locates Tekton PipelineRuns.
 	PipelineRunGVR = schema.GroupVersionResource{Group: "tekton.dev", Version: "v1", Resource: "pipelineruns"}
-	TaskRunGVR     = schema.GroupVersionResource{Group: "tekton.dev", Version: "v1", Resource: "taskruns"}
+	// TaskRunGVR locates Tekton TaskRuns.
+	TaskRunGVR = schema.GroupVersionResource{Group: "tekton.dev", Version: "v1", Resource: "taskruns"}
 )
 
+// BuildOutputInspector verifies that a successful PipelineRun's Buildah
+// TaskRuns produced one image per expected platform.
 type BuildOutputInspector struct {
+	// Dynamic reads PipelineRuns and TaskRuns for Verify; VerifyListed ignores it.
 	Dynamic dynamic.Interface
 	// Platforms lists the canonical platforms each PipelineRun must produce.
 	// Empty means every supported platform.
 	Platforms []string
-	Now       func() time.Time
+	// Now supplies the evidence timestamp; nil means time.Now.
+	Now func() time.Time
 }
 
-// Verify collects build evidence and requires outputs for every requested platform.
+// Verify collects build evidence for each identity and requires outputs for
+// every expected platform. It requires Dynamic and at least one identity, and
+// rejects configured platforms that are not canonical supported names. The
+// first failing component aborts the call without returning partial evidence;
+// all components in one call share a single evidence timestamp. The context
+// bounds every API request.
 func (i BuildOutputInspector) Verify(ctx context.Context, identities []model.PipelineRunIdentity) ([]model.BuildOutputEvidence, error) {
 	if i.Dynamic == nil {
 		return nil, fmt.Errorf("dynamic client is required")
@@ -35,6 +46,37 @@ func (i BuildOutputInspector) Verify(ctx context.Context, identities []model.Pip
 	if len(identities) == 0 {
 		return nil, fmt.Errorf("at least one PipelineRun is required")
 	}
+	expected, err := i.expectedPlatforms()
+	if err != nil {
+		return nil, err
+	}
+	verifiedAt := i.verifiedAt()
+	evidence := make([]model.BuildOutputEvidence, 0, len(identities))
+	for _, identity := range identities {
+		output, err := i.verifyPipelineRun(ctx, identity, expected, verifiedAt)
+		if err != nil {
+			return nil, err
+		}
+		evidence = append(evidence, output)
+	}
+	return evidence, nil
+}
+
+// VerifyListed verifies a PipelineRun and TaskRuns already listed in one poll,
+// so a delete between a list and its evidence capture cannot lose evidence.
+// It never uses the dynamic client and works with Dynamic unset; the evidence
+// timestamp comes from Now.
+func (i BuildOutputInspector) VerifyListed(identity model.PipelineRunIdentity, pipelineRun *unstructured.Unstructured, taskRuns []unstructured.Unstructured) (model.BuildOutputEvidence, error) {
+	expected, err := i.expectedPlatforms()
+	if err != nil {
+		return model.BuildOutputEvidence{}, err
+	}
+	return i.verifyObjects(identity, pipelineRun, taskRuns, expected, i.verifiedAt())
+}
+
+// expectedPlatforms returns the requested canonical platforms, defaulting to
+// platform.All(), and rejects values that are not canonical supported platforms.
+func (i BuildOutputInspector) expectedPlatforms() ([]string, error) {
 	expected := i.Platforms
 	if len(expected) == 0 {
 		expected = platform.All()
@@ -44,22 +86,20 @@ func (i BuildOutputInspector) Verify(ctx context.Context, identities []model.Pip
 			return nil, fmt.Errorf("unsupported build platform %q", buildPlatform)
 		}
 	}
+	return expected, nil
+}
+
+// verifiedAt returns the configured clock's UTC time, defaulting to time.Now.
+func (i BuildOutputInspector) verifiedAt() time.Time {
 	now := time.Now
 	if i.Now != nil {
 		now = i.Now
 	}
-	evidence := make([]model.BuildOutputEvidence, 0, len(identities))
-	for _, identity := range identities {
-		output, err := i.verifyPipelineRun(ctx, identity, expected, now().UTC())
-		if err != nil {
-			return nil, err
-		}
-		evidence = append(evidence, output)
-	}
-	return evidence, nil
+	return now().UTC()
 }
 
-// verifyPipelineRun validates one PipelineRun and extracts its successful Buildah outputs.
+// verifyPipelineRun fetches one PipelineRun and every TaskRun in its namespace,
+// then delegates to verifyObjects. The context bounds both requests.
 func (i BuildOutputInspector) verifyPipelineRun(ctx context.Context, identity model.PipelineRunIdentity, expected []string, verifiedAt time.Time) (model.BuildOutputEvidence, error) {
 	if strings.TrimSpace(identity.Namespace) == "" || strings.TrimSpace(identity.Name) == "" {
 		return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun identity is incomplete")
@@ -68,6 +108,25 @@ func (i BuildOutputInspector) verifyPipelineRun(ctx context.Context, identity mo
 	pipelineRun, err := pipelineRuns.Get(ctx, identity.Name, metav1.GetOptions{})
 	if err != nil {
 		return model.BuildOutputEvidence{}, fmt.Errorf("get PipelineRun %s/%s: %w", identity.Namespace, identity.Name, err)
+	}
+	taskRuns, err := i.Dynamic.Resource(TaskRunGVR).Namespace(identity.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return model.BuildOutputEvidence{}, fmt.Errorf("list TaskRuns for PipelineRun %s/%s: %w", identity.Namespace, identity.Name, err)
+	}
+	return i.verifyObjects(identity, pipelineRun, taskRuns.Items, expected, verifiedAt)
+}
+
+// verifyObjects validates a supplied PipelineRun and its TaskRuns and extracts
+// the successful Buildah outputs. The PipelineRun must match the identity UID
+// when set, carry a component identity, and have a Succeeded=True condition. A
+// failed build TaskRun is an error; TaskRuns that have not succeeded are
+// ignored. Every expected platform must have an output URL and digest.
+func (i BuildOutputInspector) verifyObjects(identity model.PipelineRunIdentity, pipelineRun *unstructured.Unstructured, taskRuns []unstructured.Unstructured, expected []string, verifiedAt time.Time) (model.BuildOutputEvidence, error) {
+	if strings.TrimSpace(identity.Namespace) == "" || strings.TrimSpace(identity.Name) == "" {
+		return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun identity is incomplete")
+	}
+	if pipelineRun == nil {
+		return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun %s/%s is required", identity.Namespace, identity.Name)
 	}
 	if identity.UID != "" && pipelineRun.GetUID() != identity.UID {
 		return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun %s/%s identity changed", identity.Namespace, identity.Name)
@@ -78,14 +137,10 @@ func (i BuildOutputInspector) verifyPipelineRun(ctx context.Context, identity mo
 	if conditionStatus(pipelineRun) != "True" {
 		return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun %s/%s has not succeeded", identity.Namespace, identity.Name)
 	}
-	taskRuns, err := i.Dynamic.Resource(TaskRunGVR).Namespace(identity.Namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return model.BuildOutputEvidence{}, fmt.Errorf("list TaskRuns for PipelineRun %s/%s: %w", identity.Namespace, identity.Name, err)
-	}
 	createdOutputs := make(map[string]string)
 	outputDigests := make(map[string]string)
-	for index := range taskRuns.Items {
-		taskRun := &taskRuns.Items[index]
+	for index := range taskRuns {
+		taskRun := &taskRuns[index]
 		if !ownedByPipelineRun(taskRun, string(pipelineRun.GetUID()), pipelineRun.GetName()) {
 			continue
 		}
@@ -105,6 +160,8 @@ func (i BuildOutputInspector) verifyPipelineRun(ctx context.Context, identity mo
 		if platform == "" {
 			return model.BuildOutputEvidence{}, fmt.Errorf("build TaskRun %s/%s has no platform label — pipeline misconfiguration", taskRun.GetNamespace(), taskRun.GetName())
 		}
+		// Duplicate platforms keep the last TaskRun's output; the pipeline should
+		// produce one, but this verifier does not reject extras.
 		createdOutputs[platform] = output
 		outputDigests[platform] = digest
 	}
@@ -121,7 +178,9 @@ func (i BuildOutputInspector) verifyPipelineRun(ctx context.Context, identity mo
 	return model.BuildOutputEvidence{Component: identity.Component, PipelineRun: verifiedIdentity, Platforms: platforms, CreatedOutputs: createdOutputs, OutputDigests: outputDigests, VerifiedAt: verifiedAt}, nil
 }
 
-// ownedByPipelineRun reports whether a TaskRun has a matching PipelineRun owner reference.
+// ownedByPipelineRun reports whether a TaskRun has a PipelineRun owner
+// reference. It matches the owner UID when uid is non-empty and falls back to
+// the owner name when uid is empty.
 func ownedByPipelineRun(taskRun *unstructured.Unstructured, uid, name string) bool {
 	owners, found, err := unstructured.NestedSlice(taskRun.Object, "metadata", "ownerReferences")
 	if err != nil || !found {
@@ -141,12 +200,14 @@ func ownedByPipelineRun(taskRun *unstructured.Unstructured, uid, name string) bo
 	return false
 }
 
-// OwnedByPipelineRun reports whether a TaskRun belongs to the named PipelineRun.
+// OwnedByPipelineRun reports whether a TaskRun belongs to the PipelineRun
+// identified by uid or, when uid is empty, by name.
 func OwnedByPipelineRun(taskRun *unstructured.Unstructured, uid, name string) bool {
 	return ownedByPipelineRun(taskRun, uid, name)
 }
 
-// conditionStatus returns the Succeeded condition status or Unknown when absent.
+// conditionStatus returns the Succeeded condition status, or Unknown when the
+// condition is absent or malformed.
 func conditionStatus(object *unstructured.Unstructured) string {
 	conditions, _, _ := unstructured.NestedSlice(object.Object, "status", "conditions")
 	for _, raw := range conditions {
@@ -160,7 +221,9 @@ func conditionStatus(object *unstructured.Unstructured) string {
 	return "Unknown"
 }
 
-// IsBuildTaskRun reports whether a TaskRun represents a Buildah pipeline task.
+// IsBuildTaskRun reports whether a TaskRun is the build-container or
+// build-images pipeline task and identifies its task as Buildah through the
+// tekton.dev/task label or the taskRef name parameter.
 func IsBuildTaskRun(taskRun *unstructured.Unstructured) bool {
 	labels := taskRun.GetLabels()
 	pipelineTask := labels["tekton.dev/pipelineTask"]
@@ -182,7 +245,10 @@ func IsBuildTaskRun(taskRun *unstructured.Unstructured) bool {
 	return false
 }
 
-// taskRunOutput extracts the normalized platform, image URL, and digest from a TaskRun.
+// taskRunOutput extracts the normalized platform, image URL, and digest from a
+// TaskRun. A result whose name contains PLATFORM overrides the platform
+// declared by metadata or params, and a later matching result wins; an
+// unrecognized platform is returned as an empty string.
 func taskRunOutput(taskRun *unstructured.Unstructured) (string, string, string) {
 	platform := taskRunPlatform(taskRun)
 	imageURL := ""
@@ -216,7 +282,10 @@ func taskRunOutput(taskRun *unstructured.Unstructured) (string, string, string) 
 	return platform, imageURL, digest
 }
 
-// taskRunPlatform returns the first recognized platform declared by TaskRun metadata or params.
+// taskRunPlatform returns the first recognized platform declared by the
+// build.appstudio.redhat.com/platform, build.appstudio.redhat.com/target-platform,
+// or build.appstudio.openshift.io/platform label, then annotation, then spec
+// PLATFORM param. It returns "" when none normalize.
 func taskRunPlatform(taskRun *unstructured.Unstructured) string {
 	for _, values := range []map[string]string{taskRun.GetLabels(), taskRun.GetAnnotations()} {
 		for _, key := range []string{
@@ -247,12 +316,10 @@ func taskRunPlatform(taskRun *unstructured.Unstructured) string {
 	return ""
 }
 
-// isBuildPlatform reports whether value names a supported build platform.
 func isBuildPlatform(value string) bool {
 	return normalizeBuildPlatform(value) != ""
 }
 
-// normalizeBuildPlatform maps supported platform aliases to canonical names.
 func normalizeBuildPlatform(value string) string {
 	return platform.Normalize(value)
 }

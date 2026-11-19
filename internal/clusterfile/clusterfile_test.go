@@ -126,6 +126,18 @@ var _ = Describe("Load", func() {
 				Expect(entries[0].Kubeconfig).Should(Equal(filepath.Join(dir, "config-own")))
 				Expect(entries[0].UsesDefaultKubeconfig(home)).Should(BeFalse())
 			})
+
+			It("should honor a runtime catalog override", func() {
+				home := testHome()
+				entry := clusterfile.Entry{
+					Name:       "stone-stage-p01",
+					Kubeconfig: clusterfile.DefaultKubeconfig(home, "stg-p01"),
+					Catalog:    "stg-p01",
+				}
+
+				Expect(entry.CatalogName()).Should(Equal("stg-p01"))
+				Expect(entry.UsesDefaultKubeconfig(home)).Should(BeTrue())
+			})
 		})
 
 		It("should derive the catalog name from a name without the kflux prefix", func() {

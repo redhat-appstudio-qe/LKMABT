@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
@@ -44,7 +45,7 @@ var _ = ginkgo.Describe("Kubernetes sources", func() {
 
 		root := ginkgo.GinkgoT().TempDir()
 		var source Source
-		for _, candidate := range KubernetesSources(client, "tenant", "run-1") {
+		for _, candidate := range KubernetesSources(client, "tenant") {
 			if candidate.Name == "taskrun-yaml" {
 				source = candidate
 			}
@@ -68,7 +69,7 @@ var _ = ginkgo.Describe("Kubernetes sources", func() {
 			Expect(err).NotTo(HaveOccurred())
 		}
 		root := ginkgo.GinkgoT().TempDir()
-		for _, source := range KubernetesSources(client, "tenant", "run-1") {
+		for _, source := range KubernetesSources(client, "tenant") {
 			if source.Name == "pods" {
 				if err := source.Collect(context.Background(), root); err != nil {
 					Expect(err).NotTo(HaveOccurred())
@@ -105,6 +106,28 @@ var _ = ginkgo.Describe("Kubernetes sources", func() {
 			Expect(err).NotTo(HaveOccurred())
 		}
 		Expect(string(data)).To(ContainSubstring("build output"))
+	})
+
+	ginkgo.It("keeps collecting logs after one container's log fails", func() {
+		client := kubernetesfake.NewSimpleClientset(
+			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "broken-pod", Namespace: "tenant"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "build"}}}},
+			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "good-pod", Namespace: "tenant"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "build"}}}},
+		)
+		source := newPodLogSource(client, "tenant", time.Now(), func(_ context.Context, _ string, pod, _ string, _ corev1.PodLogOptions) ([]byte, error) {
+			if pod == "broken-pod" {
+				return nil, errors.New("log stream timeout")
+			}
+			return []byte("good output\n"), nil
+		})
+		root := ginkgo.GinkgoT().TempDir()
+
+		err := source.Collect(context.Background(), root)
+
+		Expect(err).Should(HaveOccurred())
+		Expect(err.Error()).Should(ContainSubstring("broken-pod/build: log stream timeout"))
+		data, readErr := os.ReadFile(filepath.Join(root, "logs", "tenant", "good-pod", "build.log"))
+		Expect(readErr).NotTo(HaveOccurred())
+		Expect(string(data)).To(ContainSubstring("good output"))
 	})
 })
 

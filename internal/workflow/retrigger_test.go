@@ -12,6 +12,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/cluster"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -90,6 +91,7 @@ var _ = Describe("VerifyBuilds retrigger", func() {
 			Request: config.Request{
 				ComponentPaths: []string{"web-server/Dockerfile"},
 				SourceBranch:   "main",
+				Platforms:      []string{platform.LinuxAMD64},
 				Timeouts:       config.Timeouts{Trigger: time.Second, Build: time.Second},
 			},
 			Fixture:  providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"},
@@ -129,6 +131,7 @@ var _ = Describe("VerifyBuilds retrigger", func() {
 			Request: config.Request{
 				ComponentPaths: []string{"web-server/Dockerfile"},
 				SourceBranch:   "main",
+				Platforms:      []string{platform.LinuxAMD64},
 				Timeouts:       config.Timeouts{Trigger: time.Second, Build: time.Second},
 			},
 			Fixture:  providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"},

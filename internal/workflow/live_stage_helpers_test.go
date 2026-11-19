@@ -47,7 +47,7 @@ var _ = Describe("build wait progress", func() {
 			buildTaskRunForWorkflow("task-succeeded", "uid-succeeded", "True", "buildah-oci-ta"),
 		}
 
-		Expect(buildWaitStatus(commits, pipelineRuns, taskRuns, now)).Should(Equal("builds: " +
+		Expect(buildWaitStatus(commits, pipelineRuns, taskRuns, now, nil)).Should(Equal("builds: " +
 			"running: running for 1m30s (PipelineRun run-running, buildah 0/1 succeeded); " +
 			"pending: pending for 3m0s (PipelineRun run-pending, no Buildah TaskRun); " +
 			"failed: failed (PipelineRun run-failed); " +
@@ -62,12 +62,20 @@ var _ = Describe("build wait progress", func() {
 			pipelineRunAt("run-web", "web", "sha-web", "uid-web", "True", now.Add(-time.Minute)),
 		}
 
-		Expect(buildWaitStatus(commits, pipelineRuns, nil, now)).Should(Equal("builds: web: PipelineRun run-web succeeded; waiting for Buildah TaskRuns"))
+		Expect(buildWaitStatus(commits, pipelineRuns, nil, now, nil)).Should(Equal("builds: web: PipelineRun run-web succeeded; waiting for Buildah TaskRuns"))
 
 		taskRuns := []unstructured.Unstructured{
 			buildTaskRunForWorkflow("task-web", "uid-web", "Unknown", "buildah-oci-ta"),
 		}
-		Expect(buildWaitStatus(commits, pipelineRuns, taskRuns, now)).Should(Equal("builds: web: PipelineRun run-web succeeded; buildah 0/1 succeeded"))
+		Expect(buildWaitStatus(commits, pipelineRuns, taskRuns, now, nil)).Should(Equal("builds: web: PipelineRun run-web succeeded; buildah 0/1 succeeded"))
+	})
+
+	It("renders captured evidence when a completed PipelineRun was pruned", func() {
+		commit := model.TriggerCommit{Component: "web", SHA: "sha-web"}
+
+		status := buildComponentStatus(commit, nil, nil, time.Now(), func(component string) bool { return component == "web" })
+
+		Expect(status).Should(Equal("succeeded (outputs captured)"))
 	})
 
 	It("selects and deduplicates the PipelineRuns a wait matches to the triggers", func() {
@@ -81,8 +89,9 @@ var _ = Describe("build wait progress", func() {
 			{Component: "mathwizz-web-server", SHA: "sha-web"},
 		}
 
-		candidates := candidatePipelineRunsForCommits(objects, commits)
+		candidates := candidatePipelineRunsForCommits(objects, commits, nil)
 		Expect(candidates).Should(HaveLen(1))
 		Expect(candidates[0].GetName()).Should(Equal("run-web"))
+		Expect(candidatePipelineRunsForCommits(objects, commits, func(string) bool { return true })).Should(BeEmpty())
 	})
 })

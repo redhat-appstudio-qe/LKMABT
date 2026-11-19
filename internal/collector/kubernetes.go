@@ -27,8 +27,9 @@ type resourceSource struct {
 	path      string
 }
 
-// KubernetesSources returns collectors for the run's namespaced workload snapshots.
-func KubernetesSources(client dynamic.Interface, namespace, _ string) []Source {
+// KubernetesSources returns required collectors for the run's namespaced
+// workload snapshots.
+func KubernetesSources(client dynamic.Interface, namespace string) []Source {
 	resources := []resourceSource{
 		{name: "applications", gvr: schema.GroupVersionResource{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "applications"}, namespace: namespace, path: "workload/applications.json"},
 		{name: "components", gvr: schema.GroupVersionResource{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "components"}, namespace: namespace, path: "workload/components.json"},
@@ -80,6 +81,8 @@ func writeTaskRunYAMLs(directory, namespace string, taskRuns []unstructured.Unst
 	return nil
 }
 
+// DefaultLogNamespaces lists system namespaces whose pod logs are collected in
+// addition to the tenant namespace.
 var DefaultLogNamespaces = []string{
 	"pipelines-as-code",
 	"tekton-pipelines",
@@ -87,7 +90,10 @@ var DefaultLogNamespaces = []string{
 	"konflux-image-controller",
 }
 
-// KubernetesPodLogSources returns optional log collectors for the tenant and system namespaces.
+// KubernetesPodLogSources returns optional log collectors for the tenant and
+// system namespaces. Empty namespace names are skipped and duplicates are
+// removed, keeping the tenant namespace first. All logs use startedAt as the
+// since-time boundary.
 func KubernetesPodLogSources(client kubernetes.Interface, tenantNamespace string, startedAt time.Time) []Source {
 	namespaces := append([]string{tenantNamespace}, DefaultLogNamespaces...)
 	seen := make(map[string]struct{}, len(namespaces))
@@ -107,7 +113,8 @@ func KubernetesPodLogSources(client kubernetes.Interface, tenantNamespace string
 
 type podLogFetcher func(context.Context, string, string, string, corev1.PodLogOptions) ([]byte, error)
 
-// newPodLogSource builds a collector that writes each pod container's logs from startedAt onward.
+// newPodLogSource builds a collector that writes each pod container's logs from
+// startedAt onward. A non-nil fetch replaces cluster log access.
 func newPodLogSource(client kubernetes.Interface, namespace string, startedAt time.Time, fetch podLogFetcher) Source {
 	path := filepath.Join("logs", namespace)
 	if fetch == nil {
@@ -132,13 +139,21 @@ func newPodLogSource(client kubernetes.Interface, namespace string, startedAt ti
 			return err
 		}
 		options := corev1.PodLogOptions{SinceTime: &metav1.Time{Time: startedAt}, Timestamps: true}
+		var failures []string
 		for _, pod := range pods.Items {
+			if ctx.Err() != nil {
+				break
+			}
 			containers := append([]corev1.Container(nil), pod.Spec.InitContainers...)
 			containers = append(containers, pod.Spec.Containers...)
 			for _, container := range containers {
+				if ctx.Err() != nil {
+					break
+				}
 				data, err := fetch(ctx, namespace, pod.Name, container.Name, options)
 				if err != nil {
-					return fmt.Errorf("get logs for %s/%s: %w", pod.Name, container.Name, err)
+					failures = append(failures, fmt.Sprintf("%s/%s: %v", pod.Name, container.Name, err))
+					continue
 				}
 				logPath := filepath.Join(root, path, safePathPart(pod.Name), safePathPart(container.Name)+".log")
 				if err := os.MkdirAll(filepath.Dir(logPath), 0o750); err != nil {
@@ -149,11 +164,25 @@ func newPodLogSource(client kubernetes.Interface, namespace string, startedAt ti
 				}
 			}
 		}
-		return nil
+		if len(failures) > 0 {
+			return podLogFailure(failures)
+		}
+		return ctx.Err()
 	}}
 }
 
-// safePathPart replaces path separators and traversal markers for use in artifact filenames.
+// podLogFailure summarizes per-container log failures, reporting at most the
+// first three messages.
+func podLogFailure(failures []string) error {
+	const maxReported = 3
+	if len(failures) <= maxReported {
+		return fmt.Errorf("failed to collect %d pod log(s): %s", len(failures), strings.Join(failures, "; "))
+	}
+	return fmt.Errorf("failed to collect %d pod logs; first %d: %s", len(failures), maxReported, strings.Join(failures[:maxReported], "; "))
+}
+
+// safePathPart replaces path separators and traversal markers for use in
+// artifact filenames. An empty result becomes "unknown".
 func safePathPart(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.NewReplacer("/", "_", "\\", "_", "..", "_").Replace(value)

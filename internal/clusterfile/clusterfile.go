@@ -18,21 +18,36 @@ const DefaultPath = ".lkmabt-clusters.yaml"
 
 // Cluster types accepted in the clusters file.
 const (
-	TypeOCP  = "ocp"
+	// TypeOCP is an OpenShift cluster reached through kflux or the oc login ladder.
+	TypeOCP = "ocp"
+	// TypeROKS is an IBM Cloud ROKS cluster whose kubeconfig comes from ibmcloud ks.
 	TypeROKS = "roks"
 )
 
-// DefaultIBMCloudEndpoint is the IBM Cloud CLI endpoint type used when an entry omits one.
+// DefaultIBMCloudEndpoint is the IBM Cloud CLI endpoint type used when a ROKS
+// entry omits one.
 const DefaultIBMCloudEndpoint = "vpe"
 
 // Entry is one cluster listed in the clusters file.
 type Entry struct {
-	Name             string `json:"name"`
-	Type             string `json:"type,omitempty"`
-	IBMCloud         string `json:"ibmcloud,omitempty"`
+	// Name is the cluster name, unique in the file and safe as a directory name.
+	Name string `json:"name"`
+	// Type is TypeOCP or TypeROKS; empty means TypeOCP.
+	Type string `json:"type,omitempty"`
+	// IBMCloud is the IBM Cloud cluster name for a ROKS entry; empty means Name.
+	IBMCloud string `json:"ibmcloud,omitempty"`
+	// IBMCloudEndpoint is the ibmcloud CLI endpoint type for a ROKS entry; empty
+	// means DefaultIBMCloudEndpoint.
 	IBMCloudEndpoint string `json:"ibmcloud-endpoint,omitempty"`
-	Kubeconfig       string `json:"kubeconfig,omitempty"`
-	Server           string `json:"server,omitempty"`
+	// Kubeconfig is the kubeconfig path; empty means DefaultKubeconfig. Relative
+	// paths resolve against the clusters file directory.
+	Kubeconfig string `json:"kubeconfig,omitempty"`
+	// Server is the optional expected API server URL.
+	Server string `json:"server,omitempty"`
+	// Catalog overrides the kflux catalog name derived from Name. Authentication
+	// fills it after resolving a real cluster host label (for example
+	// stone-stage-p01) through `kflux cluster list`; it is not a YAML field.
+	Catalog string `json:"-"`
 }
 
 // IsROKS reports whether the entry is an IBM Cloud ROKS cluster.
@@ -40,18 +55,21 @@ func (e Entry) IsROKS() bool {
 	return e.Type == TypeROKS
 }
 
-// CatalogName returns the kflux catalog name derived from the entry name.
-// A "kflux-" prefix is stripped; names without the prefix are used unchanged.
+// CatalogName returns the kflux catalog name for the entry. A runtime Catalog
+// override (resolved from kflux's cluster list) wins; otherwise a "kflux-"
+// prefix is stripped and names without the prefix are used unchanged.
 func (e Entry) CatalogName() string {
+	if e.Catalog != "" {
+		return e.Catalog
+	}
 	return catalogName(e.Name)
 }
 
-// catalogName strips the kflux- prefix from a cluster name.
 func catalogName(name string) string {
 	return strings.TrimPrefix(name, "kflux-")
 }
 
-// document is the strict YAML shape of the clusters file.
+// document is the strict YAML shape of the clusters file; unknown keys are rejected.
 type document struct {
 	Clusters []Entry `json:"clusters"`
 }
@@ -60,18 +78,20 @@ type document struct {
 // names and as kflux -c targets.
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-// ValidName reports whether name is safe as a directory name and kflux -c target.
+// ValidName reports whether name is safe as a directory name and kflux -c
+// target. It rejects empty names and the . and .. directory components.
 func ValidName(name string) bool {
 	// "." and ".." are not directory components: joining them escapes the cluster directory.
 	return name != "." && name != ".." && namePattern.MatchString(name)
 }
 
-// DefaultKubeconfig returns the default kubeconfig path for a kflux catalog name.
+// DefaultKubeconfig returns home/.kube/config-<catalog>, the default kubeconfig
+// path for a kflux catalog name.
 func DefaultKubeconfig(home, catalog string) string {
 	return filepath.Join(home, ".kube", "config-"+catalog)
 }
 
-// Find returns the entry named name.
+// Find returns the entry named name, or an error if the file lists none.
 func Find(entries []Entry, name string) (Entry, error) {
 	for _, entry := range entries {
 		if entry.Name == name {
@@ -81,7 +101,12 @@ func Find(entries []Entry, name string) (Entry, error) {
 	return Entry{}, fmt.Errorf("clusters file does not list cluster %q", name)
 }
 
-// Load parses and normalizes the clusters file at path.
+// Load parses and normalizes the clusters file at path. Parsing is strict:
+// unknown fields are rejected and the document must list at least one cluster.
+// Each entry is validated (unique safe name, known type, IBM Cloud fields only
+// for ROKS, unique kubeconfig path, absolute http or https server) and its
+// defaults are applied. A missing file and the removed "kflux" field get
+// actionable errors.
 func Load(path string) ([]Entry, error) {
 	data, err := os.ReadFile(path)
 	// A missing file gets an actionable message naming the flag and the default path.
@@ -240,8 +265,9 @@ func normalizeServer(value, name, path string) (string, error) {
 	return normalized, nil
 }
 
-// UsesDefaultKubeconfig reports whether the entry resolves to the default kubeconfig path.
-// The default path is kflux's own per-cluster path, so it follows the kflux catalog name.
+// UsesDefaultKubeconfig reports whether the entry's normalized Kubeconfig equals
+// DefaultKubeconfig(home, CatalogName()). The default path is kflux's own
+// per-cluster path, so it follows the kflux catalog name.
 func (e Entry) UsesDefaultKubeconfig(home string) bool {
 	return e.Kubeconfig == DefaultKubeconfig(home, e.CatalogName())
 }
