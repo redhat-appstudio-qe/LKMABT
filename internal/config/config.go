@@ -182,7 +182,14 @@ func credentialsFromEnv(fileValues map[string]string, gitlab bool) (Credentials,
 		credentials.GitLabToken, credentials.GitLabAPIURL = processToken, processURL
 		return credentials, nil
 	}
-	if fileToken != "" && fileURL == "" && processURL != "" {
+	if fileToken == "" {
+		credentials.GitLabAPIURL = processURL
+		if credentials.GitLabAPIURL == "" {
+			credentials.GitLabAPIURL = fileURL
+		}
+		return credentials, nil
+	}
+	if fileURL == "" && processURL != "" {
 		return Credentials{}, errors.New("GITLAB_BOT_TOKEN is set in the env file but GITLAB_API_URL is only in the environment; set both in the same source")
 	}
 	credentials.GitLabToken, credentials.GitLabAPIURL = fileToken, fileURL

@@ -184,6 +184,18 @@ var _ = Describe("Parse", func() {
 			Expect(err).Should(MatchError(ContainSubstring("read env file")))
 		})
 
+		It("prefers a process GitLab URL when no token is configured", func() {
+			envFile := GinkgoT().TempDir() + "/other.env"
+			Expect(os.WriteFile(envFile, []byte("GITLAB_API_URL=https://file.example/api/v4\n"), 0o600)).Should(Succeed())
+			GinkgoT().Setenv("GITLAB_BOT_TOKEN", "")
+			GinkgoT().Setenv("GITLAB_API_URL", "https://gitlab.com/api/v4")
+
+			got, err := Parse([]string{"gitlab", "--env-file", envFile})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(got.Credentials.GitLabToken).Should(BeEmpty())
+			Expect(got.Credentials.GitLabAPIURL).Should(Equal("https://gitlab.com/api/v4"))
+		})
+
 		It("ignores mixed GitLab sources for a GitHub-only run", func() {
 			envFile := GinkgoT().TempDir() + "/other.env"
 			Expect(os.WriteFile(envFile, []byte("GITLAB_API_URL=https://file.example/api/v4\n"), 0o600)).Should(Succeed())

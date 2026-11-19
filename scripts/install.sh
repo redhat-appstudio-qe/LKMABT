@@ -40,6 +40,21 @@ for directory in "${candidates[@]}"; do
 	break
 done
 
+# A custom directory on PATH is preferable to installing somewhere that needs
+# a PATH change. Only existing absolute PATH entries are used.
+if [ -z "$target" ]; then
+	path_entries=()
+	IFS=: read -r -a path_entries <<< "$PATH"
+	for directory in "${path_entries[@]}"; do
+		[ -n "$directory" ] || continue
+		case "$directory" in /*) ;; *) continue ;; esac
+		[ -d "$directory" ] || continue
+		[ -w "$directory" ] || continue
+		target=$directory
+		break
+	done
+fi
+
 # No PATH directory is writable: install into the XDG user directory and
 # report the one-line PATH change instead of silently leaving lkmabt unusable.
 if [ -z "$target" ]; then

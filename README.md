@@ -124,9 +124,9 @@ Every run needs network access to:
 ./scripts/install.sh
 ```
 
-The installer builds `lkmabt` and installs it into the first writable directory
-already on `PATH` (`$GOBIN`, `$(go env GOPATH)/bin`, `~/.local/bin`, `~/bin`,
-or `/usr/local/bin`). If none is writable, it installs into `~/.local/bin` and
+The installer builds `lkmabt` and installs it into a writable directory already
+on `PATH`, preferring `$GOBIN`, `$(go env GOPATH)/bin`, `~/.local/bin`, `~/bin`,
+or `/usr/local/bin`. If none is writable, it installs into `~/.local/bin` and
 prints the one-line `PATH` change instead of leaving `lkmabt` undiscoverable.
 It builds with `GOWORK=off`, so a parent `go.work` that does not list this
 module cannot block installation.
