@@ -12,6 +12,7 @@ func RenderMarkdown(document Document) string {
 	fmt.Fprintf(builder, "- Started: %s\n", document.StartedAtText())
 	fmt.Fprintf(builder, "- Ended: %s\n", document.EndedAtText())
 	fmt.Fprintf(builder, "- Clusters file: `%s`\n", document.ClustersFile)
+	fmt.Fprintf(builder, "- Architectures: %s\n", document.ArchitecturesText())
 	fmt.Fprintf(builder, "- Result: **%s**\n\n", document.Result())
 	builder.WriteString("| Cluster | Provider | Result | Stage | Error | Artifacts |\n")
 	builder.WriteString("| --- | --- | --- | --- | --- | --- |\n")

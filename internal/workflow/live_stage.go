@@ -803,16 +803,22 @@ func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, comm
 			return nil, false, fmt.Errorf("ambiguous PipelineRuns for component %s after trigger %s", commit.Component, commit.SHA)
 		}
 		candidate := candidates[0]
+		if pipelineRunConditionStatus(candidate) == "False" {
+			return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
+		}
 		buildTasks := buildTaskRunsForPipelineRun(taskRuns, candidate)
-		if len(buildTasks) == 0 {
+		for _, taskRun := range buildTasks {
+			if pipelineRunConditionStatus(taskRun) == "False" {
+				return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
+			}
+		}
+		// Successful Buildah TaskRuns are only evidence after the PipelineRun
+		// itself succeeds; later tasks can still be running or fail.
+		if pipelineRunConditionStatus(candidate) != "True" || len(buildTasks) == 0 {
 			return identities, true, nil
 		}
 		for _, taskRun := range buildTasks {
-			status := pipelineRunConditionStatus(taskRun)
-			if status == "False" {
-				return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
-			}
-			if status != "True" {
+			if pipelineRunConditionStatus(taskRun) != "True" {
 				return identities, true, nil
 			}
 		}

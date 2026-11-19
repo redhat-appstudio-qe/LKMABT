@@ -456,7 +456,7 @@ var _ = Describe("finishAggregateRun", func() {
 			stateDir := GinkgoT().TempDir()
 			aggregate, err := newAggregateRun(stateDir)
 			Expect(err).ShouldNot(HaveOccurred())
-			request := config.Request{Provider: config.ProviderGitHub}
+			request := config.Request{Provider: config.ProviderGitHub, Platforms: []string{"linux/arm64"}}
 			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted}}}}
 			console := &Console{Out: &bytes.Buffer{}}
 
@@ -469,9 +469,12 @@ var _ = Describe("finishAggregateRun", func() {
 				Expect(info.Mode().Perm()).Should(Equal(os.FileMode(0o640)))
 			}
 			output := console.Out.(*bytes.Buffer).String()
-			Expect(output).Should(ContainSubstring("c1 github: passed (completed)"))
+			Expect(output).Should(ContainSubstring("c1 github: passed (completed); architectures: linux/arm64"))
 			Expect(output).Should(ContainSubstring("report: " + markdownPath))
 			Expect(output).Should(ContainSubstring("report: " + htmlPath))
+			markdown, readErr := os.ReadFile(markdownPath)
+			Expect(readErr).ShouldNot(HaveOccurred())
+			Expect(string(markdown)).Should(ContainSubstring("- Architectures: linux/arm64"))
 		})
 	})
 

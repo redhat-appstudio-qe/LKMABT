@@ -1041,9 +1041,38 @@ var _ = Describe("LiveStage", func() {
 		Expect(err).Should(MatchError(ContainSubstring("ambiguous")))
 	})
 
-	It("waits for Buildah TaskRuns without waiting for validation TaskRuns", func() {
+	It("waits for the PipelineRun before accepting successful Buildah TaskRuns", func() {
 		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
 		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "Unknown")
+		build := buildTaskRunForWorkflow("build-task", "uid-build", "True", "buildah-oci-ta")
+		_, pending, err := matchBuildTaskRuns([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{build}, []model.TriggerCommit{commit})
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeTrue())
+	})
+
+	It("fails a failed PipelineRun even when its Buildah TaskRuns succeeded", func() {
+		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
+		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "False")
+		build := buildTaskRunForWorkflow("build-task", "uid-build", "True", "buildah-oci-ta")
+		_, pending, err := matchBuildTaskRuns([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{build}, []model.TriggerCommit{commit})
+		var failure *PipelineRunFailedError
+		Expect(errors.As(err, &failure)).Should(BeTrue())
+		Expect(pending).Should(BeFalse())
+	})
+
+	It("fails a build TaskRun while the PipelineRun is still pending", func() {
+		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
+		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "Unknown")
+		build := buildTaskRunForWorkflow("build-task", "uid-build", "False", "buildah-oci-ta")
+		_, pending, err := matchBuildTaskRuns([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{build}, []model.TriggerCommit{commit})
+		var failure *PipelineRunFailedError
+		Expect(errors.As(err, &failure)).Should(BeTrue())
+		Expect(pending).Should(BeFalse())
+	})
+
+	It("ignores non-Buildah TaskRuns after the PipelineRun succeeds", func() {
+		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
+		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "True")
 		build := buildTaskRunForWorkflow("build-task", "uid-build", "True", "buildah-oci-ta")
 		validation := buildTaskRunForWorkflow("validation-task", "uid-build", "False", "sast-shell-check")
 		identities, err := waitForBuildTaskRuns(context.Background(), time.Second, time.Second, time.Millisecond, "mathwizz-test", []model.TriggerCommit{commit}, func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error) {
@@ -1180,6 +1209,7 @@ var _ = Describe("LiveStage", func() {
 				started := time.Now()
 				commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "sha-1"}
 				pipeline := pipelineRunAt("run-build", "mathwizz-web-server", "sha-1", "uid-build", "Unknown", started.Add(-2*time.Minute))
+				succeededPipeline := pipelineRunAt("run-build", "mathwizz-web-server", "sha-1", "uid-build", "True", started.Add(-2*time.Minute))
 				pendingTask := buildTaskRunForWorkflow("build-task", "uid-build", "Unknown", "buildah-oci-ta")
 				succeededTask := buildTaskRunForWorkflow("build-task", "uid-build", "True", "buildah-oci-ta")
 				_, err := waitForBuildTaskRuns(context.Background(), 5*time.Second, 5*time.Second, 2*time.Millisecond, "mathwizz-test", []model.TriggerCommit{commit}, func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error) {
@@ -1189,7 +1219,7 @@ var _ = Describe("LiveStage", func() {
 					case elapsed < 250*time.Millisecond:
 						return []unstructured.Unstructured{pipeline}, []unstructured.Unstructured{pendingTask}, nil
 					default:
-						return []unstructured.Unstructured{pipeline}, []unstructured.Unstructured{succeededTask}, nil
+						return []unstructured.Unstructured{succeededPipeline}, []unstructured.Unstructured{succeededTask}, nil
 					}
 				}, stage.notice)
 				Expect(err).ShouldNot(HaveOccurred())
@@ -1274,7 +1304,7 @@ var _ = Describe("LiveStage", func() {
 			})
 
 			It("should succeed when the annotated Secret exists", func() {
-				pipeline := annotatedPipelineRun("run-build", "mathwizz-web-server", "sha-1", "uid-build", "Unknown", "git-auth-secret", time.Now().Add(-5*time.Minute))
+				pipeline := annotatedPipelineRun("run-build", "mathwizz-web-server", "sha-1", "uid-build", "True", "git-auth-secret", time.Now().Add(-5*time.Minute))
 				build := buildTaskRunForWorkflow("build-task", "uid-build", "True", "buildah-oci-ta")
 				stage := &LiveStage{
 					Request: config.Request{Timeouts: config.Timeouts{Trigger: time.Second, Build: time.Second}},
@@ -1294,7 +1324,14 @@ var _ = Describe("LiveStage", func() {
 			It("should warn once and keep waiting when the Secret read is forbidden", func() {
 				pipeline := annotatedPipelineRun("run-build", "mathwizz-web-server", "sha-1", "uid-build", "Unknown", "git-auth-secret", time.Now().Add(-5*time.Minute))
 				dynamic := namespaceDynamicClient(&pipeline)
-				var taskRunLists atomic.Int32
+				var taskRunLists, pipelineRunLists atomic.Int32
+				dynamic.PrependReactor("list", "pipelineruns", func(kubetesting.Action) (bool, runtime.Object, error) {
+					current := pipeline.DeepCopy()
+					if pipelineRunLists.Add(1) > 1 {
+						current.Object["status"].(map[string]any)["conditions"] = []any{map[string]any{"type": "Succeeded", "status": "True"}}
+					}
+					return true, &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*current}}, nil
+				})
 				dynamic.PrependReactor("list", "taskruns", func(kubetesting.Action) (bool, runtime.Object, error) {
 					if taskRunLists.Add(1) == 1 {
 						return true, &unstructured.UnstructuredList{}, nil

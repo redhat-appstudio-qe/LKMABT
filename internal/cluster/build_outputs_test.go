@@ -52,8 +52,18 @@ var _ = Describe("BuildOutputInspector", func() {
 		Expect(err.Error()).Should(ContainSubstring(platform.LinuxPPC64LE))
 	})
 
-	It("accepts completed Buildah tasks before validation tasks finish", func() {
+	It("rejects a PipelineRun that has not succeeded", func() {
 		pipeline := pipelineRunObject("build", "tenant", "uid-1", "Unknown")
+		amd64 := taskRunWithDeclaredPlatform("build-task-amd64", "tenant", "uid-1", "linux/amd64", "quay.io/example/amd64", "sha256:amd64")
+		arm64 := taskRunWithDeclaredPlatform("build-task-arm64", "tenant", "uid-1", "linux/arm64", "quay.io/example/arm64", "sha256:arm64")
+		client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, amd64, arm64)
+
+		_, err := (cluster.BuildOutputInspector{Dynamic: client, Platforms: []string{"linux/amd64", "linux/arm64"}}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+		Expect(err).Should(MatchError(ContainSubstring("has not succeeded")))
+	})
+
+	It("ignores non-Buildah TaskRuns after the PipelineRun succeeds", func() {
+		pipeline := pipelineRunObject("build", "tenant", "uid-1", "True")
 		amd64 := taskRunWithDeclaredPlatform("build-task-amd64", "tenant", "uid-1", "linux/amd64", "quay.io/example/amd64", "sha256:amd64")
 		arm64 := taskRunWithDeclaredPlatform("build-task-arm64", "tenant", "uid-1", "linux/arm64", "quay.io/example/arm64", "sha256:arm64")
 		validation := taskRunObject("validation-task", "tenant", "uid-1", "")
@@ -172,7 +182,7 @@ var _ = Describe("BuildOutputInspector", func() {
 	})
 
 	It("rejects failed Buildah TaskRuns", func() {
-		pipeline := pipelineRunObject("build", "tenant", "uid-1", "Unknown")
+		pipeline := pipelineRunObject("build", "tenant", "uid-1", "True")
 		failed := taskRunWithDeclaredPlatform("build-task", "tenant", "uid-1", "linux/amd64", "quay.io/example/amd64", "sha256:amd64")
 		failed.Object["status"].(map[string]any)["conditions"] = []any{map[string]any{"type": "Succeeded", "status": "False"}}
 		client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, failed)

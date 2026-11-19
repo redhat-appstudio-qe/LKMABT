@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -31,12 +32,21 @@ type Row struct {
 
 // Document is the aggregate report content for one LKMABT invocation.
 type Document struct {
-	RunID        string
-	ClustersFile string
-	StartedAt    time.Time
-	EndedAt      time.Time
-	Passed       bool
-	Rows         []Row
+	RunID         string
+	ClustersFile  string
+	Architectures []string
+	StartedAt     time.Time
+	EndedAt       time.Time
+	Passed        bool
+	Rows          []Row
+}
+
+// ArchitecturesText renders the tested architectures for reports and summaries.
+func (d Document) ArchitecturesText() string {
+	if len(d.Architectures) == 0 {
+		return "none"
+	}
+	return strings.Join(d.Architectures, ", ")
 }
 
 // Result renders the row outcome as "passed" or "failed".

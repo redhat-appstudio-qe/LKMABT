@@ -333,8 +333,9 @@ lkmabt both --env-file my.env
   durable and never overwritten.
 - The console prints a `cluster <name>` heading per cluster,
   `cluster <name>: finished (<n> passed, <n> failed)`, one result line per
-  provider and cluster, and the report paths. A cluster that fails
-  authentication prints ` ✗ Authenticate cluster <name> 🔐` and the reason.
+  provider and cluster with the tested architectures, and the report paths. A
+  cluster that fails authentication prints
+  ` ✗ Authenticate cluster <name> 🔐` and the reason.
 - Reports and evidence are stored under `.lkmabt-runs/`; see
   [Run logs and artifact retention](#run-logs-and-artifact-retention).
 
@@ -385,7 +386,10 @@ selection. This applies to configured tokens and browser logins.
   commits are visible to other users.
 - Build-output verification requires one successful output per selected
   architecture for every component; a missing or unlabeled platform fails as a
-  pipeline misconfiguration.
+  pipeline misconfiguration. A component is accepted only after its
+  PipelineRun reports `Succeeded=True`; successful Buildah TaskRuns alone are
+  not enough, so `waiting for PipelineRun ... to finish` means the run is still
+  in progress.
 - A missing tenant namespace is requested through an OpenShift `ProjectRequest`,
   which binds the requester as project admin; if that API is unavailable or
   forbidden, LKMABT creates a bare `Namespace`. Cleanup labels are applied only

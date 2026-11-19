@@ -178,8 +178,11 @@ PipelineRun without the `pipelinesascode.tekton.dev/finalizer` was never
 reconciled by the PaC watcher, and a reconciled run with
 `secret-created=false` has not finished Secret creation. A Secret read
 that fails for any other reason warns once and keeps waiting. A matched
-PipelineRun with a `Succeeded=False` condition fails the wait immediately
-instead of waiting for Buildah TaskRuns.
+PipelineRun with a `Succeeded=False` condition, or a failed Buildah TaskRun
+under a still-pending PipelineRun, fails the wait immediately instead of waiting
+for more TaskRuns. Successful Buildah TaskRuns do not finish the wait while the
+PipelineRun is still pending; the pipeline must report `Succeeded=True`, so
+image-index or later tasks cannot fail after LKMABT calls the run passed.
 
 ### Tenant Namespace Locking
 `LiveRunner.Run` and `cleanupRun` take a non-blocking `flock` on

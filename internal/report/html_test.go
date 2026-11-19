@@ -10,11 +10,12 @@ import (
 // htmlDocument builds the standard unsafe/escaped HTML fixture.
 func htmlDocument() Document {
 	return Document{
-		RunID:        "run-1",
-		ClustersFile: ".lkmabt-clusters.yaml",
-		StartedAt:    time.Date(2026, 10, 8, 10, 0, 0, 0, time.UTC),
-		EndedAt:      time.Date(2026, 10, 8, 10, 5, 0, 0, time.UTC),
-		Passed:       false,
+		RunID:         "run-1",
+		ClustersFile:  ".lkmabt-clusters.yaml",
+		Architectures: []string{"linux/amd64", "linux/arm64"},
+		StartedAt:     time.Date(2026, 10, 8, 10, 0, 0, 0, time.UTC),
+		EndedAt:       time.Date(2026, 10, 8, 10, 5, 0, 0, time.UTC),
+		Passed:        false,
 		Rows: []Row{
 			{Cluster: "<script>alert(1)</script>", Provider: "github", Passed: true, Stage: "completed",
 				Links: []Link{{Label: "run.log", Target: "./c1/run.log"}}},
@@ -30,6 +31,7 @@ var _ = Describe("RenderHTML", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(html).Should(ContainSubstring("<!DOCTYPE html>"))
 			Expect(html).Should(ContainSubstring("<title>LKMABT aggregate run run-1</title>"))
+			Expect(html).Should(ContainSubstring("<li>Architectures: linux/amd64, linux/arm64</li>"))
 			Expect(html).Should(ContainSubstring("<table>"))
 		})
 	})
@@ -92,7 +94,7 @@ var _ = Describe("RenderHTML and RenderMarkdown parity", func() {
 		Expect(err).ShouldNot(HaveOccurred())
 		markdown := RenderMarkdown(document)
 
-		for _, value := range []string{"run-1", "c1", "c2", "github", "gitlab", "completed", "authentication", "passed", "failed"} {
+		for _, value := range []string{"run-1", "c1", "c2", "github", "gitlab", "completed", "authentication", "passed", "failed", "linux/amd64", "linux/arm64"} {
 			Expect(html).Should(ContainSubstring(value), "html should contain %s", value)
 			Expect(markdown).Should(ContainSubstring(value), "markdown should contain %s", value)
 		}

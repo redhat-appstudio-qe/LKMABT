@@ -29,6 +29,7 @@ th,td{border:1px solid #999;padding:0.4rem;text-align:left;vertical-align:top}
 <li>Started: {{.StartedAtText}}</li>
 <li>Ended: {{.EndedAtText}}</li>
 <li>Clusters file: <code>{{.ClustersFile}}</code></li>
+<li>Architectures: {{.ArchitecturesText}}</li>
 <li>Result: <span class="{{.Result}}">{{.Result}}</span></li>
 </ul>
 <table>

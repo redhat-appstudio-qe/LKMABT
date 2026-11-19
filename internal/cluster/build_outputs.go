@@ -75,6 +75,9 @@ func (i BuildOutputInspector) verifyPipelineRun(ctx context.Context, identity mo
 	if identity.Component == "" {
 		return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun %s/%s has no component identity", identity.Namespace, identity.Name)
 	}
+	if conditionStatus(pipelineRun) != "True" {
+		return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun %s/%s has not succeeded", identity.Namespace, identity.Name)
+	}
 	taskRuns, err := i.Dynamic.Resource(TaskRunGVR).Namespace(identity.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return model.BuildOutputEvidence{}, fmt.Errorf("list TaskRuns for PipelineRun %s/%s: %w", identity.Namespace, identity.Name, err)

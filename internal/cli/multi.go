@@ -373,13 +373,13 @@ func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []
 	if cleanupErr != nil {
 		rows = append(rows, report.Row{Cluster: "credentials", Provider: "auth", Stage: report.StageCleanup, Error: cleanupErr.Error(), Links: report.Links(aggregate.Directory, aggregate.runLogName(), "", "")})
 	}
-	document := report.Document{RunID: aggregate.RunID, ClustersFile: request.ClustersFile, StartedAt: aggregate.StartedAt, EndedAt: time.Now().UTC(), Passed: allPassed(rows), Rows: rows}
+	document := report.Document{RunID: aggregate.RunID, ClustersFile: request.ClustersFile, Architectures: request.Platforms, StartedAt: aggregate.StartedAt, EndedAt: time.Now().UTC(), Passed: allPassed(rows), Rows: rows}
 	step := console.StartStep("Write reports 📝")
 	writeErr := report.Write(aggregate.Directory, document, aggregate.Name)
 	step.End(writeErr == nil)
 	console.Printf("")
 	for _, row := range rows {
-		console.Printf("%s %s: %s (%s)", row.Cluster, row.Provider, row.Result(), row.Stage)
+		console.Printf("%s %s: %s (%s); architectures: %s", row.Cluster, row.Provider, row.Result(), row.Stage, document.ArchitecturesText())
 	}
 	markdownPath, htmlPath := aggregate.reportPaths()
 	console.Printf("report: %s", markdownPath)
