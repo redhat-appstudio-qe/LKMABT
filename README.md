@@ -5,10 +5,12 @@ cluster in the clusters file it:
 
 1. Checks that the cluster can run multi-platform builds;
 2. Creates or reuses the tenant namespace, Application, and Components;
-3. Appends one harmless comment to each fixture Dockerfile and commits it;
+3. Selects the architectures in each fixture PipelineRun and appends one
+   harmless comment to each fixture Dockerfile;
 4. Waits for the matching PipelineRuns to succeed;
-5. Verifies the pre-publication Buildah outputs cover `linux/amd64` and
-   `linux/arm64`.
+5. Verifies the pre-publication Buildah outputs cover the selected
+   architectures. All four are selected by default: `linux/amd64`,
+   `linux/arm64`, `linux/s390x`, and `linux/ppc64le`.
 
 The harness never copies, creates, forks, renames, or deletes repositories, and
 it does not query registries, archives, pruning, backup services, or unrelated
@@ -92,9 +94,12 @@ Provider credentials are described in
 ### Cluster requirements
 
 - The `multi-platform-controller` deployment is ready in namespace
-  `multi-platform-controller`, and its `host-config` ConfigMap declares
-  `linux/amd64` and `linux/arm64`. Dynamic arm64 provisioning is sufficient;
-  physical arm64 nodes are not required.
+  `multi-platform-controller`, and its `host-config` ConfigMap declares every
+  architecture the run selects, either in a local/dynamic platform list or on a
+  static `host.<name>.platform` entry. By default LKMABT requires
+  `linux/amd64`, `linux/arm64`, `linux/s390x`, and `linux/ppc64le`; select
+  `aws`, `ibm`, or a single architecture to narrow the requirement. Dynamic
+  provisioning is sufficient; physical architecture nodes are not required.
 - PaC onboarding is complete for all three components, with current `.tekton`
   configuration on each fixture's default branch. LKMABT waits for PaC
   readiness and does not merge onboarding changes.
@@ -275,10 +280,14 @@ Run from the checkout root, or pass absolute paths. `--clusters-file` defaults
 to `.lkmabt-clusters.yaml`.
 
 ```bash
-# Browser authentication
+# Browser authentication, all four architectures
 lkmabt github
 lkmabt gitlab
 lkmabt both
+
+# One architecture or a provider group
+lkmabt github arm64
+lkmabt both ibm
 
 # Configured tokens
 lkmabt github --env-file my.env
@@ -287,6 +296,19 @@ lkmabt both --env-file my.env
 ```
 
 - `github` and `gitlab` test one fixture; `both` tests both.
+- The optional second argument selects the architectures the triggered builds
+  must produce. It follows the fixture command and precedes flags:
+
+  | Argument | Builds |
+  | --- | --- |
+  | `arm64` | `linux/arm64` |
+  | `amd64` | `linux/amd64` |
+  | `s390x` | `linux/s390x` |
+  | `ppc64le` | `linux/ppc64le` |
+  | `aws` | `amd64` and `arm64` |
+  | `ibm` | `s390x` and `ppc64le` |
+
+  Omit it to build and verify all four architectures.
 - Clusters run one at a time in clusters-file order. Each cluster finishes or
   fails before the next one starts. `both` runs the two providers concurrently
   inside a cluster; each provider gets its own live status line, and durable
@@ -356,9 +378,14 @@ selection. This applies to configured tokens and browser logins.
 
 ### During the run
 
-- Triggering appends one comment to each of the three Dockerfiles on the
+- Triggering first sets each fixture PipelineRun's `build-platforms`
+  parameter to the selected architectures when it differs from the committed
+  value, then appends one comment to each of the three Dockerfiles on the
   fixture's default branch and commits it. The fixtures are shared; your
   commits are visible to other users.
+- Build-output verification requires one successful output per selected
+  architecture for every component; a missing or unlabeled platform fails as a
+  pipeline misconfiguration.
 - A missing tenant namespace is requested through an OpenShift `ProjectRequest`,
   which binds the requester as project admin; if that API is unavailable or
   forbidden, LKMABT creates a bare `Namespace`. Cleanup labels are applied only
