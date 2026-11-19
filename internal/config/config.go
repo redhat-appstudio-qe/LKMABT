@@ -101,7 +101,7 @@ func Defaults() Request {
 // Parse builds and validates a request from command-line arguments and environment values.
 func Parse(args []string) (Request, error) {
 	if len(args) == 0 {
-		return Request{}, fmt.Errorf("usage: lkmabt <github|gitlab|both> [%s] [flags] | lkmabt cleanup --cluster <name> --run-id <id> [flags]", strings.Join(platform.Names(), "|"))
+		return Request{}, fmt.Errorf("usage: lkmabt <github|gitlab|both> [%s]... [flags] | lkmabt cleanup --cluster <name> --run-id <id> [flags]", strings.Join(platform.Names(), "|"))
 	}
 	req := Defaults()
 	var remaining []string
@@ -120,16 +120,21 @@ func Parse(args []string) (Request, error) {
 			req.TenantNamespace = DefaultGitLabTenantNamespace
 		}
 		remaining = args[1:]
-		// The optional architecture argument follows the fixture command and
-		// precedes flags, so a flag value can never be read as an architecture.
-		if len(remaining) > 0 && !strings.HasPrefix(remaining[0], "-") {
-			platforms, err := platform.Select(remaining[0])
+		// Architecture arguments follow the fixture command and precede flags,
+		// so a flag value can never be read as an architecture. Each argument may
+		// also carry a comma-separated list.
+		names, rest, err := architectureArguments(remaining)
+		if err != nil {
+			return Request{}, err
+		}
+		if len(names) > 0 {
+			platforms, err := platform.Combine(names...)
 			if err != nil {
 				return Request{}, err
 			}
 			req.Platforms = platforms
-			remaining = remaining[1:]
 		}
+		remaining = rest
 	default:
 		return Request{}, fmt.Errorf("unsupported command %q", args[0])
 	}
@@ -184,6 +189,29 @@ func Parse(args []string) (Request, error) {
 	}
 	req.Credentials = credentials
 	return req, req.Validate()
+}
+
+// architectureArguments consumes leading non-flag arguments and splits each on
+// commas, so `s390x arm64` and `s390x, arm64` select the same platforms.
+func architectureArguments(args []string) (names, remaining []string, err error) {
+	remaining = args
+	for len(remaining) > 0 && !strings.HasPrefix(remaining[0], "-") {
+		argument := remaining[0]
+		remaining = remaining[1:]
+		added := false
+		for _, part := range strings.Split(argument, ",") {
+			name := strings.TrimSpace(part)
+			if name == "" {
+				continue
+			}
+			names = append(names, name)
+			added = true
+		}
+		if !added {
+			return nil, nil, fmt.Errorf("architecture argument %q names no platforms", argument)
+		}
+	}
+	return names, remaining, nil
 }
 
 // credentialsFromEnv resolves provider credentials from the environment and env-file values.

@@ -285,9 +285,11 @@ lkmabt github
 lkmabt gitlab
 lkmabt both
 
-# One architecture or a provider group
+# One architecture, a provider group, or several
 lkmabt github arm64
 lkmabt both ibm
+lkmabt github s390x arm64
+lkmabt github s390x, arm64
 
 # Configured tokens
 lkmabt github --env-file my.env
@@ -296,8 +298,11 @@ lkmabt both --env-file my.env
 ```
 
 - `github` and `gitlab` test one fixture; `both` tests both.
-- The optional second argument selects the architectures the triggered builds
-  must produce. It follows the fixture command and precedes flags:
+- The optional architecture arguments select the architectures the triggered
+  builds must produce. One or more arguments follow the fixture command and
+  precede flags; separate them with spaces or commas (`s390x arm64`,
+  `s390x,arm64`, or shell-split `s390x, arm64`). Repeated platforms expand
+  once, in argument order.
 
   | Argument | Builds |
   | --- | --- |
@@ -308,7 +313,7 @@ lkmabt both --env-file my.env
   | `aws` | `amd64` and `arm64` |
   | `ibm` | `s390x` and `ppc64le` |
 
-  Omit it to build and verify all four architectures.
+  Omit every architecture argument to build and verify all four architectures.
 - Clusters run one at a time in clusters-file order. Each cluster finishes or
   fails before the next one starts. `both` runs the two providers concurrently
   inside a cluster; each provider gets its own live status line, and durable

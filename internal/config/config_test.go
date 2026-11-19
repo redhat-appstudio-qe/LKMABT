@@ -76,6 +76,35 @@ var _ = Describe("Parse", func() {
 			Entry("ibm", "ibm", []string{platform.LinuxS390X, platform.LinuxPPC64LE}),
 		)
 
+		DescribeTable("combines repeated architecture arguments",
+			func(arguments []string, want []string) {
+				GinkgoT().Setenv("GITHUB_TOKEN", "token")
+				args := append([]string{ProviderGitHub}, arguments...)
+				args = append(args, "--clusters-file", "clusters.yaml")
+				got, err := Parse(args)
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(got.Platforms).Should(Equal(want))
+			},
+			Entry("space separated", []string{"s390x", "arm64"}, []string{platform.LinuxS390X, platform.LinuxARM64}),
+			Entry("comma separated", []string{"s390x,arm64"}, []string{platform.LinuxS390X, platform.LinuxARM64}),
+			Entry("comma followed by a shell-split argument", []string{"s390x,", "arm64"}, []string{platform.LinuxS390X, platform.LinuxARM64}),
+			Entry("duplicates expand once", []string{"s390x", "s390x,arm64"}, []string{platform.LinuxS390X, platform.LinuxARM64}),
+			Entry("groups and architectures mix", []string{"ibm", "arm64"}, []string{platform.LinuxS390X, platform.LinuxPPC64LE, platform.LinuxARM64}),
+		)
+
+		It("rejects an unsupported architecture among several", func() {
+			GinkgoT().Setenv("GITHUB_TOKEN", "token")
+			_, err := Parse([]string{"github", "arm64", "riscv64"})
+			Expect(err).Should(MatchError(ContainSubstring("unsupported architecture")))
+			Expect(err).Should(MatchError(ContainSubstring("riscv64")))
+		})
+
+		It("rejects an architecture argument with no names", func() {
+			GinkgoT().Setenv("GITHUB_TOKEN", "token")
+			_, err := Parse([]string{"github", ","})
+			Expect(err).Should(MatchError(ContainSubstring("names no platforms")))
+		})
+
 		It("rejects an unsupported architecture", func() {
 			GinkgoT().Setenv("GITHUB_TOKEN", "token")
 			_, err := Parse([]string{"github", "riscv64"})

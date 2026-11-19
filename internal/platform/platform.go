@@ -58,6 +58,30 @@ func Select(name string) ([]string, error) {
 	return nil, fmt.Errorf("unsupported architecture %q; choose one of %s", name, strings.Join(Names(), ", "))
 }
 
+// Combine resolves one or more architecture arguments to unique platforms in
+// argument order, so repeated or overlapping groups expand once.
+func Combine(names ...string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, fmt.Errorf("at least one architecture is required")
+	}
+	result := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		platforms, err := Select(name)
+		if err != nil {
+			return nil, err
+		}
+		for _, buildPlatform := range platforms {
+			if _, duplicate := seen[buildPlatform]; duplicate {
+				continue
+			}
+			seen[buildPlatform] = struct{}{}
+			result = append(result, buildPlatform)
+		}
+	}
+	return result, nil
+}
+
 // All returns every supported platform in canonical order.
 func All() []string {
 	return []string{LinuxAMD64, LinuxARM64, LinuxS390X, LinuxPPC64LE}

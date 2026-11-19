@@ -110,7 +110,7 @@ and appends harmless comments to trigger PipelineRuns.
 - Phase transitions are strictly validated
 
 **`internal/platform/`** — Architecture selection
-- Maps the optional CLI architecture argument (`arm64`, `amd64`, `s390x`, `ppc64le`, `aws`, `ibm`) to canonical platforms
+- Maps one or more CLI architecture arguments (`arm64`, `amd64`, `s390x`, `ppc64le`, `aws`, `ibm`) to canonical platforms; repeated or overlapping tokens are deduplicated in argument order
 - Owns canonical names, TaskRun platform alias normalization, and the fixture pipeline spelling (`linux/x86_64` for `linux/amd64`)
 - `platform.All()` is the default selection; adding a future OS (Windows, iOS) means adding canonical platforms and a selection entry
 
