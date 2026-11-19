@@ -187,7 +187,7 @@ var _ = Describe("Authenticate", func() {
 	When("an entry maps to a different kflux catalog name", func() {
 		It("should log in to the catalog name and accept its kubeconfig", func() {
 			home := GinkgoT().TempDir()
-			entry := clusterfile.Entry{Name: "kflux-ocp-p01", Kflux: "ocp-p01", Kubeconfig: clusterfile.DefaultKubeconfig(home, "ocp-p01")}
+			entry := clusterfile.Entry{Name: "kflux-ocp-p01", Kubeconfig: clusterfile.DefaultKubeconfig(home, "ocp-p01")}
 			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
 			fake.onRun = func(spec CommandSpec) error {
 				if spec.Name == "/usr/local/bin/kflux" {

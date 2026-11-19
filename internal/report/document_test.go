@@ -49,8 +49,9 @@ var _ = Describe("EndedAtText", func() {
 
 var _ = Describe("Write", func() {
 	When("the document is valid", func() {
-		It("should write report.md and report.html", func() {
+		It("should write run-named report.md and report.html", func() {
 			directory := GinkgoT().TempDir()
+			runName := "multi-run-10:46_8.10.2026_run-a"
 			document := Document{
 				RunID:        "run-1",
 				ClustersFile: ".lkmabt-clusters.yaml",
@@ -63,17 +64,17 @@ var _ = Describe("Write", func() {
 				},
 			}
 
-			Expect(Write(directory, document)).Should(Succeed())
+			Expect(Write(directory, document, runName)).Should(Succeed())
 
-			for _, name := range []string{"report.md", "report.html"} {
+			for _, name := range []string{runName + "-report.md", runName + "-report.html"} {
 				info, err := os.Stat(filepath.Join(directory, name))
 				Expect(err).ShouldNot(HaveOccurred())
 				Expect(info.Mode().Perm()).Should(Equal(os.FileMode(0o640)))
 			}
-			markdown, err := os.ReadFile(filepath.Join(directory, "report.md"))
+			markdown, err := os.ReadFile(filepath.Join(directory, runName+"-report.md"))
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(string(markdown)).Should(ContainSubstring("# LKMABT aggregate run run-1"))
-			html, err := os.ReadFile(filepath.Join(directory, "report.html"))
+			html, err := os.ReadFile(filepath.Join(directory, runName+"-report.html"))
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(string(html)).Should(ContainSubstring("<!DOCTYPE html>"))
 		})

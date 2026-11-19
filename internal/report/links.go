@@ -8,9 +8,9 @@ import (
 )
 
 // Links lists every existing artifact for one report row, relative to the aggregate directory.
-func Links(aggregateDirectory, cluster, providerDirectory string) []Link {
+func Links(aggregateDirectory, aggregateLog, cluster, providerDirectory string) []Link {
 	links := make([]Link, 0, 8)
-	links = appendFile(links, aggregateDirectory, "run.log", "aggregate run.log")
+	links = appendFile(links, aggregateDirectory, aggregateLog, "aggregate run.log")
 	if cluster == "" {
 		return links
 	}

@@ -103,15 +103,15 @@ var _ = Describe("Load", func() {
 		})
 
 		When("an entry names a kflux catalog cluster", func() {
-			It("should derive the default kubeconfig path from that name", func() {
+			It("should derive the default kubeconfig path from the derived catalog name", func() {
 				dir := GinkgoT().TempDir()
 				home := testHome()
-				path := writeClustersFile(dir, "clusters.yaml", "clusters:\n  - name: kflux-ocp-p01\n    kflux: ocp-p01\n")
+				path := writeClustersFile(dir, "clusters.yaml", "clusters:\n  - name: kflux-ocp-p01\n")
 
 				entries, err := clusterfile.Load(path)
 				Expect(err).ShouldNot(HaveOccurred())
 				Expect(entries[0].Name).Should(Equal("kflux-ocp-p01"))
-				Expect(entries[0].KfluxName()).Should(Equal("ocp-p01"))
+				Expect(entries[0].CatalogName()).Should(Equal("ocp-p01"))
 				Expect(entries[0].Kubeconfig).Should(Equal(filepath.Join(home, ".kube", "config-ocp-p01")))
 				Expect(entries[0].UsesDefaultKubeconfig(home)).Should(BeTrue())
 			})
@@ -119,7 +119,7 @@ var _ = Describe("Load", func() {
 			It("should keep an explicit kubeconfig path off the kflux path", func() {
 				dir := GinkgoT().TempDir()
 				home := testHome()
-				path := writeClustersFile(dir, "clusters.yaml", "clusters:\n  - name: kflux-ocp-p01\n    kflux: ocp-p01\n    kubeconfig: ./config-own\n")
+				path := writeClustersFile(dir, "clusters.yaml", "clusters:\n  - name: kflux-ocp-p01\n    kubeconfig: ./config-own\n")
 
 				entries, err := clusterfile.Load(path)
 				Expect(err).ShouldNot(HaveOccurred())
@@ -128,15 +128,15 @@ var _ = Describe("Load", func() {
 			})
 		})
 
-		It("should default the kflux name to the entry name", func() {
+		It("should derive the catalog name from a name without the kflux prefix", func() {
 			dir := GinkgoT().TempDir()
-			testHome()
+			home := testHome()
 			path := writeClustersFile(dir, "clusters.yaml", validClustersYAML)
 
 			entries, err := clusterfile.Load(path)
 			Expect(err).ShouldNot(HaveOccurred())
-			Expect(entries[0].KfluxName()).Should(Equal("c1"))
-			Expect(entries[0].Kflux).Should(Equal("c1"))
+			Expect(entries[0].CatalogName()).Should(Equal("c1"))
+			Expect(entries[0].Kubeconfig).Should(Equal(filepath.Join(home, ".kube", "config-c1")))
 		})
 	})
 
@@ -154,12 +154,13 @@ var _ = Describe("Load", func() {
 
 		It("should default the ROKS IBM Cloud cluster to the entry name and the endpoint to vpe", func() {
 			dir := GinkgoT().TempDir()
-			testHome()
-			entries, err := clusterfile.Load(writeClustersFile(dir, "clusters.yaml", "clusters:\n  - name: kflux-roks-p01\n    type: roks\n"))
+			home := testHome()
+			entries, err := clusterfile.Load(writeClustersFile(dir, "clusters.yaml", "clusters:\n  - name: kflux-lw-p01\n    type: roks\n"))
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(entries[0].IsROKS()).Should(BeTrue())
-			Expect(entries[0].IBMCloud).Should(Equal("kflux-roks-p01"))
+			Expect(entries[0].IBMCloud).Should(Equal("kflux-lw-p01"))
 			Expect(entries[0].IBMCloudEndpoint).Should(Equal(clusterfile.DefaultIBMCloudEndpoint))
+			Expect(entries[0].Kubeconfig).Should(Equal(filepath.Join(home, ".kube", "config-lw-p01")))
 		})
 
 		It("should keep explicit IBM Cloud values and the expected server", func() {
@@ -248,7 +249,10 @@ var _ = Describe("Load", func() {
 			Entry("missing name", "clusters:\n  - kubeconfig: /k\n", "entry 1 requires a name"),
 			Entry("duplicate name", "clusters:\n  - name: c1\n  - name: c1\n", `duplicate cluster name "c1"`),
 			Entry("invalid characters", "clusters:\n  - name: bad/name\n", "must match [A-Za-z0-9._-]+"),
-			Entry("glob kflux name", "clusters:\n  - name: kflux-ocp-p01\n    kflux: \"stg-*\"\n", `kflux name "stg-*" must match [A-Za-z0-9._-]+`),
+			Entry("removed kflux key", "clusters:\n  - name: kflux-ocp-p01\n    kflux: ocp-p01\n", "removed \"kflux\" field; delete it and keep the kflux- prefix"),
+			Entry("empty derived catalog", "clusters:\n  - name: kflux-\n", `yields invalid kflux catalog name ""`),
+			Entry("dot derived catalog", "clusters:\n  - name: kflux-.\n", `yields invalid kflux catalog name "."`),
+			Entry("dot-dot derived catalog", "clusters:\n  - name: kflux-..\n", `yields invalid kflux catalog name ".."`),
 		)
 	})
 
@@ -265,7 +269,7 @@ var _ = Describe("Load", func() {
 		It("should reject two names mapping to one kflux cluster", func() {
 			dir := GinkgoT().TempDir()
 			home := testHome()
-			path := writeClustersFile(dir, "clusters.yaml", "clusters:\n  - name: kflux-ocp-p01\n    kflux: ocp-p01\n  - name: ocp-p01\n")
+			path := writeClustersFile(dir, "clusters.yaml", "clusters:\n  - name: kflux-ocp-p01\n  - name: ocp-p01\n")
 
 			_, err := clusterfile.Load(path)
 			Expect(err).Should(MatchError(ContainSubstring("resolve to the same kubeconfig path " + filepath.Join(home, ".kube", "config-ocp-p01"))))

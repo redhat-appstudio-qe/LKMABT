@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -270,14 +269,6 @@ var _ = Describe("cleanupRun under the aggregate layout", func() {
 				if err != nil {
 					return err
 				}
-				if info.Mode()&fs.ModeSymlink != 0 {
-					// The store's latest alias is a symlink; recreate it rather than read through it.
-					linkTarget, err := os.Readlink(path)
-					if err != nil {
-						return err
-					}
-					return os.Symlink(linkTarget, target)
-				}
 				if entry.IsDir() {
 					return os.MkdirAll(target, 0o750)
 				}
@@ -339,15 +330,53 @@ var _ = Describe("locateRunStateRoot", func() {
 		})
 	})
 
-	When("the newest pointer also references the run", func() {
-		It("should not double count the latest symlink", func() {
+	When("latest belongs to a live run", func() {
+		It("should find an older run only in a named aggregate directory", func() {
 			stateDir := GinkgoT().TempDir()
-			writeRunManifest(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c1", "github-run-x", "run-1")
-			Expect(os.Symlink("multi-run-10:46_8.10.2026_run-agg1", filepath.Join(stateDir, "latest"))).Should(Succeed())
+			writeRunManifest(stateDir, "latest", "c1", "github-run-live", "run-live")
+			writeRunManifest(stateDir, "multi-run-10:46_8.10.2026_run-old", "c1", "github-run-old", "run-old")
 
-			root, err := locateRunStateRoot(stateDir, "c1", "run-1")
+			_, err := locateNamedRunStateRoot(stateDir, "c1", "run-live")
+			Expect(err).Should(MatchError(ContainSubstring(`no run "run-live" for cluster "c1"`)))
+			root, err := locateNamedRunStateRoot(stateDir, "c1", "run-old")
 			Expect(err).ShouldNot(HaveOccurred())
-			Expect(root).Should(Equal(filepath.Join(stateDir, "multi-run-10:46_8.10.2026_run-agg1", "c1")))
+			Expect(root).Should(Equal(filepath.Join(stateDir, "multi-run-10:46_8.10.2026_run-old", "c1")))
+		})
+	})
+
+	When("the run is still in a real latest directory", func() {
+		It("should locate and clean it", func() {
+			source := cleanupTestStore()
+			stateDir := GinkgoT().TempDir()
+			clusterRoot := filepath.Join(stateDir, "latest", "c1")
+			Expect(filepath.WalkDir(source.Root, func(path string, entry os.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				relative, err := filepath.Rel(source.Root, path)
+				if err != nil {
+					return err
+				}
+				target := filepath.Join(clusterRoot, relative)
+				if entry.IsDir() {
+					return os.MkdirAll(target, 0o750)
+				}
+				info, err := entry.Info()
+				if err != nil {
+					return err
+				}
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				return os.WriteFile(target, data, info.Mode().Perm())
+			})).Should(Succeed())
+
+			located, err := locateRunStateRoot(stateDir, "c1", "run-1")
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(located).Should(Equal(clusterRoot))
+			client := cleanupTestClient("run-1", cleanup.ManagedByValue)
+			Expect(cleanupRun(context.Background(), cleanupTestRequest("run-1", located), evidence.NewManifestStore(located), cleanup.NamespaceService{Dynamic: client}, &cleanupTestPrompt{approved: true}, io.Discard)).Should(Succeed())
 		})
 	})
 

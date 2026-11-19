@@ -9,61 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
 )
 
 type ManifestStore struct {
 	Root string
-}
-
-const latestDirectory = "latest"
-
-// aggregateStartedAtFile holds the precise start time of an aggregate run.
-const aggregateStartedAtFile = ".started-at"
-
-// RecordAggregateStart persists the precise start time of an aggregate run in
-// the .started-at marker inside its directory, so latest comparisons do not
-// depend on minute precision or run ID ordering. directory must be a single
-// directory name under the state root and already exist; startedAt must be
-// non-zero. It returns an error when the name is not a plain directory name,
-// startedAt is zero, the run directory cannot be read, the path is not a
-// directory, or the marker cannot be written.
-func (s ManifestStore) RecordAggregateStart(directory string, startedAt time.Time) error {
-	if err := validateArtifactDirectory(directory); err != nil {
-		return err
-	}
-	if startedAt.IsZero() {
-		return errors.New("aggregate start time is required")
-	}
-	runDir := filepath.Join(s.Root, directory)
-	info, err := os.Stat(runDir)
-	if err != nil {
-		return fmt.Errorf("read aggregate run directory: %w", err)
-	}
-	if !info.IsDir() {
-		return errors.New("aggregate run path is not a directory")
-	}
-	return s.atomicWrite(
-		filepath.Join(runDir, aggregateStartedAtFile),
-		[]byte(startedAt.UTC().Format(time.RFC3339Nano)+"\n"),
-		0o640,
-	)
-}
-
-// recordedAggregateStartTime reads the precise start time recorded for directory.
-// It returns the parsed time and true, or a zero time and false when the
-// marker is missing or does not hold a valid RFC 3339 timestamp.
-func (s ManifestStore) recordedAggregateStartTime(directory string) (time.Time, bool) {
-	data, err := os.ReadFile(filepath.Join(s.Root, directory, aggregateStartedAtFile))
-	if err != nil {
-		return time.Time{}, false
-	}
-	startedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
-	if err != nil {
-		return time.Time{}, false
-	}
-	return startedAt, true
 }
 
 // NewManifestStore returns a manifest store rooted at root.
@@ -94,7 +44,7 @@ func ArtifactDirectoryName(provider string, createdAt time.Time, runID string) s
 	return fmt.Sprintf("%s-run-%s_%s", provider, createdAt.Format("15:04")+"_"+createdAt.Format("2.1.2006"), runID)
 }
 
-// Create initializes and persists a run manifest, then updates latest if this run is newer.
+// Create initializes and persists a run manifest.
 func (s ManifestStore) Create(manifest *model.RunManifest) error {
 	if manifest == nil || strings.TrimSpace(manifest.RunID) == "" {
 		return errors.New("run ID is required")
@@ -126,9 +76,6 @@ func (s ManifestStore) Create(manifest *model.RunManifest) error {
 	}
 	if err := s.writeStatus(*manifest); err != nil {
 		return err
-	}
-	if err := s.SetLatest(*manifest); err != nil {
-		return fmt.Errorf("activate run artifacts: %w", err)
 	}
 	return nil
 }
@@ -189,220 +136,12 @@ func (s ManifestStore) Load(runID string) (model.RunManifest, error) {
 	return manifest, nil
 }
 
-// Latest returns the run ID referenced by the latest artifact alias.
-func (s ManifestStore) Latest() (string, error) {
-	manifest, err := s.latestManifest()
-	if err != nil {
-		return "", err
-	}
-	return manifest.RunID, nil
-}
-
-// SetLatest atomically points latest at a run directory. The relative symlink
-// keeps the alias relocatable and exposes artifacts as the run writes them.
-func (s ManifestStore) SetLatest(manifest model.RunManifest) error {
-	if strings.TrimSpace(manifest.RunID) == "" {
-		return errors.New("run ID is required")
-	}
-	if err := validateArtifactDirectory(manifest.ArtifactDirectory); err != nil {
-		return err
-	}
-	source := s.RunDirFor(manifest)
-	if info, err := os.Stat(source); err != nil || !info.IsDir() {
-		if err == nil {
-			err = fmt.Errorf("run artifact path is not a directory")
-		}
-		return fmt.Errorf("read run artifacts: %w", err)
-	}
-	if err := os.MkdirAll(s.Root, 0o750); err != nil {
-		return err
-	}
-	root, err := filepath.Abs(s.Root)
-	if err != nil {
-		return err
-	}
-	source, err = filepath.Abs(source)
-	if err != nil {
-		return err
-	}
-	relativeSource, err := filepath.Rel(root, source)
-	if err != nil || relativeSource == "." || relativeSource == ".." || strings.HasPrefix(relativeSource, ".."+string(filepath.Separator)) || filepath.IsAbs(relativeSource) {
-		return fmt.Errorf("run artifact path must be a direct child of the state directory")
-	}
-	if filepath.Dir(relativeSource) != "." {
-		return fmt.Errorf("run artifact path must be a direct child of the state directory")
-	}
-
-	unlock, err := acquireLatestUpdateLock(s.Root)
-	if err != nil {
-		return fmt.Errorf("lock latest artifact update: %w", err)
-	}
-	defer unlock()
-	current, err := s.latestManifest()
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read current latest run: %w", err)
-	}
-	if err == nil && !newerRun(manifest, *current) {
-		return nil
-	}
-	return s.replaceLatestLink(relativeSource)
-}
-
-// replaceLatestLink atomically repoints the latest alias at relativeSource. Callers hold the latest update lock.
-func (s ManifestStore) replaceLatestLink(relativeSource string) error {
-	temporaryLink := filepath.Join(s.Root, ".latest-"+uuid.NewString())
-	if err := os.Symlink(relativeSource, temporaryLink); err != nil {
-		return fmt.Errorf("create latest artifact link: %w", err)
-	}
-	defer os.Remove(temporaryLink)
-
-	latestPath := filepath.Join(s.Root, latestDirectory)
-	if info, err := os.Lstat(latestPath); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-		legacyPath := filepath.Join(s.Root, ".latest-legacy-"+uuid.NewString())
-		exchanged, err := exchangeLatestPaths(temporaryLink, latestPath)
-		if err != nil {
-			return fmt.Errorf("atomically replace legacy latest directory: %w", err)
-		}
-		if exchanged {
-			// The old directory is now at temporaryLink; keep it as a hidden
-			// backup after latest already points to the new run.
-			_ = os.Rename(temporaryLink, legacyPath)
-			return nil
-		}
-		return errors.New("cannot atomically replace legacy latest directory on this platform; preserving existing latest artifacts")
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	} else if err := os.Rename(temporaryLink, latestPath); err != nil {
-		return err
-	}
-	return nil
-}
-
-// PointLatestAt repoints the latest alias at a directory that is a direct child
-// of the state root. The current target is kept when it started after the
-// candidate — by recorded start time first, then by the minute encoded in the
-// directory name — so a delayed invocation cannot repoint latest at an older
-// aggregate run. It returns an error when the name is not a plain directory
-// name, the run directory cannot be read or is not a directory, the latest
-// update lock cannot be acquired, or the link cannot be replaced.
-func (s ManifestStore) PointLatestAt(directory string) error {
-	if err := validateArtifactDirectory(directory); err != nil {
-		return err
-	}
-	info, err := os.Stat(filepath.Join(s.Root, directory))
-	if err != nil {
-		return fmt.Errorf("read aggregate run directory: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("aggregate run path is not a directory")
-	}
-	unlock, err := acquireLatestUpdateLock(s.Root)
-	if err != nil {
-		return fmt.Errorf("lock latest artifact update: %w", err)
-	}
-	defer unlock()
-	// A missing link, a legacy real directory, or an unparsable name keeps the
-	// existing replace behaviour; only a strictly older candidate is refused.
-	if current, err := os.Readlink(filepath.Join(s.Root, latestDirectory)); err == nil && !s.newerAggregate(directory, current) {
-		return nil
-	}
-	return s.replaceLatestLink(directory)
-}
-
 // validateArtifactDirectory rejects paths that are not a single directory name.
 func validateArtifactDirectory(directory string) error {
 	if strings.TrimSpace(directory) == "" || directory == "." || directory == ".." || filepath.IsAbs(directory) || filepath.Base(directory) != directory || strings.ContainsAny(directory, `/\\`) {
 		return errors.New("artifact directory must be a single directory name")
 	}
 	return nil
-}
-
-// newerRun reports whether candidate sorts after current by creation time and run ID.
-func newerRun(candidate, current model.RunManifest) bool {
-	if candidate.CreatedAt.After(current.CreatedAt) {
-		return true
-	}
-	if candidate.CreatedAt.Equal(current.CreatedAt) && candidate.RunID > current.RunID {
-		return true
-	}
-	return false
-}
-
-// newerAggregate reports whether candidate started after current. Recorded
-// start times win over the minute precision encoded in the directory names
-// when both sides have a recorded time and the times differ; otherwise the
-// directory name decides.
-func (s ManifestStore) newerAggregate(candidate, current string) bool {
-	candidateAt, candidateRecorded := s.recordedAggregateStartTime(candidate)
-	currentAt, currentRecorded := s.recordedAggregateStartTime(current)
-	if candidateRecorded && currentRecorded && !candidateAt.Equal(currentAt) {
-		return candidateAt.After(currentAt)
-	}
-	candidateMinute, candidateRun, candidateOK := artifactStartTime(candidate)
-	currentMinute, currentRun, currentOK := artifactStartTime(current)
-	if !candidateOK || !currentOK {
-		return true
-	}
-	if candidateMinute.Equal(currentMinute) {
-		return candidateRun > currentRun
-	}
-	return candidateMinute.After(currentMinute)
-}
-
-// artifactStartTime decodes the start time and run ID from an ArtifactDirectoryName.
-// The first "-run-" separates the provider prefix (fixed: multi, github, gitlab) from the timestamp.
-func artifactStartTime(directory string) (time.Time, string, bool) {
-	index := strings.Index(directory, "-run-")
-	if index < 0 {
-		return time.Time{}, "", false
-	}
-	parts := strings.SplitN(directory[index+len("-run-"):], "_", 3)
-	if len(parts) != 3 {
-		return time.Time{}, "", false
-	}
-	// A literal underscore between the clock and the date cannot be expressed in a
-	// time layout: "_2" is the space-padded-day layout. Join with a space instead.
-	startedAt, err := time.Parse("15:04 2.1.2006", parts[0]+" "+parts[1])
-	if err != nil {
-		return time.Time{}, "", false
-	}
-	return startedAt, parts[2], true
-}
-
-// latestManifest reads the manifest referenced by the latest alias.
-func (s ManifestStore) latestManifest() (*model.RunManifest, error) {
-	latestPath := filepath.Join(s.Root, latestDirectory)
-	info, err := os.Stat(latestPath)
-	if err != nil {
-		return nil, err
-	}
-	if info.IsDir() {
-		data, err := os.ReadFile(filepath.Join(latestPath, "manifest.json"))
-		if err != nil {
-			return nil, err
-		}
-		var manifest model.RunManifest
-		if err := json.Unmarshal(data, &manifest); err != nil {
-			return nil, fmt.Errorf("decode latest manifest: %w", err)
-		}
-		if manifest.RunID == "" {
-			return nil, errors.New("latest manifest has no run ID")
-		}
-		return &manifest, nil
-	}
-	data, err := os.ReadFile(latestPath)
-	if err != nil {
-		return nil, err
-	}
-	runID := strings.TrimSpace(string(data))
-	if runID == "" {
-		return nil, errors.New("latest alias is empty")
-	}
-	manifest, err := s.Load(runID)
-	if err != nil {
-		return nil, err
-	}
-	return &manifest, nil
 }
 
 // findRunDir locates the artifact directory containing runID's manifest.
@@ -417,6 +156,7 @@ func (s ManifestStore) findRunDir(runID string) (string, error) {
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() || entry.Name() == latestDirectory || strings.HasPrefix(entry.Name(), ".") {
+			// A legacy provider latest alias is not a permanent run directory.
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(s.Root, entry.Name(), "manifest.json"))

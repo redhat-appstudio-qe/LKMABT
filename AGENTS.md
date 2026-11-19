@@ -9,24 +9,27 @@ collects runtime evidence.
 
 | Action | Command |
 |--------|---------|
+| Install | `./scripts/install.sh` |
 | Build | `go build -o bin/lkmabt ./cmd/lkmabt` |
 | Run all tests | `go test ./...` |
 | Test one package | `go test ./internal/cluster` |
 | Run one suite | `go test ./internal/workflow -run TestWorkflow` |
-| GitHub run | `./bin/lkmabt run github --env-file .lkmabt.env --clusters-file .lkmabt-clusters.yaml` |
-| GitLab run | `./bin/lkmabt run gitlab --env-file .lkmabt.env` |
-| Both providers | `./bin/lkmabt run both --env-file .lkmabt.env` |
-| Clean up a recorded run | `./bin/lkmabt cleanup --cluster <name> --run-id <run-id> --env-file .lkmabt.env` |
+| GitHub run | `lkmabt github --clusters-file .lkmabt-clusters.yaml` |
+| GitLab run | `lkmabt gitlab` |
+| Both providers | `lkmabt both` |
+| Clean up a recorded run | `lkmabt cleanup --cluster <name> --run-id <run-id>` |
 
-Run from the repository root: the env file, clusters file, and `.lkmabt-runs/`
-resolve against the working directory.
+Run from the repository root: the clusters file, `.lkmabt.env`, and
+`.lkmabt-runs/` resolve against the working directory. `./scripts/install.sh`
+puts `lkmabt` in a writable directory already on `PATH`.
 
 ## Project Layout
 
 - `cmd/lkmabt/` — CLI entry point, argument parsing, signal handling
+- `scripts/install.sh` — installs `lkmabt` into a writable `PATH` directory
 - `internal/cli/` — command execution, aggregate run directory, sequential cluster execution, run logs
 - `internal/config/` — env-file and flag parsing
-- `internal/clusterfile/` — clusters-file schema (`name`, `type`, `kflux`, `ibmcloud`, `ibmcloud-endpoint`, `kubeconfig`, `server`)
+- `internal/clusterfile/` — clusters-file schema (`name`, `type`, `ibmcloud`, `ibmcloud-endpoint`, `kubeconfig`, `server`); the kflux catalog name and default kubeconfig derive from `name`
 - `internal/clusterauth/` — authentication ladder (verify with `oc whoami` → ROKS: `ibmcloud` → else: `kflux cluster login` → `oc login`)
 - `internal/auth/` — GitHub `gh` browser login, the GitLab PAT prompt, and the run-scoped credential store with guaranteed deletion
 - `internal/workflow/` — orchestration and phase state machine
@@ -47,12 +50,13 @@ resolve against the working directory.
 - **Qodo:** onboarded — invoke Qodo skills (`qodo-review`, `qodo-get-rules`, etc.) before every commit.
 - **Fixtures:** only `redhat-appstudio-qe/dr_test_mathwizz` and `konflux-qe/dr_test_mathwizz_gl`; never create, fork, rename, or delete repositories
 - **Tests:** Ginkgo v2 + Gomega, TDD, colocated external `_test` packages (see `skills/testing-standards.md`)
-- **Artifacts:** `.lkmabt-runs/` is gitignored local evidence; credential-like fields are redacted before writing
+- **Artifacts:** `.lkmabt-runs/` is gitignored local evidence; top-level reports and logs are prefixed with the aggregate run name, and credential-like fields are redacted before writing
 
 ## Gotchas
 
 - **Build output verification** reads TaskRun YAML artifacts and expects one `linux/amd64` and one `linux/arm64` node label per component; a missing label fails as pipeline misconfiguration, not harness error (see `skills/developer-guide.md`)
-- **Cluster names are not kflux catalog names** — `name` is the report and `--cluster` identity, `kflux` is the catalog name; host `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is catalog cluster `ocp-p01`, and a wrong value surfaces kflux's `unknown cluster` error
+- **One process per state directory** — a run holds `.lkmabt-runs/.latest.lock` until it finishes; a second run against the same `--state-dir` fails immediately with an actionable message instead of writing into the live `latest/`, so wait for the first run or use another state directory
+- **Cluster names are not kflux catalog names** — `name` is the report and `--cluster` identity; the kflux catalog name is `name` with a leading `kflux-` removed, unchanged otherwise. Host `kflux-ocp-p01.7ayg.p1.openshiftapps.com` is catalog cluster `ocp-p01` through the name `kflux-ocp-p01`, an unknown catalog name surfaces kflux's `unknown cluster` error, and the default kubeconfig is `~/.kube/config-<catalog>`
 - **GitHub App installation is per cluster** — `preflight` reads the app slug from `konflux-info/konflux-public-info` and verifies that app is installed for the fixture organization. An interactive run prints the installation steps, opens the installation page, and waits until an organization administrator installs the app; failed checks are retried and progress is reported every 5 minutes, and when the preflight timeout expires the run asks whether to keep waiting. Declining, or a non-interactive run, fails with the installation URL. An app limited to selected repositories must include the fixture; a confirmed selection that omits it fails the wait immediately with the installation settings URL, while selections the token cannot list log a warning and continue. After an approved wait that outlives the preflight deadline, the remaining preflight steps continue on the run context
 - **GitLab API auth uses Bearer** — the provider sends `Authorization: Bearer` for the configured or prompted personal access token; `PRIVATE-TOKEN` rejects OAuth tokens with 401
 - **Provider credentials are per run** — `GITHUB_TOKEN` and `GITLAB_BOT_TOKEN` are used when set; otherwise GitHub runs `gh auth login --web` with an isolated `GH_CONFIG_DIR` and `--insecure-storage`, and GitLab opens a prefilled PAT page (1-day expiration, `api` and `write_repository`) and prompts for the token without echo. A configured `GITHUB_TOKEN` is validated for App-installation listing, fixture push access, and repository listing for selected App installations; classic/OAuth tokens may need `read:user` (`gh auth refresh -h github.com -s read:user`), but `gh` OAuth user tokens (`gho_`) skip the listing check because GitHub rejects them for that endpoint. An interactive run first reuses the existing `gh` login when it passes the same checks, then falls back to the `gh` browser login. Transient, rate-limit, and timeout check failures abort the run without replacing the token.  The ephemeral GitLab token is also written to the tenant SCM Secret for PaC; each cluster's finalization deletes that Secret, and the run-acquired token is revoked once after the last cluster with `DELETE /personal_access_tokens/self` (a configured `GITLAB_BOT_TOKEN` is never revoked). All credential files live under a `lkmabt-auth-*` temporary directory that is deleted when the last cluster finishes, including on failure; a deletion failure fails the run. Clusters run one at a time so credentials are acquired once and reused

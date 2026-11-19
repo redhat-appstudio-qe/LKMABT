@@ -238,7 +238,7 @@ func (l Ladder) runKfluxLogin(ctx context.Context, targets []clusterfile.Entry) 
 	// Naming each catalog cluster keeps the login to the configured set; -C would
 	// log in to every cluster in kflux's catalog.
 	for _, target := range targets {
-		args = append(args, "-c", target.KfluxName())
+		args = append(args, "-c", target.CatalogName())
 	}
 	l.logf("running %s %s", binary, strings.Join(args, " "))
 	if err := l.Runner.Run(ctx, CommandSpec{Name: binary, Args: args}); err != nil {

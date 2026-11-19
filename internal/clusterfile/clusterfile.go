@@ -29,7 +29,6 @@ const DefaultIBMCloudEndpoint = "vpe"
 type Entry struct {
 	Name             string `json:"name"`
 	Type             string `json:"type,omitempty"`
-	Kflux            string `json:"kflux,omitempty"`
 	IBMCloud         string `json:"ibmcloud,omitempty"`
 	IBMCloudEndpoint string `json:"ibmcloud-endpoint,omitempty"`
 	Kubeconfig       string `json:"kubeconfig,omitempty"`
@@ -41,12 +40,15 @@ func (e Entry) IsROKS() bool {
 	return e.Type == TypeROKS
 }
 
-// KfluxName returns the kflux catalog name, which defaults to the entry name.
-func (e Entry) KfluxName() string {
-	if e.Kflux != "" {
-		return e.Kflux
-	}
-	return e.Name
+// CatalogName returns the kflux catalog name derived from the entry name.
+// A "kflux-" prefix is stripped; names without the prefix are used unchanged.
+func (e Entry) CatalogName() string {
+	return catalogName(e.Name)
+}
+
+// catalogName strips the kflux- prefix from a cluster name.
+func catalogName(name string) string {
+	return strings.TrimPrefix(name, "kflux-")
 }
 
 // document is the strict YAML shape of the clusters file.
@@ -65,8 +67,8 @@ func ValidName(name string) bool {
 }
 
 // DefaultKubeconfig returns the default kubeconfig path for a kflux catalog name.
-func DefaultKubeconfig(home, kfluxName string) string {
-	return filepath.Join(home, ".kube", "config-"+kfluxName)
+func DefaultKubeconfig(home, catalog string) string {
+	return filepath.Join(home, ".kube", "config-"+catalog)
 }
 
 // Find returns the entry named name.
@@ -96,6 +98,10 @@ func Load(path string) ([]Entry, error) {
 		var lenient document
 		if yaml.Unmarshal(data, &lenient) == nil && len(lenient.Clusters) == 0 {
 			return nil, fmt.Errorf("clusters file %q must list at least one cluster under \"clusters\"", path)
+		}
+		// The removed kflux field is a migration error, not a generic typo.
+		if strings.Contains(err.Error(), "kflux") {
+			return nil, fmt.Errorf("clusters file %q sets the removed \"kflux\" field; delete it and keep the kflux- prefix on the cluster name: %w", path, err)
 		}
 		return nil, fmt.Errorf("parse clusters file %q: %w", path, err)
 	}
@@ -146,17 +152,13 @@ func normalize(entries []Entry, path, baseDir, home string) ([]Entry, error) {
 		if err != nil {
 			return nil, err
 		}
-		kflux := strings.TrimSpace(entry.Kflux)
-		// An absent kflux name means the entry name is the catalog name.
-		if kflux == "" {
-			kflux = name
+		// The kflux catalog name is derived from the entry name; it must stay a
+		// single safe directory and argv component after the prefix is removed.
+		catalog := catalogName(name)
+		if !ValidName(catalog) {
+			return nil, fmt.Errorf("clusters file %q cluster name %q yields invalid kflux catalog name %q; keep a real catalog name after the kflux- prefix", path, name, catalog)
 		}
-		// kflux names are argv elements, not paths, but they still bound-check to
-		// keep one grammar for both fields and to reject accidental globs.
-		if !ValidName(kflux) {
-			return nil, fmt.Errorf("clusters file %q cluster %q kflux name %q must match [A-Za-z0-9._-]+", path, name, kflux)
-		}
-		kubeconfig := resolveKubeconfig(entry.Kubeconfig, kflux, baseDir, home)
+		kubeconfig := resolveKubeconfig(entry.Kubeconfig, catalog, baseDir, home)
 		if other, found := seenKubeconfigs[kubeconfig]; found {
 			return nil, fmt.Errorf("clusters file %q clusters %q and %q resolve to the same kubeconfig path %s", path, other, name, kubeconfig)
 		}
@@ -168,7 +170,6 @@ func normalize(entries []Entry, path, baseDir, home string) ([]Entry, error) {
 		normalized = append(normalized, Entry{
 			Name:             name,
 			Type:             entryType,
-			Kflux:            kflux,
 			IBMCloud:         ibmCloud,
 			IBMCloudEndpoint: endpoint,
 			Kubeconfig:       kubeconfig,
@@ -205,10 +206,10 @@ func normalizeIBMCloud(entryType, cluster, endpoint, name, path string) (string,
 }
 
 // resolveKubeconfig applies the default path, ~ expansion, and relative-path anchoring.
-func resolveKubeconfig(value, kfluxName, baseDir, home string) string {
+func resolveKubeconfig(value, catalog, baseDir, home string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return DefaultKubeconfig(home, kfluxName)
+		return DefaultKubeconfig(home, catalog)
 	}
 	if value == "~" {
 		return home
@@ -242,5 +243,5 @@ func normalizeServer(value, name, path string) (string, error) {
 // UsesDefaultKubeconfig reports whether the entry resolves to the default kubeconfig path.
 // The default path is kflux's own per-cluster path, so it follows the kflux catalog name.
 func (e Entry) UsesDefaultKubeconfig(home string) bool {
-	return e.Kubeconfig == DefaultKubeconfig(home, e.KfluxName())
+	return e.Kubeconfig == DefaultKubeconfig(home, e.CatalogName())
 }

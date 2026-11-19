@@ -23,6 +23,7 @@ const (
 	DefaultGitHubTenantNamespace = "mathwizz-test-github"
 	DefaultGitLabTenantNamespace = "mathwizz-test-gitlab"
 	DefaultBranch                = "main"
+	DefaultEnvFile               = ".lkmabt.env"
 )
 
 var DefaultComponentPaths = []string{
@@ -86,74 +87,113 @@ func Defaults() Request {
 // Parse builds and validates a request from command-line arguments and environment values.
 func Parse(args []string) (Request, error) {
 	if len(args) == 0 {
-		return Request{}, errors.New("usage: lkmabt run <github|gitlab|both> ... | cleanup --run-id <id> ...")
+		return Request{}, errors.New("usage: lkmabt <github|gitlab|both> [flags] | lkmabt cleanup --cluster <name> --run-id <id> [flags]")
 	}
 	req := Defaults()
-	req.Command = args[0]
-	remaining := args[1:]
+	var remaining []string
 
-	switch req.Command {
+	switch args[0] {
 	case CommandRun:
-		if len(remaining) == 0 {
-			return Request{}, errors.New("run requires provider github, gitlab, or both")
-		}
-		req.Provider = remaining[0]
+		return Request{}, errors.New(`the "run" subcommand no longer exists; use "lkmabt github", "lkmabt gitlab", or "lkmabt both"`)
+	case CommandCleanup:
+		req.Command = CommandCleanup
+		remaining = args[1:]
+	case ProviderGitHub, ProviderGitLab, ProviderBoth:
+		req.Command = CommandRun
+		req.Provider = args[0]
 		if req.Provider == ProviderGitLab {
 			req.SourceRepository = DefaultGitLabRepo
 			req.TenantNamespace = DefaultGitLabTenantNamespace
 		}
-		remaining = remaining[1:]
-		if req.Provider != ProviderGitHub && req.Provider != ProviderGitLab && req.Provider != ProviderBoth {
-			return Request{}, fmt.Errorf("unsupported provider %q", req.Provider)
-		}
-	case CommandCleanup:
+		remaining = args[1:]
 	default:
-		return Request{}, fmt.Errorf("unsupported command %q", req.Command)
+		return Request{}, fmt.Errorf("unsupported command %q", args[0])
 	}
 
-	fs := flag.NewFlagSet("lkmabt", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	fs.StringVar(&req.ClustersFile, "clusters-file", req.ClustersFile, "YAML file listing the clusters to test")
-	fs.StringVar(&req.StateDir, "state-dir", req.StateDir, "run state directory")
+	flags := flag.NewFlagSet("lkmabt", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	flags.StringVar(&req.ClustersFile, "clusters-file", req.ClustersFile, "YAML file listing the clusters to test")
+	flags.StringVar(&req.StateDir, "state-dir", req.StateDir, "run state directory")
 	var envFile string
-	fs.StringVar(&envFile, "env-file", "", "dotenv file containing provider credentials")
 	if req.Command == CommandRun {
-		fs.StringVar(&req.TenantNamespace, "tenant-namespace", req.TenantNamespace, "persistent tenant namespace")
-		fs.StringVar(&req.ApplicationName, "application", req.ApplicationName, "persistent Application name")
-		fs.StringVar(&req.SourceRepository, "source-repository", req.SourceRepository, "source repository")
-		fs.StringVar(&req.SourceBranch, "branch", req.SourceBranch, "source branch")
-		fs.DurationVar(&req.Timeouts.Preflight, "preflight-timeout", req.Timeouts.Preflight, "preflight timeout")
-		fs.DurationVar(&req.Timeouts.Trigger, "trigger-timeout", req.Timeouts.Trigger, "trigger timeout")
-		fs.DurationVar(&req.Timeouts.Build, "build-timeout", req.Timeouts.Build, "build timeout")
+		flags.StringVar(&envFile, "env-file", DefaultEnvFile, "dotenv file containing provider credentials (a missing default is ignored)")
+		flags.StringVar(&req.TenantNamespace, "tenant-namespace", req.TenantNamespace, "persistent tenant namespace")
+		flags.StringVar(&req.ApplicationName, "application", req.ApplicationName, "persistent Application name")
+		flags.StringVar(&req.SourceRepository, "source-repository", req.SourceRepository, "source repository")
+		flags.StringVar(&req.SourceBranch, "branch", req.SourceBranch, "source branch")
+		flags.DurationVar(&req.Timeouts.Preflight, "preflight-timeout", req.Timeouts.Preflight, "preflight timeout")
+		flags.DurationVar(&req.Timeouts.Trigger, "trigger-timeout", req.Timeouts.Trigger, "trigger timeout")
+		flags.DurationVar(&req.Timeouts.Build, "build-timeout", req.Timeouts.Build, "build timeout")
 	} else {
-		fs.StringVar(&req.RunID, "run-id", "", "exact run whose owned namespace should be deleted")
-		fs.StringVar(&req.ClusterName, "cluster", "", "name of the cluster in the clusters file")
+		flags.StringVar(&req.RunID, "run-id", "", "exact run whose owned namespace should be deleted")
+		flags.StringVar(&req.ClusterName, "cluster", "", "name of the cluster in the clusters file")
 	}
-	if err := fs.Parse(remaining); err != nil {
+	if err := flags.Parse(remaining); err != nil {
 		return Request{}, err
 	}
-	if fs.NArg() != 0 {
-		return Request{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	if flags.NArg() != 0 {
+		return Request{}, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
 	fileValues := map[string]string{}
-	if strings.TrimSpace(envFile) != "" {
-		var err error
-		fileValues, err = readEnvFile(envFile)
-		if err != nil {
-			return Request{}, err
+	if req.Command == CommandRun {
+		envFileExplicit := false
+		flags.Visit(func(f *flag.Flag) {
+			if f.Name == "env-file" {
+				envFileExplicit = true
+			}
+		})
+		if strings.TrimSpace(envFile) != "" {
+			values, err := readEnvFile(envFile)
+			switch {
+			case err == nil:
+				fileValues = values
+			case !envFileExplicit && errors.Is(err, os.ErrNotExist):
+				// An absent default env file is not an error; environment-only runs still work.
+			default:
+				return Request{}, err
+			}
 		}
 	}
-	req.Credentials = credentialsFromEnv(fileValues)
+	credentials, err := credentialsFromEnv(fileValues, req.Provider == ProviderGitLab || req.Provider == ProviderBoth)
+	if err != nil {
+		return Request{}, err
+	}
+	req.Credentials = credentials
 	return req, req.Validate()
 }
 
 // credentialsFromEnv resolves provider credentials from the environment and env-file values.
-func credentialsFromEnv(fileValues map[string]string) Credentials {
-	return Credentials{
-		GitHubToken:  envValue("GITHUB_TOKEN", fileValues),
-		GitLabToken:  envValue("GITLAB_BOT_TOKEN", fileValues),
-		GitLabAPIURL: envValue("GITLAB_API_URL", fileValues),
+// A GitLab token and its API URL always come from the same source; when the
+// token's source has no URL but the other source does, the request fails
+// instead of silently sending the token to the default endpoint.
+func credentialsFromEnv(fileValues map[string]string, gitlab bool) (Credentials, error) {
+	credentials := Credentials{GitHubToken: envValue("GITHUB_TOKEN", fileValues)}
+	if !gitlab {
+		return credentials, nil
 	}
+	processToken := strings.TrimSpace(os.Getenv("GITLAB_BOT_TOKEN"))
+	processURL := strings.TrimSpace(os.Getenv("GITLAB_API_URL"))
+	fileToken := fileValues["GITLAB_BOT_TOKEN"]
+	fileURL := fileValues["GITLAB_API_URL"]
+	if processToken != "" {
+		if processURL == "" && fileURL != "" {
+			return Credentials{}, errors.New("GITLAB_BOT_TOKEN is set in the environment but GITLAB_API_URL is only in the env file; set both in the same source")
+		}
+		credentials.GitLabToken, credentials.GitLabAPIURL = processToken, processURL
+		return credentials, nil
+	}
+	if fileToken == "" {
+		credentials.GitLabAPIURL = processURL
+		if credentials.GitLabAPIURL == "" {
+			credentials.GitLabAPIURL = fileURL
+		}
+		return credentials, nil
+	}
+	if fileURL == "" && processURL != "" {
+		return Credentials{}, errors.New("GITLAB_BOT_TOKEN is set in the env file but GITLAB_API_URL is only in the environment; set both in the same source")
+	}
+	credentials.GitLabToken, credentials.GitLabAPIURL = fileToken, fileURL
+	return credentials, nil
 }
 
 // envValue returns a nonempty process value for key, falling back to fileValues.
@@ -220,7 +260,7 @@ func (r Request) Validate() error {
 		}
 		if r.Provider == ProviderBoth {
 			if r.SourceRepository != DefaultGitHubRepo || r.TenantNamespace != DefaultGitHubTenantNamespace {
-				return errors.New("run both uses the fixed provider fixtures and namespaces")
+				return errors.New("both uses the fixed provider fixtures and namespaces")
 			}
 			if strings.TrimSpace(r.ApplicationName) == "" {
 				return errors.New("application is required")

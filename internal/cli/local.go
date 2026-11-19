@@ -193,9 +193,30 @@ func (runner LiveRunner) Cleanup(ctx context.Context, request config.Request) er
 	}
 	request.ClusterServer = connected
 	locateStep := stepFor(runner.Out, fmt.Sprintf("Locate run %s 🔎", request.RunID))
-	stateRoot, err := locateRunStateRoot(request.StateDir, entry.Name, request.RunID)
+	if _, err := os.Stat(request.StateDir); err != nil {
+		locateStep.End(false)
+		return fmt.Errorf("read state directory %s: %w", request.StateDir, err)
+	}
+	// Pin latest while cleaning a run from it; a live run owns the lock and can
+	// only be cleaned from its permanent directory after it finishes.
+	releaseLatest, lockErr := evidence.NewManifestStore(request.StateDir).LockLatest()
+	if lockErr != nil && !errors.Is(lockErr, evidence.ErrLatestLocked) {
+		locateStep.End(false)
+		return fmt.Errorf("lock state directory %s: %w", request.StateDir, lockErr)
+	}
+	if releaseLatest != nil {
+		defer releaseLatest()
+	}
+	locate := locateRunStateRoot
+	if lockErr != nil {
+		locate = locateNamedRunStateRoot
+	}
+	stateRoot, err := locate(request.StateDir, entry.Name, request.RunID)
 	locateStep.End(err == nil)
 	if err != nil {
+		if lockErr != nil {
+			return fmt.Errorf("%w (the latest directory belongs to a live run; retry after it finishes)", err)
+		}
 		return err
 	}
 	// Provider artifacts live under the located cluster root, so verification must resolve there.
@@ -205,13 +226,24 @@ func (runner LiveRunner) Cleanup(ctx context.Context, request config.Request) er
 
 // locateRunStateRoot finds the single <stateDir>/<aggregate>/<cluster> directory holding runID.
 func locateRunStateRoot(stateDir, clusterName, runID string) (string, error) {
+	return locateRunStateRootSkipping(stateDir, clusterName, runID, "")
+}
+
+// locateNamedRunStateRoot finds runID only in permanent aggregate directories,
+// not in latest, which belongs to the live run holding the state-directory lock.
+func locateNamedRunStateRoot(stateDir, clusterName, runID string) (string, error) {
+	return locateRunStateRootSkipping(stateDir, clusterName, runID, "latest")
+}
+
+// locateRunStateRootSkipping scans aggregate directories, excluding skip when set.
+func locateRunStateRootSkipping(stateDir, clusterName, runID, skip string) (string, error) {
 	aggregates, err := os.ReadDir(stateDir)
 	if err != nil {
 		return "", fmt.Errorf("read state directory %s: %w", stateDir, err)
 	}
 	matches := []string{}
 	for _, aggregate := range aggregates {
-		if !aggregate.IsDir() || aggregate.Name() == "latest" || strings.HasPrefix(aggregate.Name(), ".") {
+		if !aggregate.IsDir() || aggregate.Name() == skip || strings.HasPrefix(aggregate.Name(), ".") {
 			continue
 		}
 		root := filepath.Join(stateDir, aggregate.Name(), clusterName)
