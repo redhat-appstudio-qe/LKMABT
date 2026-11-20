@@ -31,7 +31,7 @@ var _ = Describe("RenderHTML", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(html).Should(ContainSubstring("<!DOCTYPE html>"))
 			Expect(html).Should(ContainSubstring("<title>LKMABT aggregate run run-1</title>"))
-			Expect(html).Should(ContainSubstring("<li>Architectures: linux/amd64, linux/arm64</li>"))
+			Expect(html).Should(ContainSubstring("<li>Requested architectures: linux/amd64, linux/arm64</li>"))
 			Expect(html).Should(ContainSubstring("<table>"))
 			Expect(html).Should(ContainSubstring("<th>Note</th>"))
 		})

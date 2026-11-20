@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -19,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic/fake"
+	kubetesting "k8s.io/client-go/testing"
 )
 
 var _ = Describe("outcomeFromManifest", func() {
@@ -273,6 +275,30 @@ var _ = Describe("finalizeDeferredRun", func() {
 
 			Expect((LiveRunner{}).finalizeDeferredRun(context.Background(), stage, manifest, io.Discard)).Should(Succeed())
 			Expect(prompt.calls).Should(BeZero())
+		})
+	})
+
+	When("the namespace is replaced after inspection", func() {
+		It("should refuse to delete the replacement", func() {
+			client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"))
+			var gets atomic.Int32
+			client.PrependReactor("get", "namespaces", func(kubetesting.Action) (bool, runtime.Object, error) {
+				if gets.Add(1) == 1 {
+					return false, nil, nil
+				}
+				return true, namespaceObject("tenant", "run-2"), nil
+			})
+			var deletes atomic.Int32
+			client.PrependReactor("delete", "namespaces", func(kubetesting.Action) (bool, runtime.Object, error) {
+				deletes.Add(1)
+				return true, nil, nil
+			})
+			stage := &workflow.LiveStage{Namespace: cleanup.NamespaceService{Dynamic: client}}
+			manifest := model.RunManifest{RunID: "run-1", Fixture: model.FixtureIdentity{TenantNamespace: "tenant"}}
+
+			err := (LiveRunner{}).finalizeDeferredRun(context.Background(), stage, manifest, io.Discard)
+			Expect(err).Should(MatchError(ContainSubstring("changed after approval")))
+			Expect(deletes.Load()).Should(BeZero())
 		})
 	})
 })

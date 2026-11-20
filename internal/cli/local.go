@@ -166,6 +166,11 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 		},
 	})
 	outcome := outcomeFromManifest(request.Provider, manifest)
+	if manifest.Phase == model.PhaseTriggered || manifest.Phase == model.PhaseBuildsVerified || manifest.Phase == model.PhaseBuildOutputsVerified || manifest.Phase == model.PhaseCompleted || workflow.IsDeferred(runErr) {
+		// Record the selection after preflight narrowing. A preflight or fixture
+		// failure has no tested architecture subset to report.
+		outcome.Platforms = stage.Platforms()
+	}
 	if workflow.IsDeferred(runErr) {
 		// A scheduler wait is not a failed run: release the owned tenant
 		// namespace so its pending workloads stop holding queue positions, and
@@ -627,11 +632,16 @@ func (runner LiveRunner) finalizeDeferredRun(ctx context.Context, stage *workflo
 	if info.Name != namespace || !info.Owned() || info.RunID != manifest.RunID {
 		return fmt.Errorf("refusing to delete tenant namespace %s: not owned by deferred run %s", namespace, manifest.RunID)
 	}
-	uid, err := stage.Namespace.Delete(cleanupCtx, namespace, manifest.RunID)
-	if err != nil {
+	// DeleteApproved re-reads the namespace and carries its UID and
+	// resourceVersion as preconditions, so a replacement object is refused
+	// instead of deleted.
+	if err := stage.Namespace.DeleteApproved(cleanupCtx, info); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
 		return err
 	}
-	if err := waitForNamespaceDeletion(cleanupCtx, stage.Namespace, namespace, uid); err != nil {
+	if err := waitForNamespaceDeletion(cleanupCtx, stage.Namespace, namespace, info.UID); err != nil {
 		return err
 	}
 	if log != nil {

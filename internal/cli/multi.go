@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -113,10 +114,11 @@ var readGitLabToken = func() (string, error) {
 // results of its providers. FirstAttempt is set when the first pass deferred and
 // Results comes from the fresh retry, so reports can retain both attempts.
 type clusterRun struct {
-	Entry        clusterfile.Entry
-	AuthErr      error
-	Results      []ProviderResult
-	FirstAttempt []ProviderResult
+	Entry              clusterfile.Entry
+	AuthErr            error
+	Results            []ProviderResult
+	FirstAttempt       []ProviderResult
+	RequestedPlatforms []string
 }
 
 // RunClusters loads the clusters file, acquires provider credentials,
@@ -375,7 +377,7 @@ func scheduleClusters(ctx context.Context, request config.Request, entries []clu
 	runs := make([]clusterRun, len(entries))
 	deferred := make([]int, 0, len(entries))
 	for index, entry := range entries {
-		runs[index] = clusterRun{Entry: entry, AuthErr: authFailures[entry.Name]}
+		runs[index] = clusterRun{Entry: entry, AuthErr: authFailures[entry.Name], RequestedPlatforms: request.Platforms}
 		if runs[index].AuthErr != nil {
 			console.Result(false, fmt.Sprintf("Authenticate cluster %s 🔐", entry.Name))
 			console.Printf("  %v", runs[index].AuthErr)
@@ -497,7 +499,7 @@ func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []
 		if row.Note != "" {
 			note = "; " + row.Note
 		}
-		console.Printf("%s %s: %s (%s); architectures: %s%s", row.Cluster, row.Provider, row.Result(), row.Stage, document.ArchitecturesText(), note)
+		console.Printf("%s %s: %s (%s); requested architectures: %s%s", row.Cluster, row.Provider, row.Result(), row.Stage, document.ArchitecturesText(), note)
 	}
 	markdownPath, htmlPath := aggregate.reportPaths()
 	console.Printf("report: %s", markdownPath)
@@ -563,12 +565,19 @@ func reportRows(aggregateDirectory, aggregateLog string, runs []clusterRun, prov
 			continue
 		}
 		for _, result := range run.Results {
+			note := retryNote(run, result.Provider)
+			if tested := testedPlatformsNote(run.RequestedPlatforms, result.Platforms); tested != "" {
+				if note != "" {
+					note += "; "
+				}
+				note += tested
+			}
 			rows = append(rows, report.Row{
 				Cluster:  run.Entry.Name,
 				Provider: result.Provider,
 				Passed:   result.Err == nil,
 				Stage:    string(result.Stage),
-				Note:     retryNote(run, result.Provider),
+				Note:     note,
 				Error:    errorText(result.Err),
 				Links:    resultLinks(aggregateDirectory, aggregateLog, run, result),
 			})
@@ -595,6 +604,15 @@ func retryNote(run clusterRun, provider string) string {
 		return "first attempt failed: " + first.Err.Error()
 	}
 	return ""
+}
+
+// testedPlatformsNote reports a per-cluster architecture narrowing so the row
+// and console summary do not claim a skipped architecture was exercised.
+func testedPlatformsNote(requested, tested []string) string {
+	if len(tested) == 0 || slices.Equal(requested, tested) {
+		return ""
+	}
+	return "tested: " + strings.Join(tested, ", ")
 }
 
 // firstAttemptResult returns a provider's result from the deferred first pass.

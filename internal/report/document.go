@@ -51,7 +51,8 @@ type Document struct {
 	RunID string
 	// ClustersFile is the cluster file path shown in the report.
 	ClustersFile string
-	// Architectures holds the canonical platforms exercised by the run.
+	// Architectures holds the canonical platforms requested for the run. A row's
+	// Note reports any per-cluster subset after host-config narrowing.
 	Architectures []string
 	StartedAt     time.Time
 	EndedAt       time.Time
@@ -60,8 +61,8 @@ type Document struct {
 	Rows   []Row
 }
 
-// ArchitecturesText renders the tested architectures as a comma-separated list,
-// or "none" when the document has none.
+// ArchitecturesText renders the requested architectures as a comma-separated
+// list, or "none" when the document has none.
 func (d Document) ArchitecturesText() string {
 	if len(d.Architectures) == 0 {
 		return "none"

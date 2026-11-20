@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -17,6 +18,10 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"github.com/redhat-appstudio/lkmabt/internal/platform"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	kubetesting "k8s.io/client-go/testing"
 )
 
 // pendingPipelineRun creates an admission-pending PipelineRun fixture.
@@ -144,6 +149,45 @@ var _ = Describe("build admission", func() {
 			err := tracker.deferred("tenant", now, []model.TriggerCommit{commit}, []unstructured.Unstructured{object}, nil, nil)
 			Expect(err).ShouldNot(BeNil())
 			Expect(err.Pending[0].Reason).Should(Equal("condition message"))
+		})
+	})
+
+	Describe("admissionDiagnostic", func() {
+		It("does not cache an empty Kueue result forever", func() {
+			object := pendingPipelineRun("run-web", "web", "sha-web", "uid-web", now.Add(-time.Minute), pipelineRunPendingStatus, "", "")
+			var calls atomic.Int32
+			dynamic := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+				cluster.KueueWorkloadGVR: "WorkloadList",
+			})
+			dynamic.PrependReactor("list", "workloads", func(kubetesting.Action) (bool, runtime.Object, error) {
+				if calls.Add(1) == 1 {
+					return true, &unstructured.UnstructuredList{}, nil
+				}
+				workload := &unstructured.Unstructured{Object: map[string]any{
+					"apiVersion": "kueue.x-k8s.io/v1beta2",
+					"kind":       "Workload",
+					"metadata": map[string]any{
+						"name":      "run-web-workload",
+						"namespace": "tenant",
+						"ownerReferences": []any{map[string]any{
+							"apiVersion": "tekton.dev/v1",
+							"kind":       "PipelineRun",
+							"name":       "run-web",
+							"uid":        "uid-web",
+						}},
+					},
+					"status": map[string]any{"conditions": []any{map[string]any{
+						"type": "QuotaReserved", "status": "False", "message": "quota arrived",
+					}}},
+				}}
+				return true, &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*workload}}, nil
+			})
+			stage := &LiveStage{Clients: &cluster.ClientSet{Dynamic: dynamic}}
+			diagnose := stage.admissionDiagnostic(context.Background(), "tenant")
+
+			Expect(diagnose(&object)).Should(BeEmpty())
+			Expect(diagnose(&object)).Should(Equal("quota arrived"))
+			Expect(calls.Load()).Should(Equal(int32(2)))
 		})
 	})
 

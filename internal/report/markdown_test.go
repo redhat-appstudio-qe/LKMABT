@@ -32,7 +32,7 @@ var _ = Describe("RenderMarkdown", func() {
 			Expect(rendered).Should(ContainSubstring("- Started: 2026-10-08T10:00:00Z"))
 			Expect(rendered).Should(ContainSubstring("- Ended: 2026-10-08T10:05:00Z"))
 			Expect(rendered).Should(ContainSubstring("- Clusters file: `.lkmabt-clusters.yaml`"))
-			Expect(rendered).Should(ContainSubstring("- Architectures: linux/amd64, linux/arm64"))
+			Expect(rendered).Should(ContainSubstring("- Requested architectures: linux/amd64, linux/arm64"))
 			Expect(rendered).Should(ContainSubstring("- Result: **failed**"))
 		})
 

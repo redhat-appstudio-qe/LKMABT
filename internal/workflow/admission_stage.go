@@ -33,7 +33,11 @@ func (s *LiveStage) admissionDiagnostic(ctx context.Context, namespace string) f
 			// fallback while Kueue is unreadable.
 			return ""
 		}
-		cache[key] = reason
+		if reason != "" {
+			// An empty result can mean the Workload or its QuotaReserved
+			// condition has not appeared yet; do not pin the fallback forever.
+			cache[key] = reason
+		}
 		return reason
 	}
 }

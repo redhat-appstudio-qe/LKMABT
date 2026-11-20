@@ -459,7 +459,7 @@ LKMABT applies the selection to every component:
    declares none of the selection fails preflight outright. Build verification
    requires one successful Buildah output per platform the cluster runs. The
    final result line lists the requested architectures; the per-cluster notice
-   names the subset that cluster actually builds.
+   and the row's `tested:` note name the subset that cluster actually builds.
 
 The fixtures are shared; the configuration and Dockerfile commits are visible
 to other users. Your trigger commit is a postcard to everyone else at the
@@ -496,9 +496,9 @@ lies *mishigas*.
   and never overwritten.
 - The console prints a `cluster <name>` heading per cluster,
   `cluster <name>: finished (<n> passed, <n> failed)`, one result line per
-  provider and cluster with the requested architectures, and the report paths.
-  A notice names any per-cluster architecture subset. A cluster that fails
-  authentication prints
+  provider and cluster with the requested architectures and a `tested:` note
+  when preflight narrowed them, and the report paths. A notice names any
+  per-cluster architecture subset. A cluster that fails authentication prints
   ` ✗ Authenticate cluster <name> 🔐` and the reason.
 - Reports and evidence are stored by default under `.lkmabt-runs/`; see
   [Run logs and artifact retention](#run-logs-and-artifact-retention).

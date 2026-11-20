@@ -555,6 +555,22 @@ var _ = Describe("reportRows", func() {
 		})
 	})
 
+	When("a cluster narrowed its architecture selection", func() {
+		It("should report the tested subset", func() {
+			aggregateDirectory := GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(aggregateDirectory, testAggregateLog), []byte("aggregate\n"), 0o640)).Should(Succeed())
+			runs := []clusterRun{{
+				Entry:              clusterfile.Entry{Name: "c1"},
+				RequestedPlatforms: []string{"linux/amd64", "linux/s390x"},
+				Results:            []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Platforms: []string{"linux/amd64"}}},
+			}}
+
+			rows := reportRows(aggregateDirectory, testAggregateLog, runs, []string{"github"})
+			Expect(rows).Should(HaveLen(1))
+			Expect(rows[0].Note).Should(Equal("tested: linux/amd64"))
+		})
+	})
+
 	When("the first attempt recorded an error", func() {
 		It("should aggregate only the final attempt", func() {
 			runs := []clusterRun{{
@@ -653,12 +669,12 @@ var _ = Describe("finishAggregateRun", func() {
 				Expect(info.Mode().Perm()).Should(Equal(os.FileMode(0o640)))
 			}
 			output := console.Out.(*bytes.Buffer).String()
-			Expect(output).Should(ContainSubstring("c1 github: passed (completed); architectures: linux/arm64"))
+			Expect(output).Should(ContainSubstring("c1 github: passed (completed); requested architectures: linux/arm64"))
 			Expect(output).Should(ContainSubstring("report: " + markdownPath))
 			Expect(output).Should(ContainSubstring("report: " + htmlPath))
 			markdown, readErr := os.ReadFile(markdownPath)
 			Expect(readErr).ShouldNot(HaveOccurred())
-			Expect(string(markdown)).Should(ContainSubstring("- Architectures: linux/arm64"))
+			Expect(string(markdown)).Should(ContainSubstring("- Requested architectures: linux/arm64"))
 		})
 	})
 

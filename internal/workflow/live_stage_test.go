@@ -1070,6 +1070,32 @@ var _ = Describe("LiveStage", func() {
 		Expect(identities[0].Name).Should(Equal("run-build"))
 	})
 
+	It("waits for every matrix Buildah TaskRun before accepting a component", func() {
+		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
+		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "Unknown")
+		amd64 := buildTaskRunForWorkflow("build-task-amd64", "uid-build", "True", "buildah-oci-ta")
+		arm64 := buildTaskRunForWorkflow("build-task-arm64", "uid-build", "True", "buildah-oci-ta")
+
+		identities, pending, err := matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64}, []model.TriggerCommit{commit}, 2, nil)
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeTrue())
+		Expect(identities).Should(BeEmpty())
+
+		identities, pending, err = matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64, arm64}, []model.TriggerCommit{commit}, 2, nil)
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeFalse())
+		Expect(identities).Should(HaveLen(1))
+	})
+
+	It("rejects a succeeded PipelineRun with fewer Buildah TaskRuns than platforms", func() {
+		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
+		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "True")
+		amd64 := buildTaskRunForWorkflow("build-task-amd64", "uid-build", "True", "buildah-oci-ta")
+
+		_, _, err := matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64}, []model.TriggerCommit{commit}, 2, nil)
+		Expect(err).Should(MatchError(ContainSubstring("requires 2")))
+	})
+
 	It("accepts a post-build PipelineRun failure when its Buildah TaskRuns succeeded", func() {
 		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
 		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "False")

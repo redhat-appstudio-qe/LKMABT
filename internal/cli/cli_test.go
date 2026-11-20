@@ -187,6 +187,7 @@ var _ = Describe("providerResult", func() {
 			Expect(result.RunID).Should(Equal(outcome.RunID))
 			Expect(result.ArtifactDirectory).Should(Equal(outcome.ArtifactDirectory))
 			Expect(result.Stage).Should(Equal(wantStage))
+			Expect(result.Platforms).Should(Equal(outcome.Platforms))
 			if wantErr {
 				Expect(result.Err).Should(HaveOccurred())
 			} else {
@@ -196,6 +197,7 @@ var _ = Describe("providerResult", func() {
 		Entry("empty stage defaults to preflight", RunOutcome{}, nil, model.PhasePreflight, false),
 		Entry("fields are copied", RunOutcome{Stage: model.PhaseBuildsVerified, RunID: "run-1", ArtifactDirectory: "github-run-x"}, nil, model.PhaseBuildsVerified, false),
 		Entry("error is set and stage unchanged", RunOutcome{Stage: model.PhaseBuildsVerified}, errors.New("boom"), model.PhaseBuildsVerified, true),
+		Entry("effective platforms are copied", RunOutcome{Stage: model.PhaseCompleted, Platforms: []string{"linux/amd64"}}, nil, model.PhaseCompleted, false),
 	)
 })
 
