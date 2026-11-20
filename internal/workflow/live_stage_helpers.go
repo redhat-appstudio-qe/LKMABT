@@ -80,11 +80,12 @@ func paCWaitStatus(names []string, objects []unstructured.Unstructured) string {
 
 // buildWaitStatus names each component's current build phase in trigger order.
 // captured marks components whose outputs were already evidenced; a nil
-// captured treats every component as uncaptured.
-func buildWaitStatus(commits []model.TriggerCommit, pipelineRuns, taskRuns []unstructured.Unstructured, now time.Time, captured func(string) bool) string {
+// captured treats every component as uncaptured. admissionReason supplies an
+// optional Kueue diagnostic for admission-pending runs.
+func buildWaitStatus(commits []model.TriggerCommit, pipelineRuns, taskRuns []unstructured.Unstructured, now time.Time, captured func(string) bool, admissionReason func(*unstructured.Unstructured) string) string {
 	parts := make([]string, 0, len(commits))
 	for _, commit := range commits {
-		parts = append(parts, commit.Component+": "+buildComponentStatus(commit, pipelineRuns, taskRuns, now, captured))
+		parts = append(parts, commit.Component+": "+buildComponentStatus(commit, pipelineRuns, taskRuns, now, captured, admissionReason))
 	}
 	return "builds: " + strings.Join(parts, "; ")
 }
@@ -92,7 +93,7 @@ func buildWaitStatus(commits []model.TriggerCommit, pipelineRuns, taskRuns []uns
 // buildComponentStatus describes one component as missing, failed, running, or
 // succeeded. A captured component with no matching PipelineRun reports success
 // from the recorded evidence. now supplies the age shown for pending runs.
-func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []unstructured.Unstructured, now time.Time, captured func(string) bool) string {
+func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []unstructured.Unstructured, now time.Time, captured func(string) bool, admissionReason func(*unstructured.Unstructured) string) string {
 	isCaptured := captured != nil && captured(commit.Component)
 	candidates := matchingPipelineRuns(pipelineRuns, commit)
 	switch len(candidates) {
@@ -125,6 +126,9 @@ func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []u
 		}
 		return fmt.Sprintf("succeeded (PipelineRun %s, buildah %d/%d)", candidate.GetName(), succeeded, len(buildTasks))
 	default:
+		if admission := admissionStatusDetail(candidate, taskRuns, now, admissionReason); admission != "" {
+			return admission
+		}
 		age := buildAge(candidate, now)
 		switch {
 		case len(buildTasks) == 0:

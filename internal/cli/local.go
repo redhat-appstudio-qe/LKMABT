@@ -166,6 +166,19 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 		},
 	})
 	outcome := outcomeFromManifest(request.Provider, manifest)
+	if workflow.IsDeferred(runErr) {
+		// A scheduler wait is not a failed run: release the owned tenant
+		// namespace so its pending workloads stop holding queue positions, and
+		// skip failure collection and the cleanup prompt.
+		runErr = runErrorWithLogFailure(runErr, logAttachErr)
+		outcome.DeferredReason = runErr.Error()
+		if finalizeErr := runner.finalizeDeferredRun(ctx, stage, manifest, log); finalizeErr != nil {
+			runErr = fmt.Errorf("%w; deferred cleanup failed: %v", runErr, finalizeErr)
+			outcome.DeferredReason = runErr.Error()
+		}
+		fmt.Fprintf(log, "deferred run %s at phase %s: %v\n", manifest.RunID, outcome.Stage, runErr)
+		return outcome, runErr
+	}
 	finalizeErr := runner.finalizeRun(ctx, request, clients, stage, store, manifest, runErr, log)
 	runErr = runErrorWithLogFailure(runErr, logAttachErr)
 	if runErr != nil {
@@ -559,13 +572,20 @@ func (l Lifecycle) logWriter() io.Writer {
 }
 
 // outcomeFromManifest reports the run identity and the stage the run ended on.
-// A recorded failure phase takes precedence over the manifest's final phase.
+// A recorded failure phase takes precedence over the manifest's final phase; a
+// deferral reports the phase whose step was waiting.
 func outcomeFromManifest(provider string, manifest model.RunManifest) RunOutcome {
 	stage := manifest.Phase
+	reason := ""
+	deferred := manifest.Deferred != nil
 	if manifest.Failure != nil {
 		stage = manifest.Failure.Phase
+		deferred = false
+	} else if manifest.Deferred != nil {
+		stage = manifest.Deferred.Phase
+		reason = manifest.Deferred.Message
 	}
-	return RunOutcome{Provider: provider, RunID: manifest.RunID, ArtifactDirectory: manifest.ArtifactDirectory, Stage: stage}
+	return RunOutcome{Provider: provider, RunID: manifest.RunID, ArtifactDirectory: manifest.ArtifactDirectory, Stage: stage, Deferred: deferred, DeferredReason: reason}
 }
 
 // runErrorWithLogFailure joins a workflow error with a provider run-log attachment failure.
@@ -584,6 +604,40 @@ var revokeGitLabToken = func(ctx context.Context, token, apiURL string) error {
 		return err
 	}
 	return adapter.RevokeToken(ctx)
+}
+
+// finalizeDeferredRun deletes the deferred attempt's owned tenant namespace
+// without prompting, so its Pending PipelineRuns stop occupying Kueue queue
+// positions. It performs no artifact collection and does not touch an unowned or
+// replaced namespace. Deletion is bounded by finalizationTimeout.
+func (runner LiveRunner) finalizeDeferredRun(ctx context.Context, stage *workflow.LiveStage, manifest model.RunManifest, log io.Writer) error {
+	namespace := manifest.Fixture.TenantNamespace
+	if namespace == "" {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
+	defer cancel()
+	info, err := stage.Namespace.Inspect(cleanupCtx, namespace)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect deferred tenant namespace %s: %w", namespace, err)
+	}
+	if info.Name != namespace || !info.Owned() || info.RunID != manifest.RunID {
+		return fmt.Errorf("refusing to delete tenant namespace %s: not owned by deferred run %s", namespace, manifest.RunID)
+	}
+	uid, err := stage.Namespace.Delete(cleanupCtx, namespace, manifest.RunID)
+	if err != nil {
+		return err
+	}
+	if err := waitForNamespaceDeletion(cleanupCtx, stage.Namespace, namespace, uid); err != nil {
+		return err
+	}
+	if log != nil {
+		fmt.Fprintf(log, "deleted tenant namespace %s from deferred run %s\n", namespace, manifest.RunID)
+	}
+	return nil
 }
 
 // finalizeRun collects artifacts and finalizes the tenant namespace for one

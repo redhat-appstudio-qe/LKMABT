@@ -16,6 +16,9 @@ type fakeStage struct {
 	calls     []string
 	deadlines map[string]bool
 	fail      string
+	// deferAt names the step that returns deferErr to simulate a deferral.
+	deferAt  string
+	deferErr error
 }
 
 // call records a fake stage invocation and optionally returns a canceled-context error.
@@ -29,6 +32,9 @@ func (s *fakeStage) call(ctx context.Context, name string) error {
 	}
 	if s.fail == name {
 		return context.Canceled
+	}
+	if s.deferAt == name {
+		return s.deferErr
 	}
 	return nil
 }

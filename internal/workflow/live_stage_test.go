@@ -67,6 +67,7 @@ type fakePreflightCluster struct {
 	server       string
 	accessChecks *[]cluster.AccessCheck
 	scheduling   *cluster.SchedulingSpec
+	platforms    []cluster.PlatformSupport
 }
 
 // Server returns the configured API server.
@@ -81,11 +82,18 @@ func (f fakePreflightCluster) CheckAccess(_ context.Context, checks []cluster.Ac
 }
 
 // CheckScheduling records the requested platforms and passes every check.
-func (f fakePreflightCluster) CheckScheduling(_ context.Context, spec cluster.SchedulingSpec) []cluster.CheckResult {
+func (f fakePreflightCluster) CheckScheduling(_ context.Context, spec cluster.SchedulingSpec) cluster.SchedulingResult {
 	if f.scheduling != nil {
 		*f.scheduling = spec
 	}
-	return nil
+	if f.platforms != nil {
+		return cluster.SchedulingResult{Platforms: f.platforms}
+	}
+	support := make([]cluster.PlatformSupport, 0, len(spec.Platforms))
+	for _, name := range spec.Platforms {
+		support = append(support, cluster.PlatformSupport{Platform: name, Supported: true, Configured: true})
+	}
+	return cluster.SchedulingResult{Platforms: support}
 }
 
 // contextCheckingLister fails when the namespace listing context is already done.
@@ -430,6 +438,35 @@ var _ = Describe("LiveStage", func() {
 
 			Expect(stage.Preflight(context.Background(), &model.RunManifest{RunID: "run-1"})).Should(Succeed())
 			Expect(scheduling.Platforms).Should(Equal([]string{platform.LinuxS390X, platform.LinuxPPC64LE}))
+		})
+
+		It("narrows an undeclared platform with an informational notice", func() {
+			var scheduling cluster.SchedulingSpec
+			log := &bytes.Buffer{}
+			stage := &LiveStage{
+				Request: config.Request{
+					ClusterServer:   "https://api.example",
+					ClusterName:     "osp-p01",
+					TenantNamespace: "tenant",
+					Platforms:       []string{platform.LinuxAMD64, platform.LinuxS390X},
+				},
+				PreflightCluster: fakePreflightCluster{
+					server:     "https://api.example",
+					scheduling: &scheduling,
+					platforms: []cluster.PlatformSupport{
+						{Platform: platform.LinuxAMD64, Configured: true, Supported: true},
+						{Platform: platform.LinuxS390X, Details: "platform is not configured in host-config"},
+					},
+				},
+				Namespace: cleanup.NamespaceService{Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), NameLister: testNameLister{}},
+				Log:       log,
+			}
+
+			Expect(stage.Preflight(context.Background(), &model.RunManifest{RunID: "run-1"})).Should(Succeed())
+			Expect(scheduling.Platforms).Should(Equal([]string{platform.LinuxAMD64, platform.LinuxS390X}))
+			Expect(stage.Request.Platforms).Should(Equal([]string{platform.LinuxAMD64}))
+			Expect(log.String()).Should(ContainSubstring("cluster osp-p01 does not declare " + platform.LinuxS390X))
+			Expect(log.String()).ShouldNot(ContainSubstring("warning:"))
 		})
 	})
 

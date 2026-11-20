@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/workflow"
 	"golang.org/x/term"
 )
 
@@ -96,6 +97,23 @@ func (s *Step) End(success bool) {
 	if s == nil || s.console == nil {
 		return
 	}
+	s.endWith(resultLine(s.console.color, success, s.description))
+}
+
+// EndDeferred removes the step and reports a scheduler deferral, not a failure.
+func (s *Step) EndDeferred(reason string) {
+	if s == nil || s.console == nil {
+		return
+	}
+	description := s.description + " - deferred"
+	if reason != "" {
+		description += " (" + reason + ")"
+	}
+	s.endWith(deferredLine(s.console.color, description))
+}
+
+// endWith removes the step from the active region and prints its final line.
+func (s *Step) endWith(line string) {
 	c := s.console
 	c.outMu.Lock()
 	defer c.outMu.Unlock()
@@ -109,7 +127,6 @@ func (s *Step) End(success bool) {
 			break
 		}
 	}
-	line := resultLine(c.color, success, s.description)
 	if c.promptActive {
 		fmt.Fprintln(&c.pending, line)
 		if len(c.active) == 0 {
@@ -224,6 +241,16 @@ func resultLine(color, success bool, description string) string {
 	return " " + symbol + " " + description
 }
 
+// deferredLine renders a scheduler deferral with a pause marker, distinct from
+// success and failure.
+func deferredLine(color bool, description string) string {
+	symbol := "⏸"
+	if color {
+		symbol = "\x1b[33m" + symbol + "\x1b[0m"
+	}
+	return " " + symbol + " " + description
+}
+
 // smartTerminal reports whether w can animate in place. Non-files, redirected
 // output, and dumb terminals get the plain line-oriented log instead.
 func smartTerminal(w io.Writer) bool {
@@ -315,11 +342,16 @@ func (o *phaseObserver) progress(detail string) {
 	o.step.Update(detail)
 }
 
-// end completes the open step with the phase result.
+// end completes the open step with the phase result. A deferral ends the step
+// with a pause marker and a scheduler reason instead of a failure marker.
 func (o *phaseObserver) end(_ model.Phase, err error) {
 	if o == nil {
 		return
 	}
-	o.step.End(err == nil)
+	if workflow.IsDeferred(err) {
+		o.step.EndDeferred(workflow.DeferralReason(err))
+	} else {
+		o.step.End(err == nil)
+	}
 	o.step = nil
 }

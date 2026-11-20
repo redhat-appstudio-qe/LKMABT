@@ -186,11 +186,12 @@ func (s ManifestStore) findRunDir(runID string) (string, error) {
 // writeStatus writes the compact status snapshot for manifest.
 func (s ManifestStore) writeStatus(manifest model.RunManifest) error {
 	status := struct {
-		RunID     string         `json:"runID"`
-		Phase     model.Phase    `json:"phase"`
-		UpdatedAt time.Time      `json:"updatedAt"`
-		Failure   *model.Failure `json:"failure,omitempty"`
-	}{manifest.RunID, manifest.Phase, manifest.UpdatedAt, manifest.Failure}
+		RunID     string          `json:"runID"`
+		Phase     model.Phase     `json:"phase"`
+		UpdatedAt time.Time       `json:"updatedAt"`
+		Failure   *model.Failure  `json:"failure,omitempty"`
+		Deferred  *model.Deferral `json:"deferred,omitempty"`
+	}{manifest.RunID, manifest.Phase, manifest.UpdatedAt, manifest.Failure, manifest.Deferred}
 	if err := s.writeJSON(filepath.Join(s.RunDirFor(manifest), "status.json"), status); err != nil {
 		return err
 	}

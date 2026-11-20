@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -81,8 +82,11 @@ type Runner struct {
 // completes or a stage fails. Each stage receives a context bounded by its
 // PhaseTimeouts value. On failure, Run records a Failure, attempts to persist
 // PhaseFailed, and returns the stage error; a failed failure-transition is
-// ignored so the caller still observes the stage error. Run always starts a new
-// run and never resumes an existing manifest.
+// ignored so the caller still observes the stage error. A stage error wrapping
+// ErrDeferred is recorded as a non-terminal Deferral instead: the manifest keeps
+// its last completed phase and is saved, so a caller can retry the cluster as a
+// fresh run without treating the scheduler wait as a build failure. Run always
+// starts a new run and never resumes an existing manifest.
 func (r Runner) Run(ctx context.Context, options Options) (model.RunManifest, error) {
 	if r.Stage == nil {
 		return model.RunManifest{}, fmt.Errorf("workflow stage is required")
@@ -130,6 +134,17 @@ func (r Runner) Run(ctx context.Context, options Options) (model.RunManifest, er
 		err := step.run(stepContext, &manifest)
 		cancel()
 		if err != nil {
+			if IsDeferred(err) {
+				deferral := deferralFor(err, step.phase, now())
+				manifest.Deferred = &deferral
+				if saveErr := r.Store.Save(&manifest); saveErr != nil {
+					err = errors.Join(err, fmt.Errorf("save deferred run: %w", saveErr))
+				}
+				if options.OnPhaseEnd != nil {
+					options.OnPhaseEnd(step.phase, err)
+				}
+				return manifest, err
+			}
 			if options.OnPhaseEnd != nil {
 				options.OnPhaseEnd(step.phase, err)
 			}

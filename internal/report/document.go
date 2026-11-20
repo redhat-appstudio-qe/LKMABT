@@ -39,6 +39,9 @@ type Row struct {
 	// verbatim (escaped for the output format), so callers must not put secrets
 	// in it.
 	Error string
+	// Note carries operational context that is not a failure, such as a first
+	// attempt deferred by scheduler admission before a successful retry.
+	Note  string
 	Links []Link
 }
 

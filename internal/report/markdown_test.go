@@ -38,17 +38,27 @@ var _ = Describe("RenderMarkdown", func() {
 
 		It("should render the table header", func() {
 			rendered := RenderMarkdown(twoRowDocument())
-			Expect(rendered).Should(ContainSubstring("| Cluster | Provider | Result | Stage | Error | Artifacts |\n| --- | --- | --- | --- | --- | --- |\n"))
+			Expect(rendered).Should(ContainSubstring("| Cluster | Provider | Result | Stage | Note | Error | Artifacts |\n| --- | --- | --- | --- | --- | --- | --- |\n"))
 		})
 
 		It("should render a passed row with its artifact link", func() {
 			rendered := RenderMarkdown(twoRowDocument())
-			Expect(rendered).Should(ContainSubstring("| c1 | github | passed | completed |  | [aggregate run.log](<./run.log>) |"))
+			Expect(rendered).Should(ContainSubstring("| c1 | github | passed | completed |  |  | [aggregate run.log](<./run.log>) |"))
 		})
 
 		It("should render a failed row with stage and error text", func() {
 			rendered := RenderMarkdown(twoRowDocument())
-			Expect(rendered).Should(ContainSubstring("| c2 | gitlab | failed | authentication | authentication failed: no usable kubeconfig at /home/u/.kube/config-c2 after ibmcloud login | none |"))
+			Expect(rendered).Should(ContainSubstring("| c2 | gitlab | failed | authentication |  | authentication failed: no usable kubeconfig at /home/u/.kube/config-c2 after ibmcloud login | none |"))
+		})
+	})
+
+	When("a row records a first-attempt note", func() {
+		It("should render the note in its own column", func() {
+			document := Document{Rows: []Row{{Cluster: "c1", Provider: "github", Passed: true, Stage: "completed", Note: "first attempt deferred: admission pending"}}}
+
+			rendered := RenderMarkdown(document)
+
+			Expect(rendered).Should(ContainSubstring("| c1 | github | passed | completed | first attempt deferred: admission pending |  | none |"))
 		})
 	})
 

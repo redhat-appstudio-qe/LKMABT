@@ -34,13 +34,14 @@ th,td{border:1px solid #999;padding:0.4rem;text-align:left;vertical-align:top}
 <li>Result: <span class="{{.Result}}">{{.Result}}</span></li>
 </ul>
 <table>
-<thead><tr><th>Cluster</th><th>Provider</th><th>Result</th><th>Stage</th><th>Error</th><th>Artifacts</th></tr></thead>
+<thead><tr><th>Cluster</th><th>Provider</th><th>Result</th><th>Stage</th><th>Note</th><th>Error</th><th>Artifacts</th></tr></thead>
 <tbody>
 {{range .Rows}}<tr>
 <td>{{.Cluster}}</td>
 <td>{{.Provider}}</td>
 <td class="{{.Result}}">{{.Result}}</td>
 <td>{{.Stage}}</td>
+<td>{{.Note}}</td>
 <td>{{.Error}}</td>
 <td>{{if .Links}}{{range $index, $link := .Links}}{{if $index}}<br>{{end}}<a href="{{$link.Target}}">{{$link.Label}}</a>{{end}}{{else}}none{{end}}</td>
 </tr>

@@ -46,6 +46,10 @@ var buildPollInterval = 10 * time.Second
 type buildEvidenceCache struct {
 	Captured func(component string) (model.PipelineRunIdentity, bool)
 	Capture  func(model.PipelineRunIdentity, *unstructured.Unstructured, []unstructured.Unstructured) error
+	// AdmissionReason resolves the scheduler reason for an admission-pending
+	// PipelineRun. It is optional and diagnostic; the PipelineRun condition is
+	// the fallback.
+	AdmissionReason func(*unstructured.Unstructured) string
 }
 
 // captured returns the evidence identity for a component when already captured.
@@ -68,6 +72,14 @@ func (c buildEvidenceCache) capture(identity model.PipelineRunIdentity, pipeline
 		return nil
 	}
 	return c.Capture(identity, pipelineRun, taskRuns)
+}
+
+// admissionReason resolves an optional scheduler reason for a pending run.
+func (c buildEvidenceCache) admissionReason(pipelineRun *unstructured.Unstructured) string {
+	if c.AdmissionReason == nil {
+		return ""
+	}
+	return c.AdmissionReason(pipelineRun)
 }
 
 // PipelineRunDisappearedError reports a PipelineRun observed earlier in a wait
@@ -158,10 +170,11 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 	if preflightCluster == nil {
 		preflightCluster = s.RealCluster
 	}
-	_, err := cluster.RunPreflight(ctx, preflightCluster, spec)
+	result, err := cluster.RunPreflight(ctx, preflightCluster, spec)
 	if err != nil {
 		return err
 	}
+	s.limitToSupportedPlatforms(result)
 	if s.Request.Provider == config.ProviderGitHub {
 		verification, err := s.verifyGitHubApp(ctx)
 		if err != nil {
@@ -189,6 +202,23 @@ func (s *LiveStage) platforms() []string {
 		return platform.All()
 	}
 	return s.Request.Platforms
+}
+
+// limitToSupportedPlatforms narrows this cluster's selection to the
+// architectures its live host-config can schedule. An undeclared architecture is
+// information, not a warning or failure: the run continues with the rest.
+func (s *LiveStage) limitToSupportedPlatforms(result cluster.PreflightResult) {
+	unsupported := result.Unsupported()
+	if len(unsupported) == 0 {
+		return
+	}
+	supported := result.Supported()
+	s.Request.Platforms = supported
+	label := "cluster"
+	if name := strings.TrimSpace(s.Request.ClusterName); name != "" {
+		label += " " + name
+	}
+	s.notice("%s does not declare %s in host-config; continuing with %s", label, strings.Join(unsupported, ", "), strings.Join(supported, ", "))
 }
 
 // accessChecks lists the API versions preflight must verify.
@@ -669,6 +699,7 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 			identity, ok := captured[component]
 			return identity, ok
 		},
+		AdmissionReason: s.admissionDiagnostic(ctx, namespace),
 		Capture: func(identity model.PipelineRunIdentity, pipelineRun *unstructured.Unstructured, taskRuns []unstructured.Unstructured) error {
 			output, err := inspector.VerifyListed(identity, pipelineRun, taskRuns)
 			if err != nil {
@@ -884,6 +915,7 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 	}
 	notify(notice, "waiting for PipelineRuns for %d triggered components", len(commits))
 	observed := make(map[string]model.PipelineRunIdentity, len(commits))
+	admission := newAdmissionTracker(admissionPendingThreshold, evidence.admissionReason)
 
 	triggerCtx, cancelTrigger := context.WithTimeout(ctx, triggerTimeout)
 	defer cancelTrigger()
@@ -909,6 +941,9 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 				return nil, err
 			}
 		}
+		if deferred := admission.deferred(namespace, time.Now(), commits, pipelineRuns, taskRuns, evidence.isCaptured); deferred != nil {
+			return nil, deferred
+		}
 		if !pending {
 			return assembleBuildIdentities(commits, identities, evidence)
 		}
@@ -916,7 +951,7 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 			break
 		}
 		if !awaitPoll(triggerCtx, interval, triggerHeartbeat, func() {
-			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now(), evidence.isCaptured))
+			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now(), evidence.isCaptured, evidence.admissionReason))
 		}) {
 			return nil, noPipelineRunError(namespace, commits, pipelineRuns, evidence.isCaptured)
 		}
@@ -947,11 +982,14 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 				return nil, err
 			}
 		}
+		if deferred := admission.deferred(namespace, time.Now(), commits, pipelineRuns, taskRuns, evidence.isCaptured); deferred != nil {
+			return nil, deferred
+		}
 		if !pending {
 			return assembleBuildIdentities(commits, identities, evidence)
 		}
 		if !awaitPoll(buildCtx, interval, buildHeartbeat, func() {
-			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now(), evidence.isCaptured))
+			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now(), evidence.isCaptured, evidence.admissionReason))
 		}) {
 			return nil, fmt.Errorf("timed out waiting for Buildah TaskRuns after trigger: %w", buildCtx.Err())
 		}
@@ -1133,8 +1171,8 @@ func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, comm
 	return identities, pending, nil
 }
 
-// buildTaskRunsForPipelineRun selects Buildah TaskRuns owned by or labeled for a PipelineRun.
-func buildTaskRunsForPipelineRun(taskRuns []unstructured.Unstructured, pipelineRun *unstructured.Unstructured) []*unstructured.Unstructured {
+// taskRunsForPipelineRun selects TaskRuns owned by or labeled for a PipelineRun.
+func taskRunsForPipelineRun(taskRuns []unstructured.Unstructured, pipelineRun *unstructured.Unstructured) []*unstructured.Unstructured {
 	result := make([]*unstructured.Unstructured, 0)
 	for index := range taskRuns {
 		taskRun := &taskRuns[index]
@@ -1142,10 +1180,21 @@ func buildTaskRunsForPipelineRun(taskRuns []unstructured.Unstructured, pipelineR
 		if !owned && taskRun.GetLabels()["tekton.dev/pipelineRun"] == pipelineRun.GetName() {
 			owned = true
 		}
-		if !cluster.IsBuildTaskRun(taskRun) || !owned {
-			continue
+		if owned {
+			result = append(result, taskRun)
 		}
-		result = append(result, taskRun)
+	}
+	return result
+}
+
+// buildTaskRunsForPipelineRun selects Buildah TaskRuns owned by or labeled for a PipelineRun.
+func buildTaskRunsForPipelineRun(taskRuns []unstructured.Unstructured, pipelineRun *unstructured.Unstructured) []*unstructured.Unstructured {
+	all := taskRunsForPipelineRun(taskRuns, pipelineRun)
+	result := make([]*unstructured.Unstructured, 0, len(all))
+	for _, taskRun := range all {
+		if cluster.IsBuildTaskRun(taskRun) {
+			result = append(result, taskRun)
+		}
 	}
 	return result
 }
@@ -1234,16 +1283,11 @@ func noPipelineRunError(namespace string, commits []model.TriggerCommit, objects
 // It also returns an empty string when the condition exists without a string status; callers
 // treat anything other than True or False as non-terminal.
 func pipelineRunConditionStatus(object *unstructured.Unstructured) string {
-	conditions, _, _ := unstructured.NestedSlice(object.Object, "status", "conditions")
-	for _, item := range conditions {
-		condition, ok := item.(map[string]any)
-		if !ok || condition["type"] != "Succeeded" {
-			continue
-		}
-		status, _ := condition["status"].(string)
-		return status
+	status, _, _ := pipelineRunSucceededCondition(object)
+	if status == "" {
+		return "Unknown"
 	}
-	return "Unknown"
+	return status
 }
 
 // PipelineRunFailedError reports a trigger's PipelineRun or one of its Buildah

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/workflow"
 )
 
 // RunOutcome identifies one finished provider run. ArtifactDirectory is
@@ -24,6 +25,10 @@ type RunOutcome struct {
 	RunID             string
 	ArtifactDirectory string
 	Stage             model.Phase
+	// Deferred reports that the attempt stopped in scheduler admission and may
+	// be retried as a fresh run; DeferredReason carries the scheduler detail.
+	Deferred       bool
+	DeferredReason string
 }
 
 // Runner executes provider workflows for Execute; LiveRunner is the production
@@ -44,6 +49,10 @@ type ProviderResult struct {
 	ArtifactDirectory string
 	Stage             model.Phase
 	Err               error
+	// Deferred marks a first-attempt scheduler deferral that the scheduler may
+	// retry. A result that exhausts its retry is converted back to Err.
+	Deferred       bool
+	DeferredReason string
 }
 
 // CleanupRunner is the optional Runner capability behind the cleanup command.
@@ -121,7 +130,12 @@ func providerResult(provider string, outcome RunOutcome, err error) ProviderResu
 	if stage == "" {
 		stage = model.PhasePreflight
 	}
-	return ProviderResult{Provider: provider, RunID: outcome.RunID, ArtifactDirectory: outcome.ArtifactDirectory, Stage: stage, Err: err}
+	deferred := outcome.Deferred || workflow.IsDeferred(err)
+	reason := outcome.DeferredReason
+	if deferred && reason == "" && err != nil {
+		reason = err.Error()
+	}
+	return ProviderResult{Provider: provider, RunID: outcome.RunID, ArtifactDirectory: outcome.ArtifactDirectory, Stage: stage, Err: err, Deferred: deferred, DeferredReason: reason}
 }
 
 // requestForProvider creates a run request with a fresh run ID, the fixture

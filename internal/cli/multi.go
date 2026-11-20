@@ -110,11 +110,13 @@ var readGitLabToken = func() (string, error) {
 }
 
 // clusterRun holds one clusters-file entry's authentication failure or the
-// results of its providers.
+// results of its providers. FirstAttempt is set when the first pass deferred and
+// Results comes from the fresh retry, so reports can retain both attempts.
 type clusterRun struct {
-	Entry   clusterfile.Entry
-	AuthErr error
-	Results []ProviderResult
+	Entry        clusterfile.Entry
+	AuthErr      error
+	Results      []ProviderResult
+	FirstAttempt []ProviderResult
 }
 
 // RunClusters loads the clusters file, acquires provider credentials,
@@ -364,9 +366,14 @@ func rejectDuplicateServers(entries []clusterfile.Entry, authFailures map[string
 
 // scheduleClusters runs authenticated clusters one at a time in clusters-file
 // order. A cluster whose authentication failed keeps its AuthErr and produces no
-// provider results; the remaining clusters still run.
+// provider results; the remaining clusters still run. A cluster whose providers
+// settle with at least one admission deferral is retried once after the first
+// pass, with a fresh run ID and trigger commits. Waiting for every provider
+// before deferring keeps the shared fixture from being mutated by an interleaved
+// cluster; the retry cap and each attempt's normal phase timeouts bound the run.
 func scheduleClusters(ctx context.Context, request config.Request, entries []clusterfile.Entry, authFailures map[string]error, aggregate *aggregateRun, runner Runner, console *Console) []clusterRun {
 	runs := make([]clusterRun, len(entries))
+	deferred := make([]int, 0, len(entries))
 	for index, entry := range entries {
 		runs[index] = clusterRun{Entry: entry, AuthErr: authFailures[entry.Name]}
 		if runs[index].AuthErr != nil {
@@ -377,20 +384,99 @@ func scheduleClusters(ctx context.Context, request config.Request, entries []clu
 		console.Printf("")
 		console.Printf("cluster %s", entry.Name)
 		runs[index].Results = runCluster(ctx, request, entry, aggregate.Directory, runner)
+		if attemptDeferred(runs[index].Results) {
+			runs[index].FirstAttempt = runs[index].Results
+			deferred = append(deferred, index)
+			console.Printf("cluster %s: deferred (%s); continuing with the next cluster", entry.Name, deferredSummary(runs[index].Results))
+			console.Printf("cluster %s: will retry after the first pass", entry.Name)
+			continue
+		}
 		console.Printf("cluster %s: finished (%s)", entry.Name, resultSummary(runs[index].Results))
+	}
+	for _, index := range deferred {
+		entry := runs[index].Entry
+		console.Printf("")
+		console.Printf("cluster %s: retrying deferred attempt (fresh run)", entry.Name)
+		if ctx.Err() != nil {
+			runs[index].Results = exhaustedDeferred(runs[index].FirstAttempt, ctx.Err())
+			console.Printf("cluster %s: retry skipped (%v)", entry.Name, ctx.Err())
+			continue
+		}
+		results := runCluster(ctx, request, entry, aggregate.Directory, runner)
+		if attemptDeferred(results) {
+			results = exhaustedDeferred(results, nil)
+		}
+		runs[index].Results = results
+		console.Printf("cluster %s: retry finished (%s)", entry.Name, resultSummary(results))
 	}
 	return runs
 }
 
-// resultSummary renders "<passed> passed, <failed> failed" for one cluster's provider results.
-func resultSummary(results []ProviderResult) string {
-	passed := 0
+// attemptDeferred reports whether any provider in the attempt stopped in
+// scheduler admission.
+func attemptDeferred(results []ProviderResult) bool {
 	for _, result := range results {
-		if result.Err == nil {
-			passed++
+		if result.Deferred {
+			return true
 		}
 	}
-	return fmt.Sprintf("%d passed, %d failed", passed, len(results)-passed)
+	return false
+}
+
+// deferredSummary names the scheduler reason that deferred the attempt.
+func deferredSummary(results []ProviderResult) string {
+	for _, result := range results {
+		if result.Deferred && result.DeferredReason != "" {
+			return result.DeferredReason
+		}
+	}
+	return "admission pending"
+}
+
+// exhaustedDeferred converts a retry that deferred again into terminal failures,
+// so the aggregate exits non-zero and reports the scheduler reason once.
+func exhaustedDeferred(results []ProviderResult, cause error) []ProviderResult {
+	exhausted := append([]ProviderResult(nil), results...)
+	for index := range exhausted {
+		if !exhausted[index].Deferred {
+			continue
+		}
+		reason := exhausted[index].DeferredReason
+		if reason == "" {
+			reason = "admission pending"
+		}
+		if cause != nil {
+			exhausted[index].Err = fmt.Errorf("cluster admission-pending retry skipped: %v: %s", cause, reason)
+		} else {
+			exhausted[index].Err = fmt.Errorf("cluster remained admission-pending after one retry: %s", reason)
+		}
+		exhausted[index].Deferred = false
+	}
+	return exhausted
+}
+
+// resultSummary renders "<passed> passed, <failed> failed" for one cluster's
+// provider results, counting a first-attempt deferral separately so it never
+// reads as a build failure.
+func resultSummary(results []ProviderResult) string {
+	passed, deferred, failed := 0, 0, 0
+	for _, result := range results {
+		switch {
+		case result.Deferred:
+			deferred++
+		case result.Err == nil:
+			passed++
+		default:
+			failed++
+		}
+	}
+	if deferred > 0 {
+		if failed > 0 {
+			return fmt.Sprintf("%d passed, %d failed, %d deferred", passed, failed, deferred)
+		}
+		return fmt.Sprintf("%d passed, %d deferred", passed, deferred)
+	}
+	return fmt.Sprintf("%d passed, %d failed", passed, failed)
 }
 
 // finishAggregateRun writes the run-named Markdown and HTML reports, prints one
@@ -407,7 +493,11 @@ func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []
 	step.End(writeErr == nil)
 	console.Printf("")
 	for _, row := range rows {
-		console.Printf("%s %s: %s (%s); architectures: %s", row.Cluster, row.Provider, row.Result(), row.Stage, document.ArchitecturesText())
+		note := ""
+		if row.Note != "" {
+			note = "; " + row.Note
+		}
+		console.Printf("%s %s: %s (%s); architectures: %s%s", row.Cluster, row.Provider, row.Result(), row.Stage, document.ArchitecturesText(), note)
 	}
 	markdownPath, htmlPath := aggregate.reportPaths()
 	console.Printf("report: %s", markdownPath)
@@ -473,10 +563,65 @@ func reportRows(aggregateDirectory, aggregateLog string, runs []clusterRun, prov
 			continue
 		}
 		for _, result := range run.Results {
-			rows = append(rows, report.Row{Cluster: run.Entry.Name, Provider: result.Provider, Passed: result.Err == nil, Stage: string(result.Stage), Error: errorText(result.Err), Links: report.Links(aggregateDirectory, aggregateLog, run.Entry.Name, result.ArtifactDirectory)})
+			rows = append(rows, report.Row{
+				Cluster:  run.Entry.Name,
+				Provider: result.Provider,
+				Passed:   result.Err == nil,
+				Stage:    string(result.Stage),
+				Note:     retryNote(run, result.Provider),
+				Error:    errorText(result.Err),
+				Links:    resultLinks(aggregateDirectory, aggregateLog, run, result),
+			})
 		}
 	}
 	return rows
+}
+
+// retryNote describes a first attempt that deferred or failed before the final
+// attempt, so a retry never silently erases the earlier outcome.
+func retryNote(run clusterRun, provider string) string {
+	first, ok := firstAttemptResult(run.FirstAttempt, provider)
+	if !ok {
+		return ""
+	}
+	if first.Deferred {
+		reason := first.DeferredReason
+		if reason == "" {
+			reason = "admission pending"
+		}
+		return "first attempt deferred: " + reason
+	}
+	if first.Err != nil {
+		return "first attempt failed: " + first.Err.Error()
+	}
+	return ""
+}
+
+// firstAttemptResult returns a provider's result from the deferred first pass.
+func firstAttemptResult(results []ProviderResult, provider string) (ProviderResult, bool) {
+	for _, result := range results {
+		if result.Provider == provider {
+			return result, true
+		}
+	}
+	return ProviderResult{}, false
+}
+
+// resultLinks links the final attempt and keeps the deferred first attempt's
+// provider directory and log reachable.
+func resultLinks(aggregateDirectory, aggregateLog string, run clusterRun, result ProviderResult) []report.Link {
+	links := report.Links(aggregateDirectory, aggregateLog, run.Entry.Name, result.ArtifactDirectory)
+	first, ok := firstAttemptResult(run.FirstAttempt, result.Provider)
+	if !ok || first.ArtifactDirectory == "" {
+		return links
+	}
+	for _, link := range report.Links(aggregateDirectory, aggregateLog, run.Entry.Name, first.ArtifactDirectory) {
+		switch link.Label {
+		case "run directory", "run.log":
+			links = append(links, report.Link{Label: "first attempt " + link.Label, Target: link.Target})
+		}
+	}
+	return links
 }
 
 // allPassed reports whether every row passed.

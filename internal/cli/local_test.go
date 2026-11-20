@@ -5,13 +5,20 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/redhat-appstudio/lkmabt/internal/cleanup"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/workflow"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic/fake"
 )
 
 var _ = Describe("outcomeFromManifest", func() {
@@ -202,6 +209,70 @@ var _ = Describe("LiveRunner.Run", func() {
 			Expect(log.path).Should(HaveSuffix("run.log"))
 			Expect(log.path).Should(ContainSubstring("github-run-"))
 			Expect(err).Should(MatchError(ContainSubstring(log.path)))
+		})
+	})
+})
+
+// namespaceListKinds registers the namespace and finalizer-strip list kinds the
+// deferred cleanup deletion touches.
+func namespaceListKinds() map[schema.GroupVersionResource]string {
+	return map[schema.GroupVersionResource]string{
+		cleanup.NamespaceGVR: "NamespaceList",
+		{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "applications"}:      "ApplicationList",
+		{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "components"}:        "ComponentList",
+		{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "imagerepositories"}: "ImageRepositoryList",
+		{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "releases"}:          "ReleaseList",
+		{Group: "tekton.dev", Version: "v1", Resource: "pipelineruns"}:                      "PipelineRunList",
+	}
+}
+
+var _ = Describe("finalizeDeferredRun", func() {
+	When("the tenant namespace is owned by the deferred run", func() {
+		It("should delete it without prompting or collecting artifacts", func() {
+			client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), namespaceListKinds(), namespaceObject("tenant", "run-1"))
+			prompt := &fakePrompt{approved: false}
+			stage := &workflow.LiveStage{Namespace: cleanup.NamespaceService{Dynamic: client}, Prompt: prompt}
+			stateDir := GinkgoT().TempDir()
+			manifest := model.RunManifest{RunID: "run-1", ArtifactDirectory: "github-run-1", Fixture: model.FixtureIdentity{TenantNamespace: "tenant"}}
+			log := &bytes.Buffer{}
+
+			err := (LiveRunner{}).finalizeDeferredRun(context.Background(), stage, manifest, log)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(prompt.calls).Should(BeZero())
+			_, inspectErr := stage.Namespace.Inspect(context.Background(), "tenant")
+			Expect(apierrors.IsNotFound(inspectErr)).Should(BeTrue())
+			Expect(log.String()).Should(ContainSubstring("deleted tenant namespace tenant from deferred run run-1"))
+			entries, readErr := os.ReadDir(stateDir)
+			Expect(readErr).NotTo(HaveOccurred())
+			Expect(entries).Should(BeEmpty())
+		})
+	})
+
+	When("the tenant namespace belongs to another run", func() {
+		It("should refuse to delete it", func() {
+			client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-2"))
+			prompt := &fakePrompt{approved: true}
+			stage := &workflow.LiveStage{Namespace: cleanup.NamespaceService{Dynamic: client}, Prompt: prompt}
+			manifest := model.RunManifest{RunID: "run-1", Fixture: model.FixtureIdentity{TenantNamespace: "tenant"}}
+
+			err := (LiveRunner{}).finalizeDeferredRun(context.Background(), stage, manifest, io.Discard)
+			Expect(err).Should(MatchError(ContainSubstring("refusing to delete tenant namespace tenant")))
+			Expect(prompt.calls).Should(BeZero())
+			_, inspectErr := stage.Namespace.Inspect(context.Background(), "tenant")
+			Expect(inspectErr).NotTo(HaveOccurred())
+		})
+	})
+
+	When("the tenant namespace is already gone", func() {
+		It("should succeed without prompting", func() {
+			client := fake.NewSimpleDynamicClient(runtime.NewScheme())
+			prompt := &fakePrompt{approved: true}
+			stage := &workflow.LiveStage{Namespace: cleanup.NamespaceService{Dynamic: client}, Prompt: prompt}
+			manifest := model.RunManifest{RunID: "run-1", Fixture: model.FixtureIdentity{TenantNamespace: "tenant"}}
+
+			Expect((LiveRunner{}).finalizeDeferredRun(context.Background(), stage, manifest, io.Discard)).Should(Succeed())
+			Expect(prompt.calls).Should(BeZero())
 		})
 	})
 })

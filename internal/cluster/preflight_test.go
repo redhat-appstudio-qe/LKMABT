@@ -12,7 +12,7 @@ import (
 type fakeCluster struct {
 	server      string
 	checks      []CheckResult
-	scheduling  []CheckResult
+	scheduling  SchedulingResult
 	accessCalls int
 }
 
@@ -36,8 +36,8 @@ func (f *fakeCluster) CheckAccess(context.Context, []AccessCheck) []CheckResult 
 	return f.checks
 }
 
-// CheckScheduling returns the fake cluster's configured scheduling results.
-func (f *fakeCluster) CheckScheduling(context.Context, SchedulingSpec) []CheckResult {
+// CheckScheduling returns the fake cluster's configured scheduling result.
+func (f *fakeCluster) CheckScheduling(context.Context, SchedulingSpec) SchedulingResult {
 	return f.scheduling
 }
 
@@ -45,14 +45,18 @@ var _ = Describe("RunPreflight", func() {
 	It("rejects wrong server without access check", func() {
 		fake := &fakeCluster{server: "https://actual.example"}
 		_, err := RunPreflight(context.Background(), fake, PreflightSpec{ExpectedServer: "https://expected.example"})
-		Expect(err).To(HaveOccurred())
-		Expect(fake.accessCalls).To(Equal(0))
+		Expect(err).Should(HaveOccurred())
+		Expect(fake.accessCalls).Should(Equal(0))
 	})
 
 	It("rejects failed controller scheduling", func() {
-		fake := &fakeCluster{server: "https://api.example", scheduling: []CheckResult{{Name: "multi-platform-controller/linux/arm64", Details: "platform is not configured in host-config"}}}
+		fake := &fakeCluster{
+			server:     "https://api.example",
+			scheduling: SchedulingResult{Checks: []CheckResult{{Name: "multi-platform-controller", Details: "controller deployment is not ready"}}},
+		}
 		_, err := RunPreflight(context.Background(), fake, PreflightSpec{ExpectedServer: "https://api.example", Scheduling: SchedulingSpec{Namespace: "multi-platform-controller", Platforms: []string{"linux/arm64"}}})
-		Expect(err).To(HaveOccurred())
+		Expect(err).Should(HaveOccurred())
+		Expect(err.Error()).Should(ContainSubstring("scheduling check \"multi-platform-controller\" failed"))
 	})
 
 	It("surfaces a failed access check with guidance", func() {
@@ -68,21 +72,87 @@ var _ = Describe("RunPreflight", func() {
 		Expect(err.Error()).Should(ContainSubstring("grant Secret access in the tenant namespace"))
 	})
 
-	It("requires controller scheduling readiness", func() {
+	It("accepts readiness for a supported platform", func() {
 		fake := &fakeCluster{
-			server:     "https://api.example",
-			checks:     []CheckResult{{Name: "pipelines", Passed: true}},
-			scheduling: []CheckResult{{Name: "multi-platform-controller/linux/arm64", Passed: true}},
+			server: "https://api.example",
+			checks: []CheckResult{{Name: "pipelines", Passed: true}},
+			scheduling: SchedulingResult{
+				Checks:    []CheckResult{{Name: "multi-platform-controller", Passed: true}},
+				Platforms: []PlatformSupport{{Platform: "linux/arm64", Configured: true, Supported: true, Details: "platform is configured via static host arm64-dev"}},
+			},
 		}
 		result, err := RunPreflight(context.Background(), fake, PreflightSpec{
 			ExpectedServer: "https://api.example",
 			Scheduling:     SchedulingSpec{Namespace: "multi-platform-controller", Platforms: []string{"linux/arm64"}},
 		})
-		if err != nil {
-			Expect(err).NotTo(HaveOccurred())
-		}
-		Expect(result.Scheduling).To(HaveLen(1))
-		Expect(result.Scheduling[0].Name).To(Equal("multi-platform-controller/linux/arm64"))
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(result.Scheduling).Should(HaveLen(1))
+		Expect(result.Scheduling[0].Name).Should(Equal("multi-platform-controller"))
+		Expect(result.Supported()).Should(Equal([]string{"linux/arm64"}))
+		Expect(result.Unsupported()).Should(BeEmpty())
+	})
+
+	When("a requested platform is undeclared", func() {
+		It("does not fail preflight and reports it as unsupported", func() {
+			fake := &fakeCluster{
+				server: "https://api.example",
+				scheduling: SchedulingResult{
+					Checks: []CheckResult{{Name: "multi-platform-controller", Passed: true}},
+					Platforms: []PlatformSupport{
+						{Platform: "linux/amd64", Configured: true, Supported: true, Details: "platform is configured via dynamic host scheduling"},
+						{Platform: "linux/arm64", Details: "platform is not configured in host-config"},
+					},
+				},
+			}
+			result, err := RunPreflight(context.Background(), fake, PreflightSpec{
+				ExpectedServer: "https://api.example",
+				Scheduling:     SchedulingSpec{Namespace: "multi-platform-controller", Platforms: []string{"linux/amd64", "linux/arm64"}},
+			})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(result.Supported()).Should(Equal([]string{"linux/amd64"}))
+			Expect(result.Unsupported()).Should(Equal([]string{"linux/arm64"}))
+		})
+	})
+
+	When("a platform is declared but unusable", func() {
+		It("fails preflight for an incomplete static host", func() {
+			fake := &fakeCluster{
+				server: "https://api.example",
+				scheduling: SchedulingResult{
+					Checks:    []CheckResult{{Name: "multi-platform-controller", Passed: true}},
+					Platforms: []PlatformSupport{{Platform: "linux/s390x", Configured: true, Details: "no usable static host for linux/s390x: s390x-dev (missing user, secret)"}},
+				},
+			}
+			result, err := RunPreflight(context.Background(), fake, PreflightSpec{
+				ExpectedServer: "https://api.example",
+				Scheduling:     SchedulingSpec{Namespace: "multi-platform-controller", Platforms: []string{"linux/s390x"}},
+			})
+			Expect(err).Should(HaveOccurred())
+			Expect(err.Error()).Should(ContainSubstring("no usable static host"))
+			Expect(result.Unsupported()).Should(BeEmpty())
+		})
+	})
+
+	When("every requested platform is undeclared", func() {
+		It("fails with a message naming the selection", func() {
+			fake := &fakeCluster{
+				server: "https://api.example",
+				scheduling: SchedulingResult{
+					Checks: []CheckResult{{Name: "multi-platform-controller", Passed: true}},
+					Platforms: []PlatformSupport{
+						{Platform: "linux/arm64", Details: "platform is not configured in host-config"},
+						{Platform: "linux/s390x", Details: "platform is not configured in host-config"},
+					},
+				},
+			}
+			result, err := RunPreflight(context.Background(), fake, PreflightSpec{
+				ExpectedServer: "https://api.example",
+				Scheduling:     SchedulingSpec{Namespace: "multi-platform-controller", Platforms: []string{"linux/arm64", "linux/s390x"}},
+			})
+			Expect(err).Should(HaveOccurred())
+			Expect(err.Error()).Should(ContainSubstring("cluster does not support any requested platform linux/arm64, linux/s390x"))
+			Expect(result.Unsupported()).Should(Equal([]string{"linux/arm64", "linux/s390x"}))
+		})
 	})
 })
 
