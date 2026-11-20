@@ -11,6 +11,8 @@ import (
 	"golang.org/x/term"
 )
 
+// ConfirmationPrompt asks for approval over In and Out. Interactive enables
+// prompting; when it is false, Confirm refuses without writing to Out.
 type ConfirmationPrompt struct {
 	In          io.Reader
 	Out         io.Writer
@@ -32,7 +34,11 @@ func stdinIsTerminal() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
-// Confirm requests approval and accepts only an explicit y or yes response.
+// Confirm writes message followed by a [y/N] suffix and accepts only y, yes, Y,
+// or YES. It reports the context error if ctx is already done, and a failed
+// prompt write is returned as an error. A non-interactive prompt, a nil In, an
+// empty response, or a read error reports false with no error; a cancellation
+// during the read does not interrupt it.
 func (p ConfirmationPrompt) Confirm(ctx context.Context, message string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err

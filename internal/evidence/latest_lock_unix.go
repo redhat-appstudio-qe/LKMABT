@@ -11,9 +11,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// acquireLatestUpdateLock obtains an exclusive cross-process lock that
-// serializes aggregate latest use, and returns its release function. It fails
-// with ErrLatestLocked instead of waiting when another process holds the lock.
+// acquireLatestUpdateLock obtains an exclusive cross-process flock on
+// <root>/.latest.lock and returns its release function. The lock file is
+// created when absent, opened without following symlinks, and must be a regular
+// file. It fails with ErrLatestLocked instead of waiting when another process
+// holds the lock.
 func acquireLatestUpdateLock(root string) (func(), error) {
 	lockPath := filepath.Join(root, ".latest.lock")
 	fd, err := unix.Open(lockPath, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)

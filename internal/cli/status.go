@@ -11,19 +11,24 @@ import (
 	"golang.org/x/term"
 )
 
-// spinnerFrames is the braille animation kind uses for its loading spinner.
+// spinnerFrames holds the braille frames cycled by the live region.
 var spinnerFrames = []string{
 	"⠈⠁", "⠈⠑", "⠈⠱", "⠈⡱", "⢀⡱", "⢄⡱", "⢄⡱", "⢆⡱",
 	"⢎⡱", "⢎⡰", "⢎⡠", "⢎⡀", "⢎⠁", "⠎⠁", "⠊⠁",
 }
 
-// spinnerLineFormat draws one frame and its step description. Wrapping is
-// disabled around the whole live block so a long line cannot create stale rows.
+// spinnerLineFormat draws one frame and its step description. The live block is
+// drawn with terminal autowrap disabled, and lines are clipped when the terminal
+// width is known, so a long line cannot wrap into an extra row that later
+// erasing would miss.
 const spinnerLineFormat = "%s %s"
 
 // Step is one status line that starts as an animated spinner and is replaced by
-// a success or failure marker when it ends. Detail may be updated while the
-// step is running to show a heartbeat without adding a new line.
+// a success or failure marker when it ends. Detail may be updated while the step
+// runs: animated mode redraws the live row, while plain mode prints one line per
+// update. Steps are created by Console.StartStep and serialize through their
+// console, so Update and End are safe to call from concurrent goroutines and are
+// no-ops after End.
 type Step struct {
 	console     *Console
 	description string
@@ -33,7 +38,12 @@ type Step struct {
 }
 
 // Update replaces the step's detail and redraws the live region. In plain mode
-// it prints one progress line, prefixed with the provider in a both run.
+// it prints one progress line, prefixed with the provider label in a
+// multi-provider run. In animated mode text wider than the terminal is written
+// as a durable line above the live region while the live row keeps a clipped
+// copy. Updates while a prompt owns the terminal are dropped: run.log keeps the
+// full history, and in animated mode the live region redraws the latest detail
+// when the prompt completes.
 func (s *Step) Update(detail string) {
 	if s == nil || s.console == nil {
 		return
@@ -45,33 +55,31 @@ func (s *Step) Update(detail string) {
 		return
 	}
 	s.detail = normalizeDetail(detail)
-	full := s.description
-	if s.detail != "" {
-		full += " · " + s.detail
+	// Heartbeats are transient: run.log already keeps the full history, so
+	// replaying them after a prompt would duplicate stale progress. The live
+	// region redraws the latest detail once the prompt completes.
+	if c.promptActive {
+		return
 	}
 	if !c.animate {
 		line := s.plainDetail()
 		if line == "" {
 			return
 		}
-		if c.promptActive {
-			fmt.Fprintln(&c.pending, line)
-		} else {
-			fmt.Fprintln(c.Out, line)
-		}
+		fmt.Fprintln(c.Out, line)
 		return
 	}
+	full := s.description
+	if s.detail != "" {
+		full += " · " + s.detail
+	}
 	if limit := c.renderWidth(); limit > 0 && displayWidth(full) > limit {
-		if c.promptActive {
-			fmt.Fprintln(&c.pending, full)
-			return
-		}
 		c.writePermanentLocked(1, func() {
 			fmt.Fprintln(c.Out, full)
 		})
 		return
 	}
-	if c.spinning && !c.promptActive && !c.suspended {
+	if c.spinning && !c.suspended {
 		c.drawLiveLocked()
 	}
 }
@@ -81,8 +89,9 @@ func normalizeDetail(detail string) string {
 	return strings.Join(strings.Fields(detail), " ")
 }
 
-// End completes the step and replaces its live line with a result marker. It is
-// safe to call more than once and on a nil step.
+// End removes the step from the live region and replaces its line with a result
+// marker. It is idempotent and safe to call on a nil step. While a prompt owns
+// the terminal the marker is buffered.
 func (s *Step) End(success bool) {
 	if s == nil || s.console == nil {
 		return
@@ -121,7 +130,8 @@ func (s *Step) End(success bool) {
 }
 
 // render returns the live line text, including the current detail, clipped to
-// the terminal width so disabled wrapping cannot drop the tail silently.
+// the terminal width. Clipping marks the cut with an ellipsis so text beyond the
+// live row is visibly truncated rather than silently lost.
 func (s *Step) render() string {
 	line := s.description
 	if s.detail != "" {
@@ -133,7 +143,8 @@ func (s *Step) render() string {
 	return truncateLine(line, s.console.renderWidth())
 }
 
-// renderWidth returns the cells available after the spinner frame and space.
+// renderWidth returns the cells available after the spinner frame and space, or
+// 0 when the terminal width is unknown or too narrow to render.
 func (c *Console) renderWidth() int {
 	if c.width <= 3 {
 		return 0
@@ -141,7 +152,9 @@ func (c *Console) renderWidth() int {
 	return c.width - 3
 }
 
-// displayWidth estimates terminal cells, treating emoji as double-width.
+// displayWidth estimates terminal cells, treating emoji and symbol ranges as
+// double-width and zero-width joiners, variation selectors, and combining marks
+// as zero.
 func displayWidth(line string) int {
 	width := 0
 	for _, r := range line {
@@ -150,7 +163,8 @@ func displayWidth(line string) int {
 	return width
 }
 
-// truncateLine clips line to width cells and appends an ellipsis.
+// truncateLine clips line to width cells and appends an ellipsis. A width of 0
+// or less disables clipping; a width of 1 yields only the ellipsis.
 func truncateLine(line string, width int) string {
 	if width <= 0 || displayWidth(line) <= width {
 		return line
@@ -184,7 +198,8 @@ func runeWidth(r rune) int {
 	}
 }
 
-// plainDetail returns the provider-prefixed heartbeat line for non-TTY output.
+// plainDetail returns the provider-prefixed heartbeat line for non-TTY output,
+// or the empty string when the step has no detail.
 func (s *Step) plainDetail() string {
 	if s.detail == "" {
 		return ""
@@ -222,7 +237,8 @@ func smartTerminal(w io.Writer) bool {
 	return term.IsTerminal(int(file.Fd()))
 }
 
-// terminalWidth returns w's column count, or 0 when it is not a terminal.
+// terminalWidth returns w's column count, or 0 when it is not a terminal or its
+// size cannot be read.
 func terminalWidth(w io.Writer) int {
 	file, ok := w.(*os.File)
 	if !ok || !term.IsTerminal(int(file.Fd())) {
@@ -266,7 +282,8 @@ func phaseDescription(phase model.Phase, provider string) string {
 }
 
 // phaseObserver turns workflow phase transitions and progress into console
-// steps.
+// steps. The workflow runner calls start and end in pairs; a start before the
+// previous end would leave the earlier step in the live region.
 type phaseObserver struct {
 	console  *Console
 	provider string

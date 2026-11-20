@@ -10,11 +10,12 @@ import (
 // twoRowDocument builds the standard two-row markdown fixture.
 func twoRowDocument() Document {
 	return Document{
-		RunID:        "run-1",
-		ClustersFile: ".lkmabt-clusters.yaml",
-		StartedAt:    time.Date(2026, 10, 8, 10, 0, 0, 0, time.UTC),
-		EndedAt:      time.Date(2026, 10, 8, 10, 5, 0, 0, time.UTC),
-		Passed:       false,
+		RunID:         "run-1",
+		ClustersFile:  ".lkmabt-clusters.yaml",
+		Architectures: []string{"linux/amd64", "linux/arm64"},
+		StartedAt:     time.Date(2026, 10, 8, 10, 0, 0, 0, time.UTC),
+		EndedAt:       time.Date(2026, 10, 8, 10, 5, 0, 0, time.UTC),
+		Passed:        false,
 		Rows: []Row{
 			{Cluster: "c1", Provider: "github", Passed: true, Stage: "completed", Links: []Link{{Label: "aggregate run.log", Target: "./run.log"}}},
 			{Cluster: "c2", Provider: "gitlab", Passed: false, Stage: "authentication",
@@ -31,6 +32,7 @@ var _ = Describe("RenderMarkdown", func() {
 			Expect(rendered).Should(ContainSubstring("- Started: 2026-10-08T10:00:00Z"))
 			Expect(rendered).Should(ContainSubstring("- Ended: 2026-10-08T10:05:00Z"))
 			Expect(rendered).Should(ContainSubstring("- Clusters file: `.lkmabt-clusters.yaml`"))
+			Expect(rendered).Should(ContainSubstring("- Architectures: linux/amd64, linux/arm64"))
 			Expect(rendered).Should(ContainSubstring("- Result: **failed**"))
 		})
 

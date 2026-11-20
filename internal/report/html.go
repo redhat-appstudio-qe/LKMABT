@@ -9,7 +9,8 @@ import (
 // htmlTemplate parses once at startup; malformed template text is a programming error.
 var htmlTemplate = template.Must(template.New("report").Parse(htmlTemplateText))
 
-// htmlTemplateText is the self-contained report document; html/template escapes every value and href.
+// htmlTemplateText is the self-contained report document; html/template escapes
+// every value and link target.
 const htmlTemplateText = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -29,6 +30,7 @@ th,td{border:1px solid #999;padding:0.4rem;text-align:left;vertical-align:top}
 <li>Started: {{.StartedAtText}}</li>
 <li>Ended: {{.EndedAtText}}</li>
 <li>Clusters file: <code>{{.ClustersFile}}</code></li>
+<li>Architectures: {{.ArchitecturesText}}</li>
 <li>Result: <span class="{{.Result}}">{{.Result}}</span></li>
 </ul>
 <table>
@@ -48,7 +50,10 @@ th,td{border:1px solid #999;padding:0.4rem;text-align:left;vertical-align:top}
 </html>
 `
 
-// RenderHTML renders the aggregate report as one self-contained HTML document.
+// RenderHTML renders the aggregate report as one self-contained HTML document
+// with no scripts or external assets. html/template escapes every value and
+// link target, so markup in report data stays inert. The only expected error is
+// a template execution failure.
 func RenderHTML(document Document) (string, error) {
 	builder := &strings.Builder{}
 	if err := htmlTemplate.Execute(builder, document); err != nil {

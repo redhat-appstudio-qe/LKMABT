@@ -17,7 +17,15 @@ import (
 const defaultFrameInterval = 100 * time.Millisecond
 
 // Console serializes status output, animated steps, and interactive prompts
-// across concurrent provider runs.
+// across concurrent provider runs. Out receives terminal output and Prompt asks
+// the operator for confirmation.
+//
+// One writer lock orders every terminal write. In animated mode the live region
+// is erased before a durable line is written and redrawn below it, so durable
+// output and live rows never overwrite each other; writePermanentLocked is the
+// usual path. A separate prompt lock guarantees at most one confirmation owns the
+// terminal and buffers durable output until the prompt completes; Suspend pauses
+// the animation but does not buffer.
 type Console struct {
 	outMu    sync.Mutex
 	promptMu sync.Mutex
@@ -30,9 +38,11 @@ type Console struct {
 
 	promptActive bool
 	suspended    bool
-	pending      bytes.Buffer
-	partial      []byte
-	width        int
+	// pending holds durable lines buffered while a prompt owns the terminal.
+	// Transient heartbeats are never buffered.
+	pending bytes.Buffer
+	partial []byte
+	width   int
 
 	active        []*Step
 	frame         int
@@ -44,7 +54,8 @@ type Console struct {
 }
 
 // NewConsole returns a console bound to standard output and the interactive
-// confirmation prompt. Steps animate only when standard output is a terminal.
+// confirmation prompt. Steps animate only when standard output is a terminal,
+// and color is used only in that animated mode and when NO_COLOR is unset.
 func NewConsole() *Console {
 	prompt := NewInteractiveConfirmationPrompt()
 	animate := smartTerminal(os.Stdout)
@@ -63,8 +74,25 @@ func (c *Console) Interactive() bool {
 	return c != nil && c.interactive
 }
 
+// Close releases the live region when the run ends. Buffered and partial output
+// is dropped and the animation goroutine is stopped so a canceled or failed run
+// never replays stale progress after the run summary. It is safe to call on a
+// nil console.
+func (c *Console) Close() {
+	if c == nil {
+		return
+	}
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	c.partial = nil
+	c.pending.Reset()
+	c.eraseLiveLocked()
+	c.haltSpinnerLocked()
+}
+
 // Printf writes one serialized status line. Running steps are cleared and
-// redrawn below the line.
+// redrawn below the line. While a prompt owns the terminal the line is buffered
+// and flushed after the prompt completes.
 func (c *Console) Printf(format string, args ...any) {
 	if c == nil || c.Out == nil {
 		return
@@ -81,7 +109,10 @@ func (c *Console) Printf(format string, args ...any) {
 	})
 }
 
-// Write serializes progress output from concurrent provider stages.
+// Write serializes progress output from concurrent provider stages. Only
+// complete lines reach the terminal; a trailing unterminated fragment is held
+// until more data completes it, emitted by Suspend, or dropped by Close. While a
+// prompt owns the terminal, output is buffered instead. It satisfies io.Writer.
 func (c *Console) Write(p []byte) (int, error) {
 	if c == nil || c.Out == nil {
 		return len(p), nil
@@ -108,8 +139,10 @@ func (c *Console) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// StartStep begins one status step. In a terminal it draws an animated spinner;
-// otherwise it emits a plain start line and no animation.
+// StartStep begins one status step and returns nil on a nil console. In a
+// terminal it draws an animated spinner; otherwise it emits a plain start line
+// and no animation. While animated, a prompt or suspension defers drawing the
+// step until output resumes.
 func (c *Console) StartStep(description string) *Step {
 	return c.startStep("", description)
 }
@@ -144,7 +177,8 @@ func (c *Console) startStep(provider, description string) *Step {
 }
 
 // Result writes a completed step line without an animated start. It is used for
-// work that already finished, such as per-cluster authentication failures.
+// work that already finished, such as per-cluster authentication failures, and
+// is buffered while a prompt owns the terminal.
 func (c *Console) Result(success bool, description string) {
 	if c == nil || c.Out == nil {
 		return
@@ -165,8 +199,10 @@ func (c *Console) Result(success bool, description string) {
 }
 
 // Suspend hides the live region while an external command writes directly to the
-// terminal, such as a browser or device login. The returned function restores
-// progress output when the command returns.
+// terminal, such as a browser or device login. It completes any partial line and
+// stops animation; concurrent progress still reaches the terminal but no live
+// rows are drawn. The returned function restores the live region when the
+// external command returns and is a no-op on a nil console.
 func (c *Console) Suspend() func() {
 	if c == nil {
 		return func() {}
@@ -190,8 +226,9 @@ func (c *Console) Suspend() func() {
 	}
 }
 
-// Confirm serializes prompts and buffers progress output until the prompt
-// completes.
+// Confirm serializes prompts and buffers durable status lines until the prompt
+// completes; heartbeat updates are dropped instead. It returns an error when no
+// confirmation prompt is configured.
 func (c *Console) Confirm(ctx context.Context, message string) (bool, error) {
 	if c == nil || c.Prompt == nil {
 		return false, fmt.Errorf("interactive confirmation is not configured")
@@ -199,8 +236,8 @@ func (c *Console) Confirm(ctx context.Context, message string) (bool, error) {
 	return c.confirm(ctx, c.Prompt, message)
 }
 
-// confirm runs prompt while the live region is cleared and concurrent progress
-// is buffered until the prompt completes.
+// confirm runs prompt while the live region is cleared. Durable output is
+// buffered until the prompt completes and the live region is redrawn afterwards.
 func (c *Console) confirm(ctx context.Context, prompt workflow.Confirmation, message string) (bool, error) {
 	if c == nil || prompt == nil {
 		return false, fmt.Errorf("interactive confirmation is not configured")
@@ -241,8 +278,10 @@ func (c *Console) confirm(ctx context.Context, prompt workflow.Confirmation, mes
 	return approved, err
 }
 
-// writePermanentLocked clears the live region, writes durable output, and
-// redraws the remaining steps. Callers hold outMu.
+// writePermanentLocked completes any buffered partial line, clears the live
+// region, writes durable output, and redraws the remaining steps. lines is the
+// number of terminal rows write occupies, used to clear rows the shrunken live
+// region leaves behind. Callers hold outMu.
 func (c *Console) writePermanentLocked(lines int, write func()) {
 	if len(c.partial) > 0 {
 		partial := append([]byte(nil), c.partial...)
@@ -279,7 +318,8 @@ func (c *Console) flushPartialLocked() {
 	})
 }
 
-// permanentLines counts the terminal lines a write occupies.
+// permanentLines counts the terminal rows p occupies, treating a final
+// unterminated fragment as one row.
 func permanentLines(p []byte) int {
 	if len(p) == 0 {
 		return 0
@@ -292,7 +332,8 @@ func permanentLines(p []byte) int {
 }
 
 // clearBelowLocked clears lines left below the live region after it shrinks and
-// restores the cursor to the end of the visible block. Callers hold outMu.
+// restores the cursor to the end of the visible block. Non-positive counts do
+// nothing. Callers hold outMu.
 func (c *Console) clearBelowLocked(lines int) {
 	if lines <= 0 {
 		return
@@ -303,8 +344,10 @@ func (c *Console) clearBelowLocked(lines int) {
 	fmt.Fprintf(c.Out, "\x1b[%dA", lines)
 }
 
-// startSpinnerLocked starts the frame goroutine when animation is available.
-// Callers hold outMu.
+// startSpinnerLocked starts the frame goroutine when animation is available:
+// the console animates, is not suspended, and at least one step is active.
+// Callers must not start it while a prompt owns the terminal. The goroutine
+// redraws the live region every frame interval under outMu. Callers hold outMu.
 func (c *Console) startSpinnerLocked() {
 	if !c.animate || c.spinning || c.suspended || len(c.active) == 0 || c.Out == nil {
 		return
@@ -334,8 +377,8 @@ func (c *Console) startSpinnerLocked() {
 	}()
 }
 
-// haltSpinnerLocked stops the frame goroutine. The live region is left for the
-// caller to clear. Callers hold outMu.
+// haltSpinnerLocked stops the frame goroutine. The live region is left on screen
+// for the caller to clear. Callers hold outMu.
 func (c *Console) haltSpinnerLocked() {
 	if !c.spinning {
 		return
@@ -345,8 +388,12 @@ func (c *Console) haltSpinnerLocked() {
 	c.frameDone = nil
 }
 
-// drawLiveLocked renders every active step, one line per step, and leaves the
-// cursor on the line after the block. Callers hold outMu.
+// drawLiveLocked advances the animation frame and renders every active step,
+// one line per step, leaving the cursor on the line after the block. It is a
+// no-op unless the spinner runs, a step is active, and no prompt or suspension
+// is active. Autowrap is disabled for the whole block so a line wider than the
+// terminal cannot consume an extra row that later erasing would miss. Callers
+// hold outMu.
 func (c *Console) drawLiveLocked() {
 	if !c.spinning || len(c.active) == 0 || c.promptActive || c.suspended {
 		return
@@ -381,7 +428,8 @@ func (c *Console) drawLiveLocked() {
 }
 
 // eraseLiveLocked clears the live region, leaves the cursor at its first line,
-// and returns the number of cleared lines. Callers hold outMu.
+// and returns the number of cleared lines. It assumes the cursor sits on the line
+// after the block, where drawLiveLocked leaves it. Callers hold outMu.
 func (c *Console) eraseLiveLocked() int {
 	erased := c.renderedLines
 	if erased == 0 {

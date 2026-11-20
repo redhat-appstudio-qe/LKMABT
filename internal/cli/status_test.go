@@ -157,10 +157,10 @@ var _ = Describe("Console steps", func() {
 			step.End(true)
 		})
 
-		It("should buffer an overlong heartbeat while a prompt is open", func() {
+		It("should not replay overlong heartbeat history after a prompt", func() {
 			prompt := &countingPrompt{approved: true, entered: make(chan struct{}), release: make(chan struct{})}
 			out := &bytes.Buffer{}
-			console := &Console{Out: out, Prompt: prompt, animate: true, width: 40, frameInterval: time.Hour}
+			console := &Console{Out: out, Prompt: prompt, animate: true, width: 60, frameInterval: time.Hour}
 			step := console.StartStep("Verify builds (github) 🏗️")
 
 			confirmDone := make(chan struct{})
@@ -170,13 +170,22 @@ var _ = Describe("Console steps", func() {
 			}()
 			<-prompt.entered
 
-			detail := strings.TrimSpace(strings.Repeat("web: buildah 0/2; ", 6))
-			step.Update(detail)
-			Expect(out.String()).ShouldNot(ContainSubstring(detail))
+			padding := strings.TrimSpace(strings.Repeat("web: buildah 0/2; ", 6))
+			for attempt := range 4 {
+				step.Update(fmt.Sprintf("attempt-%d %s", attempt, padding))
+			}
+			Expect(out.String()).ShouldNot(ContainSubstring("attempt-"))
 
 			close(prompt.release)
 			Eventually(confirmDone).Should(BeClosed())
-			Expect(out.String()).Should(ContainSubstring(detail))
+
+			text := out.String()
+			for _, stale := range []string{"attempt-0", "attempt-1", "attempt-2"} {
+				Expect(text).ShouldNot(ContainSubstring(stale))
+			}
+			Expect(strings.Count(text, "attempt-")).Should(Equal(1))
+			Expect(text).Should(ContainSubstring("attempt-3"))
+
 			step.End(true)
 		})
 
@@ -287,6 +296,67 @@ var _ = Describe("Console steps", func() {
 			close(prompt.release)
 			Eventually(confirmDone).Should(BeClosed())
 			Expect(out.String()).Should(ContainSubstring("✓ Preflight cluster (gitlab) 🔍"))
+		})
+
+		It("should not replay plain heartbeats after the prompt", func() {
+			prompt := &countingPrompt{approved: true, entered: make(chan struct{}), release: make(chan struct{})}
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, Prompt: prompt}
+			step := console.StartStep("Verify builds (github) 🏗️")
+
+			confirmDone := make(chan struct{})
+			go func() {
+				defer close(confirmDone)
+				_, _ = console.Confirm(context.Background(), "delete tenant")
+			}()
+			<-prompt.entered
+
+			for attempt := range 3 {
+				step.Update(fmt.Sprintf("attempt-%d", attempt))
+			}
+			console.Printf("durable line")
+			Expect(out.String()).ShouldNot(ContainSubstring("attempt-"))
+			Expect(out.String()).ShouldNot(ContainSubstring("durable line"))
+
+			close(prompt.release)
+			Eventually(confirmDone).Should(BeClosed())
+
+			text := out.String()
+			Expect(text).ShouldNot(ContainSubstring("attempt-"))
+			Expect(text).Should(ContainSubstring("durable line\n"))
+			step.End(true)
+		})
+
+		It("should drop heartbeats when a canceled prompt releases", func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			prompt := &cancelingPrompt{entered: make(chan struct{}), release: make(chan struct{})}
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, Prompt: prompt}
+			step := console.StartStep("Prepare fixture (github) 🧰")
+
+			confirmDone := make(chan struct{})
+			go func() {
+				defer close(confirmDone)
+				_, _ = console.Confirm(ctx, "delete tenant")
+			}()
+			<-prompt.entered
+
+			for attempt := range 3 {
+				step.Update(fmt.Sprintf("attempt-%d", attempt))
+			}
+			console.Printf("durable line")
+			Expect(out.String()).ShouldNot(ContainSubstring("attempt-"))
+
+			cancel()
+			close(prompt.release)
+			Eventually(confirmDone).Should(BeClosed())
+
+			step.End(false)
+
+			text := out.String()
+			Expect(text).ShouldNot(ContainSubstring("attempt-"))
+			Expect(text).Should(ContainSubstring("durable line\n"))
+			Expect(strings.Count(text, "✗ Prepare fixture (github) 🧰")).Should(Equal(1))
 		})
 	})
 

@@ -16,16 +16,18 @@ import (
 )
 
 type fakeClient struct {
-	project          *gl.Project
-	getProjectErrors []error
-	updateErrors     []error
-	headCommits      []*gl.Commit
-	headErrors       []error
-	getCalls         int
-	updateCalls      int
-	headCalls        int
-	revokeCalls      int
-	revokeErrors     []error
+	project           *gl.Project
+	getProjectErrors  []error
+	updateErrors      []error
+	headCommits       []*gl.Commit
+	headErrors        []error
+	getCalls          int
+	updateCalls       int
+	updateMessage     string
+	updateExpectedSHA string
+	headCalls         int
+	revokeCalls       int
+	revokeErrors      []error
 }
 
 // GetProject returns the configured fake project or the next queued error.
@@ -44,7 +46,7 @@ func (f *fakeClient) GetProject(string) (*gl.Project, error) {
 
 // GetFileMetaData returns fixed file metadata for provider tests.
 func (f *fakeClient) GetFileMetaData(string, string, string) (*gl.File, error) {
-	return &gl.File{CommitID: "sha-1"}, nil
+	return &gl.File{CommitID: "head-1", LastCommitID: "sha-1"}, nil
 }
 
 // GetFile returns base64-encoded file content for provider tests.
@@ -53,8 +55,10 @@ func (f *fakeClient) GetFile(string, string, string) (string, error) {
 }
 
 // UpdateFile returns the update's error or nil for provider tests.
-func (f *fakeClient) UpdateFile(string, string, string, string, string, string) error {
+func (f *fakeClient) UpdateFile(_ string, _ string, _ string, _ string, expectedSHA, message string) error {
 	f.updateCalls++
+	f.updateMessage = message
+	f.updateExpectedSHA = expectedSHA
 	if len(f.updateErrors) > 0 {
 		err := f.updateErrors[0]
 		f.updateErrors = f.updateErrors[1:]
@@ -163,9 +167,11 @@ var _ = Describe("GitLab provider", func() {
 		Expect(err).ShouldNot(HaveOccurred())
 		Expect(file.SHA).Should(Equal("sha-1"))
 		Expect(file.Content).Should(Equal("FROM base\n"))
-		_, err = adapter.UpdateFile(context.Background(), fixture, "web-server/Dockerfile", "main", "content", "sha-1")
+		_, err = adapter.UpdateFile(context.Background(), fixture, "web-server/Dockerfile", "main", "content", "sha-1", providers.CommitMessageTrigger)
 		Expect(err).ShouldNot(HaveOccurred())
 		Expect(client.updateCalls).Should(Equal(1))
+		Expect(client.updateMessage).Should(Equal(providers.CommitMessageTrigger))
+		Expect(client.updateExpectedSHA).Should(Equal("sha-1"))
 	})
 
 	It("retries file updates after a 5xx response", func() {
@@ -176,7 +182,7 @@ var _ = Describe("GitLab provider", func() {
 		adapter := NewWithRetry(client, providers.RetryPolicy{MaxRetries: 3, Sleep: func(context.Context, time.Duration) error { return nil }})
 		fixture := providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl", URL: CanonicalFixtureURL}
 
-		_, err := adapter.UpdateFile(context.Background(), fixture, "web-server/Dockerfile", "main", "content", "sha-1")
+		_, err := adapter.UpdateFile(context.Background(), fixture, "web-server/Dockerfile", "main", "content", "sha-1", providers.CommitMessageTrigger)
 		Expect(err).ShouldNot(HaveOccurred())
 		Expect(client.updateCalls).Should(Equal(2))
 	})

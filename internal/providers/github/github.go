@@ -1,3 +1,6 @@
+// Package github implements the providers.Provider contract against the GitHub
+// REST API, including GitHub App installation checks and the credential
+// capability probes used before a run.
 package github
 
 import (
@@ -15,6 +18,8 @@ import (
 )
 
 const (
+	// CanonicalFixtureURL is the repository ValidateFixture accepts; every other
+	// fixture is rejected.
 	CanonicalFixtureURL = "https://github.com/redhat-appstudio-qe/dr_test_mathwizz"
 	canonicalOwner      = "redhat-appstudio-qe"
 	canonicalName       = "dr_test_mathwizz"
@@ -26,7 +31,7 @@ type client interface {
 	// GetFile reads a repository path at the requested branch.
 	GetFile(context.Context, string, string, string, string) (*gh.RepositoryContent, error)
 	// UpdateFile commits replacement content using the current file SHA.
-	UpdateFile(context.Context, string, string, string, string, string, string) (*gh.RepositoryContentResponse, error)
+	UpdateFile(context.Context, string, string, string, string, string, string, string) (*gh.RepositoryContentResponse, error)
 	// ListOrganizationInstallations lists the GitHub App installations for an organization.
 	ListOrganizationInstallations(context.Context, string) ([]*gh.Installation, error)
 	// ListUserInstallationRepositories lists the repositories the token can see for an installation.
@@ -41,7 +46,8 @@ func (c apiClient) GetRepository(ctx context.Context, owner, name string) (*gh.R
 	return repository, err
 }
 
-// GetFile fetches a file from the requested GitHub repository branch.
+// GetFile fetches a file from the requested GitHub repository branch. It returns
+// an error when path resolves to a directory.
 func (c apiClient) GetFile(ctx context.Context, owner, name, path, branch string) (*gh.RepositoryContent, error) {
 	file, _, _, err := c.client.Repositories.GetContents(ctx, owner, name, path, &gh.RepositoryContentGetOptions{Ref: branch})
 	if err != nil {
@@ -54,8 +60,9 @@ func (c apiClient) GetFile(ctx context.Context, owner, name, path, branch string
 }
 
 // UpdateFile commits content to a GitHub repository using the supplied file SHA.
-func (c apiClient) UpdateFile(ctx context.Context, owner, name, path, content, branch, sha string) (*gh.RepositoryContentResponse, error) {
-	message := "lkmabt trigger"
+// GitHub rejects the commit when the SHA no longer matches the file's current
+// version.
+func (c apiClient) UpdateFile(ctx context.Context, owner, name, path, content, branch, sha, message string) (*gh.RepositoryContentResponse, error) {
 	response, _, err := c.client.Repositories.UpdateFile(ctx, owner, name, path, &gh.RepositoryContentFileOptions{Message: &message, Content: []byte(content), Branch: &branch, SHA: &sha})
 	return response, err
 }
@@ -98,6 +105,8 @@ func (c apiClient) ListUserInstallationRepositories(ctx context.Context, id int6
 	}
 }
 
+// Adapter implements the fixture repository contract against GitHub using the
+// supplied API client and retry policy.
 type Adapter struct {
 	client client
 	retry  providers.RetryPolicy
@@ -111,7 +120,8 @@ func New(client client) *Adapter {
 	return NewWithRetry(client, providers.DefaultRetryPolicy())
 }
 
-// NewWithRetry creates a GitHub adapter with the supplied retry policy.
+// NewWithRetry creates a GitHub adapter with the supplied retry policy. A zero
+// policy retries nothing.
 func NewWithRetry(client client, retry providers.RetryPolicy) *Adapter {
 	return &Adapter{client: client, retry: retry}
 }
@@ -119,7 +129,11 @@ func NewWithRetry(client client, retry providers.RetryPolicy) *Adapter {
 // NewFromEnv creates a GitHub adapter using GITHUB_TOKEN.
 func NewFromEnv() (*Adapter, error) { return NewFromCredentials(os.Getenv("GITHUB_TOKEN")) }
 
-// NewFromCredentials validates a token and creates an authenticated GitHub adapter.
+// NewFromCredentials checks that token is non-empty and creates a GitHub adapter
+// for it. It makes no API request, so credential capability is established by
+// CheckOrganizationAccess, CheckFixtureWriteAccess, and
+// CheckInstallationRepositoryAccess. Tokens with the gho_ prefix are recorded as
+// gh OAuth user tokens, for which installation repository listing is skipped.
 func NewFromCredentials(token string) (*Adapter, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("GITHUB_TOKEN is required")
@@ -129,7 +143,10 @@ func NewFromCredentials(token string) (*Adapter, error) {
 	return adapter, nil
 }
 
-// ValidateFixture confirms the repository is the canonical GitHub test fixture.
+// ValidateFixture checks that fixture names the canonical GitHub fixture, fetches
+// it, and returns the canonical identity. fixture.URL may be empty, but when set
+// it must equal CanonicalFixtureURL. 5xx responses are retried; other read
+// errors are returned wrapped.
 func (a *Adapter) ValidateFixture(ctx context.Context, fixture providers.FixtureRepository) (providers.FixtureRepository, error) {
 	if a == nil || a.client == nil {
 		return providers.FixtureRepository{}, fmt.Errorf("github client is required")
@@ -165,7 +182,9 @@ func (a *Adapter) listInstallations(ctx context.Context) ([]*gh.Installation, er
 	return installations, nil
 }
 
-// CheckOrganizationAccess confirms the token can list App installations for the fixture organization.
+// CheckOrganizationAccess confirms the token can list App installations for the
+// fixture organization. A rejected credential is reported as
+// ErrInsufficientGitHubAccess; other failures are returned wrapped.
 func (a *Adapter) CheckOrganizationAccess(ctx context.Context) error {
 	if a == nil || a.client == nil {
 		return fmt.Errorf("github client is required")
@@ -177,7 +196,11 @@ func (a *Adapter) CheckOrganizationAccess(ctx context.Context) error {
 // CheckInstallationRepositoryAccess confirms the token can list the repositories
 // of every selected-repository App installation in the fixture organization. The
 // cluster app slug is unknown at acquisition, so it checks every such
-// installation without requiring the fixture in any of them.
+// installation without requiring the fixture in any of them. Suspended
+// installations and installations selecting all repositories are skipped, as is
+// the whole check for gh OAuth user tokens. An installation the token cannot see
+// (404) is ignored; any other rejection is reported as
+// ErrInsufficientGitHubAccess.
 func (a *Adapter) CheckInstallationRepositoryAccess(ctx context.Context) error {
 	if a == nil || a.client == nil {
 		return fmt.Errorf("github client is required")
@@ -214,8 +237,11 @@ func (a *Adapter) CheckInstallationRepositoryAccess(ctx context.Context) error {
 	return nil
 }
 
-// CheckFixtureWriteAccess confirms the token can update the canonical fixture repository,
-// which the run requires before it commits build triggers.
+// CheckFixtureWriteAccess confirms the token can update the canonical fixture
+// repository, which the run requires before it commits build triggers. It reads
+// the repository permissions map and requires push. A rejected credential or a
+// missing push permission is reported as ErrInsufficientGitHubAccess; 5xx
+// responses are retried.
 func (a *Adapter) CheckFixtureWriteAccess(ctx context.Context) error {
 	if a == nil || a.client == nil {
 		return fmt.Errorf("github client is required")
@@ -239,8 +265,9 @@ func (a *Adapter) CheckFixtureWriteAccess(ctx context.Context) error {
 }
 
 // isAccessRejection reports whether err establishes that GitHub rejected the
-// credential itself. Rate limits, 5xx responses, and context errors are
-// transient and never justify replacing the token.
+// credential itself, meaning an HTTP 401, 403, or 404 response. Rate limits, 5xx
+// responses, and context errors are transient and never justify replacing the
+// token.
 func isAccessRejection(err error) bool {
 	var rateLimit *gh.RateLimitError
 	if errors.As(err, &rateLimit) {
@@ -260,7 +287,13 @@ func isAccessRejection(err error) bool {
 	return false
 }
 
-// VerifyGitHubAppInstallation confirms the cluster GitHub App can onboard the canonical fixture repository.
+// VerifyGitHubAppInstallation confirms the cluster GitHub App can onboard the
+// canonical fixture repository. It returns AppInstallationRequiredError when the
+// App is not installed for the organization, AppRepositorySelectionError when a
+// selected-repository installation excludes the fixture, an error for a
+// suspended installation, ErrUnverifiable when selected repositories cannot be
+// listed, and a plain error for API failures. Unlike the fixture reads, this
+// check does not retry 5xx responses.
 func (a *Adapter) VerifyGitHubAppInstallation(ctx context.Context, appSlug string) error {
 	if a == nil || a.client == nil {
 		return fmt.Errorf("github client is required")
@@ -320,7 +353,9 @@ func verifyGitHubAppRepositories(ctx context.Context, client client, installatio
 	}
 }
 
-// ReadFile returns decoded file content and version metadata from GitHub.
+// ReadFile returns decoded file content and version metadata from GitHub. 5xx
+// responses are retried. A failed read is returned unwrapped; a content decoding
+// failure is wrapped.
 func (a *Adapter) ReadFile(ctx context.Context, fixture providers.FixtureRepository, path, branch string) (providers.FileVersion, error) {
 	var file *gh.RepositoryContent
 	err := providers.RetryOn5xx(ctx, a.retry, func() error {
@@ -338,8 +373,11 @@ func (a *Adapter) ReadFile(ctx context.Context, fixture providers.FixtureReposit
 	return providers.FileVersion{Path: path, Branch: branch, Content: content, SHA: file.GetSHA(), URL: file.GetHTMLURL()}, nil
 }
 
-// UpdateFile checks the current SHA, commits replacement content, and returns commit metadata.
-func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepository, path, branch, content, expectedSHA string) (providers.Commit, error) {
+// UpdateFile reads the current file version, rejects a blank or stale
+// expectedSHA, commits content with message, and returns the created commit. The
+// commit call retries 5xx responses with the adapter policy. CreatedAt is local
+// time and URL is the commit's HTML URL.
+func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepository, path, branch, content, expectedSHA, message string) (providers.Commit, error) {
 	current, err := a.ReadFile(ctx, fixture, path, branch)
 	if err != nil {
 		return providers.Commit{}, err
@@ -350,13 +388,13 @@ func (a *Adapter) UpdateFile(ctx context.Context, fixture providers.FixtureRepos
 	var updated *gh.RepositoryContentResponse
 	err = providers.RetryOn5xx(ctx, a.retry, func() error {
 		var err error
-		updated, err = a.client.UpdateFile(ctx, fixture.Owner, fixture.Name, path, content, branch, expectedSHA)
+		updated, err = a.client.UpdateFile(ctx, fixture.Owner, fixture.Name, path, content, branch, expectedSHA, message)
 		return err
 	}, isGitHub5xx)
 	if err != nil {
 		return providers.Commit{}, err
 	}
-	return providers.Commit{SHA: updated.Commit.GetSHA(), URL: updated.Commit.GetHTMLURL(), Message: "lkmabt trigger", CreatedAt: time.Now().UTC()}, nil
+	return providers.Commit{SHA: updated.Commit.GetSHA(), URL: updated.Commit.GetHTMLURL(), Message: message, CreatedAt: time.Now().UTC()}, nil
 }
 
 // isGitHub5xx reports whether err contains an HTTP 5xx GitHub response.

@@ -29,6 +29,17 @@ var _ = Describe("Document.Result", func() {
 	)
 })
 
+var _ = Describe("Document.ArchitecturesText", func() {
+	DescribeTable("should render the tested architectures",
+		func(document Document, want string) {
+			Expect(document.ArchitecturesText()).Should(Equal(want))
+		},
+		Entry("no architectures", Document{}, "none"),
+		Entry("one architecture", Document{Architectures: []string{"linux/arm64"}}, "linux/arm64"),
+		Entry("several architectures", Document{Architectures: []string{"linux/amd64", "linux/s390x"}}, "linux/amd64, linux/s390x"),
+	)
+})
+
 var _ = Describe("StartedAtText", func() {
 	When("the time is in a non-UTC zone", func() {
 		It("should render RFC 3339 in UTC", func() {

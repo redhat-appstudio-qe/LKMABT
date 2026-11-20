@@ -6,6 +6,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 )
 
 var _ = Describe("Parse", func() {
@@ -48,6 +50,79 @@ var _ = Describe("Parse", func() {
 			got, err := Parse([]string{"both"})
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(got.Provider).Should(Equal(ProviderBoth))
+		})
+
+		It("defaults to every supported build platform", func() {
+			GinkgoT().Setenv("GITHUB_TOKEN", "token")
+			got, err := Parse([]string{"github"})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(got.Platforms).Should(Equal([]string{"linux/amd64", "linux/arm64", "linux/s390x", "linux/ppc64le"}))
+		})
+
+		DescribeTable("selects architectures from the second argument",
+			func(architecture string, want []string) {
+				GinkgoT().Setenv("GITHUB_TOKEN", "token")
+				GinkgoT().Setenv("GITLAB_BOT_TOKEN", "token")
+				got, err := Parse([]string{ProviderGitHub, architecture, "--clusters-file", "clusters.yaml"})
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(got.Platforms).Should(Equal(want))
+				Expect(got.ClustersFile).Should(Equal("clusters.yaml"))
+			},
+			Entry("arm64", "arm64", []string{platform.LinuxARM64}),
+			Entry("amd64", "amd64", []string{platform.LinuxAMD64}),
+			Entry("s390x", "s390x", []string{platform.LinuxS390X}),
+			Entry("ppc64le", "ppc64le", []string{platform.LinuxPPC64LE}),
+			Entry("aws", "aws", []string{platform.LinuxAMD64, platform.LinuxARM64}),
+			Entry("ibm", "ibm", []string{platform.LinuxS390X, platform.LinuxPPC64LE}),
+		)
+
+		DescribeTable("combines repeated architecture arguments",
+			func(arguments []string, want []string) {
+				GinkgoT().Setenv("GITHUB_TOKEN", "token")
+				args := append([]string{ProviderGitHub}, arguments...)
+				args = append(args, "--clusters-file", "clusters.yaml")
+				got, err := Parse(args)
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(got.Platforms).Should(Equal(want))
+			},
+			Entry("space separated", []string{"s390x", "arm64"}, []string{platform.LinuxS390X, platform.LinuxARM64}),
+			Entry("comma separated", []string{"s390x,arm64"}, []string{platform.LinuxS390X, platform.LinuxARM64}),
+			Entry("comma followed by a shell-split argument", []string{"s390x,", "arm64"}, []string{platform.LinuxS390X, platform.LinuxARM64}),
+			Entry("duplicates expand once", []string{"s390x", "s390x,arm64"}, []string{platform.LinuxS390X, platform.LinuxARM64}),
+			Entry("groups and architectures mix", []string{"ibm", "arm64"}, []string{platform.LinuxS390X, platform.LinuxPPC64LE, platform.LinuxARM64}),
+		)
+
+		It("rejects an unsupported architecture among several", func() {
+			GinkgoT().Setenv("GITHUB_TOKEN", "token")
+			_, err := Parse([]string{"github", "arm64", "riscv64"})
+			Expect(err).Should(MatchError(ContainSubstring("unsupported architecture")))
+			Expect(err).Should(MatchError(ContainSubstring("riscv64")))
+		})
+
+		DescribeTable("rejects malformed architecture lists",
+			func(arguments []string) {
+				GinkgoT().Setenv("GITHUB_TOKEN", "token")
+				_, err := Parse(append([]string{ProviderGitHub}, arguments...))
+				Expect(err).Should(MatchError(ContainSubstring("contains an empty entry")))
+			},
+			Entry("leading empty entry", []string{",arm64"}),
+			Entry("interior empty entry", []string{"arm64,,s390x"}),
+			Entry("multiple trailing commas", []string{"arm64,,"}),
+			Entry("only commas", []string{","}),
+			Entry("empty argument", []string{""}),
+		)
+
+		It("rejects an unsupported architecture", func() {
+			GinkgoT().Setenv("GITHUB_TOKEN", "token")
+			_, err := Parse([]string{"github", "riscv64"})
+			Expect(err).Should(MatchError(ContainSubstring("unsupported architecture")))
+			Expect(err).Should(MatchError(ContainSubstring("ppc64le")))
+		})
+
+		It("does not accept an architecture after flags", func() {
+			GinkgoT().Setenv("GITHUB_TOKEN", "token")
+			_, err := Parse([]string{"github", "--clusters-file", "clusters.yaml", "arm64"})
+			Expect(err).Should(MatchError(ContainSubstring("unexpected arguments: arm64")))
 		})
 
 		It("should default the clusters file to the working directory", func() {

@@ -24,6 +24,7 @@ type fakeClient struct {
 	installationRepoErrors []error
 	getCalls               int
 	updateCalls            int
+	updateMessage          string
 	installationCalls      int
 	installationRepoCalls  []int64
 }
@@ -48,8 +49,9 @@ func (f *fakeClient) GetFile(context.Context, string, string, string, string) (*
 }
 
 // UpdateFile returns the next queued error or a fixed commit response.
-func (f *fakeClient) UpdateFile(context.Context, string, string, string, string, string, string) (*gh.RepositoryContentResponse, error) {
+func (f *fakeClient) UpdateFile(_ context.Context, _ string, _ string, _ string, _ string, _ string, _ string, message string) (*gh.RepositoryContentResponse, error) {
 	f.updateCalls++
+	f.updateMessage = message
 	if len(f.updateErrors) > 0 {
 		err := f.updateErrors[0]
 		f.updateErrors = f.updateErrors[1:]
@@ -114,9 +116,10 @@ var _ = Describe("GitHub provider", func() {
 		file, err := adapter.ReadFile(context.Background(), fixture, "web-server/Dockerfile", "main")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(file.SHA).To(Equal("sha-1"))
-		_, err = adapter.UpdateFile(context.Background(), fixture, "web-server/Dockerfile", "main", "content", "sha-1")
+		_, err = adapter.UpdateFile(context.Background(), fixture, "web-server/Dockerfile", "main", "content", "sha-1", providers.CommitMessageTrigger)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(client.updateCalls).To(Equal(1))
+		Expect(client.updateMessage).To(Equal(providers.CommitMessageTrigger))
 	})
 
 	It("retries file updates after a 5xx response", func() {
@@ -126,7 +129,7 @@ var _ = Describe("GitHub provider", func() {
 		adapter := NewWithRetry(client, providers.RetryPolicy{MaxRetries: 3, Sleep: func(context.Context, time.Duration) error { return nil }})
 		fixture := providers.FixtureRepository{Owner: "redhat-appstudio-qe", Name: "dr_test_mathwizz", URL: CanonicalFixtureURL}
 
-		_, err := adapter.UpdateFile(context.Background(), fixture, "web-server/Dockerfile", "main", "content", "sha-1")
+		_, err := adapter.UpdateFile(context.Background(), fixture, "web-server/Dockerfile", "main", "content", "sha-1", providers.CommitMessageTrigger)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(client.updateCalls).To(Equal(2))
 	})

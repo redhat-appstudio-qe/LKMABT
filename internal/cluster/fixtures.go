@@ -23,10 +23,14 @@ import (
 )
 
 var (
-	NamespaceGVR   = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+	// NamespaceGVR is the core Namespace resource, read and created cluster-scoped.
+	NamespaceGVR = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+	// ApplicationGVR is the Konflux Application resource fixtures create.
 	ApplicationGVR = schema.GroupVersionResource{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "applications"}
-	ComponentGVR   = schema.GroupVersionResource{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "components"}
-	SecretGVR      = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+	// ComponentGVR is the Konflux Component resource fixtures create and validate.
+	ComponentGVR = schema.GroupVersionResource{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "components"}
+	// SecretGVR is the core Secret resource used for GitLab SCM credentials.
+	SecretGVR = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
 	// ProjectRequestGVR is the OpenShift self-service namespace API. A
 	// ProjectRequest makes the requester project admin.
 	ProjectRequestGVR = schema.GroupVersionResource{Group: "project.openshift.io", Version: "v1", Resource: "projectrequests"}
@@ -49,6 +53,8 @@ const (
 	scmSecretRepositoryAnnotation = "appstudio.redhat.com/scm.repository"
 )
 
+// ComponentSpec describes one Konflux Component fixture. Name, Repository, and
+// Branch are required; Context and Dockerfile are optional.
 type ComponentSpec struct {
 	Name       string `json:"name"`
 	Repository string `json:"repository"`
@@ -57,6 +63,12 @@ type ComponentSpec struct {
 	Dockerfile string `json:"dockerfile"`
 }
 
+// FixtureSpec describes the tenant resources EnsureFixture creates. Namespace,
+// RunID, and Application are required, together with exactly three Components.
+// Provider "gitlab" enables GitLab SCM credential handling, using GitLabToken
+// and Repository; any other Provider skips it. GitLabTokenEphemeral marks a
+// token revoked at run end, which forces the Secret write and requires delete
+// permission.
 type FixtureSpec struct {
 	Namespace            string
 	RunID                string
@@ -68,18 +80,28 @@ type FixtureSpec struct {
 	Components           []ComponentSpec
 }
 
+// FixtureResult reports the namespace, application, and component names that
+// now exist, with components in FixtureSpec order.
 type FixtureResult struct {
 	Namespace   string
 	Application string
 	Components  []string
 }
 
+// FixtureService creates tenant fixtures through the dynamic API. Dynamic is
+// required; Kubernetes is used only by GitLab provider runs to check Secret
+// authorization.
 type FixtureService struct {
 	Dynamic    dynamic.Interface
 	Kubernetes kubernetes.Interface
 }
 
-// EnsureFixture creates missing tenant resources and rejects drift in existing components.
+// EnsureFixture creates missing tenant resources and rejects drift in existing
+// components. Namespace, RunID, and Application are required, as are exactly
+// three Components. Existing namespaces are adopted without relabeling, an
+// existing Application must live in the requested namespace, and existing
+// Components must match their expected source configuration. The first failure
+// aborts the call; resources created before it remain for cleanup.
 func (s FixtureService) EnsureFixture(ctx context.Context, spec FixtureSpec) (FixtureResult, error) {
 	if s.Dynamic == nil {
 		return FixtureResult{}, fmt.Errorf("dynamic client is required")
@@ -144,9 +166,11 @@ func (s FixtureService) EnsureFixture(ctx context.Context, spec FixtureSpec) (Fi
 	return result, nil
 }
 
-// ensureNamespace creates the tenant namespace, preferring an OpenShift
-// ProjectRequest so the requester becomes project admin. It falls back to a
-// bare Namespace when the ProjectRequest API is unavailable or forbidden.
+// ensureNamespace makes the tenant namespace exist, preferring an OpenShift
+// ProjectRequest so the requester becomes project admin. An existing namespace
+// is accepted as-is, without ownership labels. Otherwise it falls back to a
+// bare Namespace when the ProjectRequest API is unavailable, forbidden, or
+// reports NotFound; other ProjectRequest errors are returned unchanged.
 func (s FixtureService) ensureNamespace(ctx context.Context, namespaces dynamic.ResourceInterface, namespace, runID string) error {
 	if _, err := namespaces.Get(ctx, namespace, metav1.GetOptions{}); err == nil {
 		return nil
@@ -167,8 +191,11 @@ func (s FixtureService) ensureNamespace(ctx context.Context, namespaces dynamic.
 }
 
 // createProject requests a namespace from the OpenShift project controller,
-// waits for it to appear, and returns the created project's UID so fixture
-// setup can reject a namespace another actor created in the same window.
+// waits up to projectCreationTimeout for the Namespace to appear, and returns
+// the created project's UID so fixture setup can reject a namespace another
+// actor created in the same window. It fails when the request already exists or
+// carries no UID; callers treat NotFound, Forbidden, and a missing API as
+// permission to fall back to a bare Namespace.
 func (s FixtureService) createProject(ctx context.Context, namespaces dynamic.ResourceInterface, namespace string) (string, error) {
 	request := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "project.openshift.io/v1", "kind": "ProjectRequest", "metadata": map[string]any{"name": namespace},
@@ -214,8 +241,10 @@ func (e *namespaceOwnershipError) Error() string {
 }
 
 // labelNamespace applies the harness ownership labels that a ProjectRequest
-// does not guarantee the project controller copies. It only labels a namespace
-// whose UID matches the project this run requested.
+// does not guarantee the project controller copies. It retries update conflicts
+// and only labels a namespace whose UID matches the project this run requested;
+// a mismatch returns namespaceOwnershipError unchanged, while other update
+// failures add guidance about the required cluster-scoped permission.
 func (s FixtureService) labelNamespace(ctx context.Context, namespaces dynamic.ResourceInterface, namespace, runID, expectedUID string) error {
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		object, err := namespaces.Get(ctx, namespace, metav1.GetOptions{})
@@ -256,8 +285,9 @@ func tenantNamespaceLabels(runID string) map[string]string {
 }
 
 // authorizeGitLabSecretAccess verifies Secret permissions in the tenant
-// namespace. It runs at fixture setup because a ProjectRequest grants the
-// requester project admin only once the namespace exists.
+// namespace, including delete when ephemeral revokes the token at run end. It
+// runs at fixture setup because a ProjectRequest grants the requester project
+// admin only once the namespace exists, and it requires Kubernetes.
 func (s FixtureService) authorizeGitLabSecretAccess(ctx context.Context, namespace string, ephemeral bool) error {
 	if s.Kubernetes == nil {
 		return fmt.Errorf("kubernetes client is required to authorize GitLab SCM Secret access in namespace %s", namespace)
@@ -279,8 +309,11 @@ func (s FixtureService) authorizeGitLabSecretAccess(ctx context.Context, namespa
 	return nil
 }
 
-// ensureGitLabCredentialSecret manages the harness-owned GitLab SCM basic-auth Secret.
-// It never lists or mutates unowned Secrets unless the API permits it for reuse or refresh.
+// ensureGitLabCredentialSecret manages the harness-owned GitLab SCM basic-auth
+// Secret. An ephemeral token is always written because it is revoked at run
+// end; otherwise an existing harness-owned Secret is refreshed, any usable
+// GitLab SCM Secret is reused, and only then is a new Secret created. A
+// same-name Secret that lkmabt does not own is an error.
 func (s FixtureService) ensureGitLabCredentialSecret(ctx context.Context, namespace, runID, token, repository string, ephemeral bool) error {
 	if strings.TrimSpace(token) == "" {
 		return fmt.Errorf("GitLab token is required to create a GitLab SCM Secret")
@@ -298,14 +331,15 @@ func (s FixtureService) ensureGitLabCredentialSecret(ctx context.Context, namesp
 		return unmanagedGitLabSecretError(namespace)
 	}
 	if ephemeral {
-		// A run-acquired token is revoked at the end of the run, so it must never
-		// be written into another repository-scoped Secret that outlives it.
+		// A run-acquired token is revoked at the end of the run, so reuse is
+		// unsafe: write this run's own Secret instead of adopting one scoped to
+		// another repository.
 		return s.writeGitLabCredentialSecret(ctx, secrets, existing, namespace, runID, token, repositoryPath)
 	}
 	if existing != nil {
 		return s.writeGitLabCredentialSecret(ctx, secrets, existing, namespace, runID, token, repositoryPath)
 	}
-	if reused, err := s.reusableGitLabCredentialSecret(ctx, secrets, namespace); err != nil {
+	if reused, err := s.reusableGitLabCredentialSecret(ctx, secrets, namespace, repositoryPath); err != nil {
 		return err
 	} else if reused {
 		return nil
@@ -313,9 +347,11 @@ func (s FixtureService) ensureGitLabCredentialSecret(ctx context.Context, namesp
 	return s.writeGitLabCredentialSecret(ctx, secrets, nil, namespace, runID, token, repositoryPath)
 }
 
-// reusableGitLabCredentialSecret reports whether a usable, repository-scoped
-// GitLab Secret exists. A Forbidden list skips reuse; other list errors fail.
-func (s FixtureService) reusableGitLabCredentialSecret(ctx context.Context, secrets dynamic.ResourceInterface, namespace string) (bool, error) {
+// reusableGitLabCredentialSecret reports whether the namespace already holds a
+// usable GitLab SCM basic-auth Secret for repositoryPath. Reuse requires the SCM
+// labels, a non-empty password, and a matching appstudio.redhat.com/scm.repository
+// annotation. A Forbidden list means no reuse; other list errors fail.
+func (s FixtureService) reusableGitLabCredentialSecret(ctx context.Context, secrets dynamic.ResourceInterface, namespace, repositoryPath string) (bool, error) {
 	list, err := secrets.List(ctx, metav1.ListOptions{LabelSelector: scmCredentialsLabel + "=scm," + scmHostnameLabel + "=gitlab.com"})
 	if err != nil {
 		if errors.IsForbidden(err) {
@@ -324,15 +360,21 @@ func (s FixtureService) reusableGitLabCredentialSecret(ctx context.Context, secr
 		return false, fmt.Errorf("list GitLab SCM Secrets in namespace %s: %w", namespace, err)
 	}
 	for index := range list.Items {
-		if usableBasicAuthSecret(&list.Items[index]) {
+		secret := &list.Items[index]
+		if secret.GetAnnotations()[scmSecretRepositoryAnnotation] != repositoryPath {
+			continue
+		}
+		if usableBasicAuthSecret(secret) {
 			return true, nil
 		}
 	}
 	return false, nil
 }
 
-// writeGitLabCredentialSecret creates or updates the harness-owned GitLab Secret.
-// It refuses to modify a Secret of the same name that belongs to someone else.
+// writeGitLabCredentialSecret creates the Secret when secret is nil, or updates
+// an existing harness-owned one with the new token, this run's ownership
+// labels, and the repository annotation when repositoryPath is non-empty. It
+// refuses to modify a Secret that is not harness-owned.
 func (s FixtureService) writeGitLabCredentialSecret(ctx context.Context, secrets dynamic.ResourceInterface, secret *unstructured.Unstructured, namespace, runID, token, repositoryPath string) error {
 	if secret == nil {
 		return s.createGitLabCredentialSecret(ctx, secrets, namespace, runID, token, repositoryPath)
@@ -368,7 +410,6 @@ func unmanagedGitLabSecretError(namespace string) error {
 	return fmt.Errorf("GitLab SCM Secret %q in namespace %s exists but is not owned by lkmabt (it needs %s=%s and a non-empty %s): delete it or use a namespace where it is absent", GitLabCredentialSecretName, namespace, cleanup.ManagedByLabel, cleanup.ManagedByValue, cleanup.RunIDLabel)
 }
 
-// applyGitLabSecretOwnership marks a Secret as managed by this harness run.
 func applyGitLabSecretOwnership(secret *unstructured.Unstructured, runID string) {
 	labels := secret.GetLabels()
 	if labels == nil {
@@ -379,7 +420,9 @@ func applyGitLabSecretOwnership(secret *unstructured.Unstructured, runID string)
 	secret.SetLabels(labels)
 }
 
-// gitLabRepositoryPath returns the owner/repo path build-service uses for matching.
+// gitLabRepositoryPath returns the owner/repo path build-service matches, taken
+// from the URL path with any .git suffix removed. It validates the path, not
+// the host.
 func gitLabRepositoryPath(repository string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(repository))
 	if err != nil || parsed.Path == "" {
@@ -393,6 +436,8 @@ func gitLabRepositoryPath(repository string) (string, error) {
 }
 
 // updateBasicAuthPassword writes the token without discarding other Secret data.
+// It also forces the basic-auth type, drops any stringData, and adds the SCM
+// credential labels.
 func updateBasicAuthPassword(secret *unstructured.Unstructured, token string) {
 	data, _, _ := unstructured.NestedMap(secret.Object, "data")
 	if data == nil {
@@ -411,7 +456,6 @@ func updateBasicAuthPassword(secret *unstructured.Unstructured, token string) {
 	secret.SetLabels(labels)
 }
 
-// createGitLabCredentialSecret creates the harness-owned GitLab Secret.
 func (s FixtureService) createGitLabCredentialSecret(ctx context.Context, secrets dynamic.ResourceInterface, namespace, runID, token, repositoryPath string) error {
 	metadata := map[string]any{
 		"name":      GitLabCredentialSecretName,
@@ -460,7 +504,10 @@ func usableBasicAuthSecret(secret *unstructured.Unstructured) bool {
 	return false
 }
 
-// validateComponent checks that an existing component matches its expected source configuration.
+// validateComponent checks that an existing component belongs to application
+// and matches the expected repository, branch, and Dockerfile, plus Context
+// when expected.Context is non-empty. Context is ignored when the expectation
+// leaves it empty, so an existing component may carry any context.
 func validateComponent(object *unstructured.Unstructured, expected ComponentSpec, application string) error {
 	actualApplication, _, _ := unstructured.NestedString(object.Object, "spec", "application")
 	if actualApplication != application {

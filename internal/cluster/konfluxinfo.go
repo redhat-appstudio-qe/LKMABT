@@ -19,7 +19,11 @@ const (
 
 var githubAppSlugPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
-// ReadGitHubAppSlug returns the GitHub App the cluster publishes for Konflux onboarding.
+// ReadGitHubAppSlug returns the GitHub App slug the cluster publishes for
+// Konflux onboarding, taken from application_url in the
+// konflux-info/konflux-public-info ConfigMap. It requires client and fails on a
+// missing ConfigMap, unparsable info.json, or an application_url that is not a
+// github.com/apps URL.
 func ReadGitHubAppSlug(ctx context.Context, client kubernetes.Interface) (string, error) {
 	if client == nil {
 		return "", fmt.Errorf("kubernetes client is required")
@@ -41,7 +45,9 @@ func ReadGitHubAppSlug(ctx context.Context, client kubernetes.Interface) (string
 	return githubAppSlugFromURL(info.Integrations.GitHub.ApplicationURL)
 }
 
-// githubAppSlugFromURL extracts the slug from https://github.com/apps/<slug>.
+// githubAppSlugFromURL extracts the slug from a github.com/apps/<slug> URL,
+// rejecting other hosts, paths outside apps/, and invalid slug characters. The
+// scheme is not checked.
 func githubAppSlugFromURL(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Host != "github.com" || !strings.HasPrefix(strings.Trim(parsed.Path, "/"), "apps/") {

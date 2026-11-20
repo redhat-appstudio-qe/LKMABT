@@ -48,7 +48,7 @@ var _ = Describe("Authenticate ROKS", func() {
 				return "IAM#user@redhat.com\n", nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(BeEmpty())
 			Expect(fake.outputs).Should(Equal([]CommandSpec{whoamiSpec(entry)}))
@@ -77,7 +77,7 @@ var _ = Describe("Authenticate ROKS", func() {
 				return "", nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(Equal([]CommandSpec{ksConfigSpec("/usr/local/bin/ibmcloud", entry)}))
 			Expect(fake.outputs).Should(Equal([]CommandSpec{
@@ -96,7 +96,7 @@ var _ = Describe("Authenticate ROKS", func() {
 				return "error: You must be logged in to the server (Unauthorized)\n", errors.New("exit status 1")
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(HaveKey("c1"))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("existing kubeconfig was rejected")))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("ibmcloud CLI is not on PATH")))
@@ -115,7 +115,7 @@ var _ = Describe("Authenticate ROKS", func() {
 				return "Unable to connect to the server: dial tcp 10.0.0.1:31533: i/o timeout\n", errors.New("exit status 1")
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(HaveKey("c1"))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("dial tcp 10.0.0.1:31533")))
 			Expect(fake.runs).Should(BeEmpty())
@@ -138,7 +138,7 @@ var _ = Describe("Authenticate ROKS", func() {
 				return "IAM#user@redhat.com\n", nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{stalled, healthy})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{stalled, healthy})
 			Expect(failures).Should(HaveLen(1))
 			Expect(failures).Should(HaveKey("stalled"))
 			Expect(failures["stalled"]).Should(MatchError(ContainSubstring("oc whoami timed out after")))
@@ -153,7 +153,7 @@ var _ = Describe("Authenticate ROKS", func() {
 				return "", context.DeadlineExceeded
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(HaveKey("c1"))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("ibmcloud target timed out after")))
 			Expect(fake.runs).Should(BeEmpty())
@@ -166,7 +166,7 @@ var _ = Describe("Authenticate ROKS", func() {
 			fake.onRun = func(CommandSpec) error { return context.DeadlineExceeded }
 			fake.onOutput = func(CommandSpec) (string, error) { return "", nil }
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(HaveKey("c1"))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("ibmcloud ks cluster config timed out after")))
 			// Only the session probe reached Output; no whoami ran.
@@ -181,7 +181,7 @@ var _ = Describe("Authenticate ROKS", func() {
 			log := &bytes.Buffer{}
 			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(HaveKey("c1"))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("ibmcloud CLI is not on PATH")))
 			Expect(fake.runs).Should(BeEmpty())
@@ -208,7 +208,7 @@ var _ = Describe("Authenticate ROKS", func() {
 				return "API endpoint: https://cloud.ibm.com\n", nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(HaveLen(1))
 			Expect(fake.runs[0]).Should(Equal(ksConfigSpec("/usr/local/bin/ibmcloud", entry)))
@@ -239,7 +239,7 @@ var _ = Describe("Authenticate ROKS", func() {
 				return "Not logged in. Use 'ibmcloud login' to log in.", errors.New("exit status 1")
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{c1, c2})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{c1, c2})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(HaveLen(3))
 			Expect(fake.runs[0]).Should(Equal(CommandSpec{Name: "/usr/local/bin/ibmcloud", Args: []string{"login", "--sso"}}))
@@ -257,7 +257,7 @@ var _ = Describe("Authenticate ROKS", func() {
 			fake.onRun = func(CommandSpec) error { return errors.New("exit status 1") }
 			fake.onOutput = func(CommandSpec) (string, error) { return "", nil }
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(HaveKey("c1"))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("ibmcloud ks cluster config")))
 			Expect(fake.outputs).Should(HaveLen(1))
@@ -280,7 +280,7 @@ var _ = Describe("Authenticate ROKS", func() {
 				return "", nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(HaveKey("c1"))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("first-time login")))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("IBM Cloud console")))
@@ -306,7 +306,7 @@ var _ = Describe("Authenticate ROKS", func() {
 				return "", nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(HaveKey("c1"))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("dial tcp 10.0.0.1:31533")))
 			Expect(failures["c1"]).ShouldNot(MatchError(ContainSubstring("first-time login")))
@@ -335,7 +335,7 @@ var _ = Describe("Authenticate ROKS", func() {
 				return "", nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{roks, legacy})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{roks, legacy})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(HaveLen(2))
 			Expect(fake.runs[0]).Should(Equal(ksConfigSpec("/usr/local/bin/ibmcloud", roks)))

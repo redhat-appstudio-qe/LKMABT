@@ -15,7 +15,9 @@ import (
 
 // defaultEntry builds an entry using kflux's default kubeconfig path for home.
 func defaultEntry(name, home string) clusterfile.Entry {
-	return clusterfile.Entry{Name: name, Kubeconfig: clusterfile.DefaultKubeconfig(home, name)}
+	entry := clusterfile.Entry{Name: name}
+	entry.Kubeconfig = clusterfile.DefaultKubeconfig(home, entry.CatalogName())
+	return entry
 }
 
 // customEntry builds an entry with an explicit kubeconfig path and optional server.
@@ -39,7 +41,7 @@ var _ = Describe("Authenticate", func() {
 			writeFile(c2.Kubeconfig)
 			fake := &fakeRunner{lookPaths: map[string]string{}}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1, c2})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1, c2})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(BeEmpty())
 			Expect(fake.outputs).Should(HaveLen(2))
@@ -70,7 +72,7 @@ var _ = Describe("Authenticate", func() {
 				return "mrath\n", nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{c1})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{c1})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(HaveLen(1))
 			Expect(fake.runs[0]).Should(Equal(CommandSpec{Name: "/usr/local/bin/kflux", Args: []string{"cluster", "login", "-c", "c1"}}))
@@ -97,7 +99,7 @@ var _ = Describe("Authenticate", func() {
 				return "mrath\n", nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c2})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c2})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(HaveLen(1))
 			Expect(fake.runs[0].Name).Should(Equal("oc"))
@@ -113,7 +115,7 @@ var _ = Describe("Authenticate", func() {
 				return "error: You must be logged in to the server (Unauthorized)", errors.New("exit status 1")
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
 			Expect(failures).Should(HaveLen(1))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("authentication failed")))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring(c1.Kubeconfig)))
@@ -134,7 +136,7 @@ var _ = Describe("Authenticate", func() {
 				return "Unable to connect to the server: dial tcp: lookup api.c1.example: no such host", errors.New("exit status 1")
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
 			Expect(failures).Should(HaveLen(1))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("could not verify kubeconfig")))
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("no such host")))
@@ -154,7 +156,7 @@ var _ = Describe("Authenticate", func() {
 				return nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(HaveLen(1))
 			Expect(fake.runs[0]).Should(Equal(CommandSpec{Name: "/usr/local/bin/kflux", Args: []string{"cluster", "login", "-c", "c1"}}))
@@ -177,7 +179,7 @@ var _ = Describe("Authenticate", func() {
 				return nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1, c2})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1, c2})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(HaveLen(1))
 			Expect(fake.runs[0].Args).Should(Equal([]string{"cluster", "login", "-c", "c1", "-c", "c2"}))
@@ -196,17 +198,160 @@ var _ = Describe("Authenticate", func() {
 				return nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(HaveLen(1))
 			Expect(fake.runs[0]).Should(Equal(CommandSpec{Name: "/usr/local/bin/kflux", Args: []string{"cluster", "login", "-c", "ocp-p01"}}))
 		})
 	})
 
+	When("a cluster name is a real Konflux host label", func() {
+		It("should resolve the kflux catalog alias and use its kubeconfig", func() {
+			home := GinkgoT().TempDir()
+			entry := defaultEntry("stone-stage-p01", home)
+			resolvedPath := clusterfile.DefaultKubeconfig(home, "stg-p01")
+			log := &bytes.Buffer{}
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onStdout = func(spec CommandSpec) (string, error) {
+				Expect(spec.Name).Should(Equal("/usr/local/bin/kflux"))
+				Expect(spec.Args).Should(Equal([]string{"cluster", "list", "--output", "json"}))
+				return `[{"name":"stg-p01","host":"stone-stage-p01.hpmt.p1.openshiftapps.com"}]`, nil
+			}
+			fake.onRun = func(spec CommandSpec) error {
+				Expect(spec.Args).Should(Equal([]string{"cluster", "login", "-c", "stg-p01"}))
+				writeFile(resolvedPath)
+				return nil
+			}
+			fake.onOutput = func(spec CommandSpec) (string, error) {
+				Expect(spec.Env).Should(Equal([]string{"KUBECONFIG=" + resolvedPath}))
+				return "mrath\n", nil
+			}
+
+			resolved, failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+
+			Expect(failures).Should(BeEmpty())
+			Expect(resolved).Should(HaveLen(1))
+			Expect(resolved[0].Kubeconfig).Should(Equal(resolvedPath))
+			Expect(resolved[0].CatalogName()).Should(Equal("stg-p01"))
+			Expect(fake.runs).Should(HaveLen(1))
+			Expect(fake.stdouts).Should(HaveLen(1))
+			Expect(log.String()).Should(ContainSubstring("resolved kflux catalog cluster stg-p01"))
+		})
+
+		It("should resolve from an explicit server host", func() {
+			home := GinkgoT().TempDir()
+			entry := clusterfile.Entry{
+				Name:       "stone-alias",
+				Kubeconfig: clusterfile.DefaultKubeconfig(home, "stone-alias"),
+				Server:     "https://api.stone-stage-p01.hpmt.p1.openshiftapps.com:6443",
+			}
+			resolvedPath := clusterfile.DefaultKubeconfig(home, "stg-p01")
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onStdout = func(CommandSpec) (string, error) {
+				return `[{"name":"stg-p01","host":"stone-stage-p01.hpmt.p1.openshiftapps.com"}]`, nil
+			}
+			fake.onRun = func(spec CommandSpec) error {
+				Expect(spec.Args).Should(Equal([]string{"cluster", "login", "-c", "stg-p01"}))
+				writeFile(resolvedPath)
+				return nil
+			}
+			fake.onOutput = func(spec CommandSpec) (string, error) {
+				Expect(spec.Env).Should(Equal([]string{"KUBECONFIG=" + resolvedPath}))
+				return "mrath\n", nil
+			}
+
+			resolved, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+
+			Expect(failures).Should(BeEmpty())
+			Expect(resolved).Should(HaveLen(1))
+			Expect(resolved[0].Kubeconfig).Should(Equal(resolvedPath))
+			Expect(resolved[0].CatalogName()).Should(Equal("stg-p01"))
+		})
+	})
+
+	When("a cluster has no kubeconfig and no server", func() {
+		It("should refuse oc login instead of using the ambient context", func() {
+			home := GinkgoT().TempDir()
+			entry := defaultEntry("unknown-cluster", home)
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onStdout = func(CommandSpec) (string, error) { return `[]`, nil }
+			fake.onRun = func(CommandSpec) error { return errors.New("exit status 1") }
+
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+
+			Expect(failures).Should(HaveKey("unknown-cluster"))
+			Expect(failures["unknown-cluster"]).Should(MatchError(ContainSubstring("no readable kubeconfig")))
+			Expect(failures["unknown-cluster"]).Should(MatchError(ContainSubstring("no server")))
+			Expect(fake.runs).Should(HaveLen(1))
+			Expect(fake.runs[0].Name).Should(Equal("/usr/local/bin/kflux"))
+		})
+	})
+
+	When("the kflux batch login fails", func() {
+		It("should retry valid catalog clusters individually", func() {
+			home := GinkgoT().TempDir()
+			valid := defaultEntry("kflux-ocp-p01", home)
+			unknown := defaultEntry("stone-unknown", home)
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onStdout = func(CommandSpec) (string, error) { return `[]`, nil }
+			fake.onRun = func(spec CommandSpec) error {
+				if len(spec.Args) > 4 {
+					return errors.New("unknown cluster stone-unknown")
+				}
+				if spec.Args[len(spec.Args)-1] == "ocp-p01" {
+					writeFile(valid.Kubeconfig)
+					return nil
+				}
+				return errors.New("unknown cluster stone-unknown")
+			}
+			fake.onOutput = func(spec CommandSpec) (string, error) {
+				Expect(spec.Env).Should(Equal([]string{"KUBECONFIG=" + valid.Kubeconfig}))
+				return "mrath\n", nil
+			}
+
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{valid, unknown})
+
+			Expect(failures).Should(HaveKey("stone-unknown"))
+			Expect(failures).NotTo(HaveKey("kflux-ocp-p01"))
+			Expect(fake.runs).Should(HaveLen(3))
+		})
+	})
+
+	When("two entries resolve to one kubeconfig", func() {
+		It("should reject the colliding entry instead of overwriting it", func() {
+			home := GinkgoT().TempDir()
+			host := defaultEntry("stone-stage-p01", home)
+			alias := defaultEntry("kflux-stg-p01", home)
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onStdout = func(CommandSpec) (string, error) {
+				return `[{"name":"stg-p01","host":"stone-stage-p01.hpmt.p1.openshiftapps.com"}]`, nil
+			}
+			fake.onRun = func(spec CommandSpec) error {
+				if spec.Name == "/usr/local/bin/kflux" {
+					writeFile(alias.Kubeconfig)
+				}
+				return nil
+			}
+			fake.onOutput = func(spec CommandSpec) (string, error) {
+				Expect(spec.Env).Should(Equal([]string{"KUBECONFIG=" + alias.Kubeconfig}))
+				return "mrath\n", nil
+			}
+
+			resolved, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{host, alias})
+
+			Expect(failures).Should(HaveKey("stone-stage-p01"))
+			Expect(failures["stone-stage-p01"]).Should(MatchError(ContainSubstring("resolve to the same kubeconfig path")))
+			Expect(failures).NotTo(HaveKey("kflux-stg-p01"))
+			Expect(resolved).Should(HaveLen(2))
+			Expect(resolved[0].Kubeconfig).Should(Equal(alias.Kubeconfig))
+			Expect(resolved[1].Kubeconfig).Should(Equal(alias.Kubeconfig))
+		})
+	})
+
 	When("a custom-path kubeconfig is missing", func() {
 		It("should skip kflux and run oc login for that path", func() {
 			home := GinkgoT().TempDir()
-			c2 := customEntry("c2", filepath.Join(home, "custom", "c2"), "")
+			c2 := customEntry("c2", filepath.Join(home, "custom", "c2"), "https://api.c2.example:6443")
 			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
 			fake.onRun = func(spec CommandSpec) error {
 				if spec.Name == "oc" {
@@ -215,11 +360,11 @@ var _ = Describe("Authenticate", func() {
 				return nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c2})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c2})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(HaveLen(1))
 			Expect(fake.runs[0].Name).Should(Equal("oc"))
-			Expect(fake.runs[0].Args).Should(Equal([]string{"login"}))
+			Expect(fake.runs[0].Args).Should(Equal([]string{"login", "--server=https://api.c2.example:6443"}))
 			Expect(fake.runs[0].Env).Should(Equal([]string{"KUBECONFIG=" + c2.Kubeconfig}))
 		})
 
@@ -234,7 +379,7 @@ var _ = Describe("Authenticate", func() {
 				return nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c2})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c2})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs[0].Args).Should(Equal([]string{"login", "--server=https://api.c2.example:6443"}))
 		})
@@ -242,7 +387,7 @@ var _ = Describe("Authenticate", func() {
 		It("should create the kubeconfig parent directory before oc login", func() {
 			home := GinkgoT().TempDir()
 			path := filepath.Join(home, "missing", "dir", "config-c2")
-			c2 := customEntry("c2", path, "")
+			c2 := customEntry("c2", path, "https://api.c2.example:6443")
 			var dirMode os.FileMode
 			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
 			fake.onRun = func(spec CommandSpec) error {
@@ -255,14 +400,14 @@ var _ = Describe("Authenticate", func() {
 				return nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c2})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c2})
 			Expect(failures).Should(BeEmpty())
 			Expect(dirMode).Should(Equal(os.FileMode(0o700)))
 		})
 
 		It("should log the oc login command with its KUBECONFIG", func() {
 			home := GinkgoT().TempDir()
-			c2 := customEntry("c2", filepath.Join(home, "custom", "c2"), "")
+			c2 := customEntry("c2", filepath.Join(home, "custom", "c2"), "https://api.c2.example:6443")
 			log := &bytes.Buffer{}
 			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
 			fake.onRun = func(spec CommandSpec) error {
@@ -272,9 +417,10 @@ var _ = Describe("Authenticate", func() {
 				return nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{c2})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{c2})
 			Expect(failures).Should(BeEmpty())
-			Expect(log.String()).Should(ContainSubstring("oc login for cluster c2"))
+			Expect(log.String()).Should(ContainSubstring("running oc login"))
+			Expect(log.String()).Should(ContainSubstring("for cluster c2"))
 			Expect(log.String()).Should(ContainSubstring("KUBECONFIG="))
 			Expect(log.String()).Should(ContainSubstring(c2.Kubeconfig))
 		})
@@ -284,6 +430,7 @@ var _ = Describe("Authenticate", func() {
 		It("should still attempt oc login for the default-path cluster", func() {
 			home := GinkgoT().TempDir()
 			c1 := defaultEntry("c1", home)
+			c1.Server = "https://api.c1.example:6443"
 			log := &bytes.Buffer{}
 			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
 			fake.onRun = func(spec CommandSpec) error {
@@ -296,7 +443,7 @@ var _ = Describe("Authenticate", func() {
 				return nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{c1})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{c1})
 			Expect(failures).Should(BeEmpty())
 			Expect(fake.runs).Should(HaveLen(2))
 			Expect(fake.runs[0].Name).Should(Equal("/usr/local/bin/kflux"))
@@ -309,6 +456,7 @@ var _ = Describe("Authenticate", func() {
 		It("should fall back to oc login", func() {
 			home := GinkgoT().TempDir()
 			c1 := defaultEntry("c1", home)
+			c1.Server = "https://api.c1.example:6443"
 			log := &bytes.Buffer{}
 			fake := &fakeRunner{lookPaths: map[string]string{}}
 			fake.onRun = func(spec CommandSpec) error {
@@ -321,7 +469,7 @@ var _ = Describe("Authenticate", func() {
 				return nil
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{c1})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{c1})
 			Expect(failures).Should(BeEmpty())
 			Expect(log.String()).Should(ContainSubstring("kflux unavailable"))
 			Expect(fake.runs).Should(HaveLen(2))
@@ -338,7 +486,7 @@ var _ = Describe("Authenticate", func() {
 				return errors.New("exit status 1")
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
 			Expect(failures).Should(HaveLen(1))
 			Expect(failures["c1"]).Should(HaveOccurred())
 			Expect(failures["c1"]).Should(MatchError(ContainSubstring("authentication failed")))
@@ -360,7 +508,7 @@ var _ = Describe("Authenticate", func() {
 				return errors.New("exit status 1")
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1})
 			Expect(failures).Should(HaveKey("c1"))
 		})
 	})
@@ -376,7 +524,7 @@ var _ = Describe("Authenticate", func() {
 				return errors.New("exit status 1")
 			}
 
-			failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1, c2})
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{c1, c2})
 			Expect(failures).Should(HaveLen(1))
 			Expect(failures).Should(HaveKey("c2"))
 		})

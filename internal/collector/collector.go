@@ -1,9 +1,15 @@
+// Package collector writes per-run failure artifacts from cluster state and
+// local diagnostics. Sources are collected into a run directory, optional
+// sources never make a run incomplete, and every attempt is recorded in a
+// redacted collection report.
 package collector
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +17,7 @@ import (
 
 	"github.com/redhat-appstudio/lkmabt/internal/evidence"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/yaml"
 )
 
@@ -25,23 +32,42 @@ var requiredArtifactNames = []string{
 	"collection-report.json",
 }
 
+const (
+	// defaultSourceRetries retries a transient required-source failure twice.
+	defaultSourceRetries = 2
+	// defaultRetryDelay is the base backoff between those retries.
+	defaultRetryDelay = time.Second
+)
+
+// Source describes one artifact produced during collection. Collect receives
+// the run artifact root and writes its output beneath it; a nil Collect records
+// the source as omitted.
 type Source struct {
-	Name     string
-	Path     string
+	Name string
+	Path string
+	// Optional sources are attempted once and their failures do not make the
+	// saved artifacts incomplete.
 	Optional bool
 	Collect  func(context.Context, string) error
 }
 
+// Attempt records the outcome of one source or internal write. Status is
+// "success", "error", or "omitted"; Retries counts transient-failure retries
+// and is zero for optional sources, which are never retried.
 type Attempt struct {
 	Name      string    `json:"name"`
 	Path      string    `json:"path,omitempty"`
 	Optional  bool      `json:"optional,omitempty"`
 	Status    string    `json:"status"`
 	Error     string    `json:"error,omitempty"`
+	Retries   int       `json:"retries,omitempty"`
 	StartedAt time.Time `json:"startedAt"`
 	EndedAt   time.Time `json:"endedAt"`
 }
 
+// Report is the collection-report.json payload: one attempt per source plus
+// synthetic attempts for the manifest write, failed-build directory, and the
+// report itself.
 type Report struct {
 	RunID     string    `json:"runID"`
 	StartedAt time.Time `json:"startedAt"`
@@ -49,9 +75,18 @@ type Report struct {
 	Attempts  []Attempt `json:"attempts"`
 }
 
+// Collector writes artifacts under StateDir. Now, when non-nil, supplies the
+// clock and defaults to time.Now.
 type Collector struct {
+	// StateDir is the state root; required.
 	StateDir string
 	Now      func() time.Time
+	// Retries bounds retries after a transient required-source failure.
+	// Zero or negative uses defaultSourceRetries.
+	Retries int
+	// RetryDelay is the base backoff between retries.
+	// Zero or negative uses defaultRetryDelay.
+	RetryDelay time.Duration
 }
 
 // RequiredArtifactNames returns a copy of the baseline failure-artifact paths.
@@ -68,7 +103,10 @@ func RequiredArtifactNamesForManifest(manifest model.RunManifest) []string {
 	return names
 }
 
-// Collect writes the run manifest, source artifacts, and a report of collection attempts.
+// Collect writes the run manifest, source artifacts, and a report of collection
+// attempts. Source failures are recorded in the report rather than returned;
+// the error return covers only a missing state directory or run ID, setup
+// failures, and manifest or report writes. It requires StateDir and runID.
 func (c Collector) Collect(ctx context.Context, runID string, manifest model.RunManifest, sources []Source) (Report, error) {
 	if c.StateDir == "" || runID == "" {
 		return Report{}, fmt.Errorf("state directory and run ID are required")
@@ -89,7 +127,7 @@ func (c Collector) Collect(ctx context.Context, runID string, manifest model.Run
 		attempt := Attempt{Name: source.Name, Path: source.Path, Optional: source.Optional, StartedAt: now().UTC()}
 		if source.Collect == nil {
 			attempt.Status = "omitted"
-		} else if err := source.Collect(ctx, root); err != nil {
+		} else if err := c.collectSource(ctx, source, root, &attempt); err != nil {
 			attempt.Status = "error"
 			attempt.Error = err.Error()
 		} else {
@@ -112,7 +150,59 @@ func (c Collector) Collect(ctx context.Context, runID string, manifest model.Run
 	return report, nil
 }
 
-// CollectAndVerify collects artifacts and verifies the saved files against the run manifest.
+// collectSource runs one source, retrying transient failures for required
+// sources. Optional sources are attempted once so slow diagnostics cannot
+// consume the finalization budget.
+func (c Collector) collectSource(ctx context.Context, source Source, root string, attempt *Attempt) error {
+	retries := 0
+	if !source.Optional {
+		retries = c.Retries
+		if retries <= 0 {
+			retries = defaultSourceRetries
+		}
+	}
+	delay := c.RetryDelay
+	if delay <= 0 {
+		delay = defaultRetryDelay
+	}
+	for try := 0; ; try++ {
+		err := source.Collect(ctx, root)
+		if err == nil {
+			return nil
+		}
+		if try >= retries || !transientCollectionError(err) || ctx.Err() != nil {
+			return err
+		}
+		attempt.Retries++
+		timer := time.NewTimer(delay * time.Duration(1<<try))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return err
+		case <-timer.C:
+		}
+	}
+}
+
+// transientCollectionError reports failures worth retrying: network errors and
+// API 408/429/5xx responses. Callers still stop when their context ends.
+func transientCollectionError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var apiStatus apierrors.APIStatus
+	if errors.As(err, &apiStatus) {
+		code := apiStatus.Status().Code
+		return code == 408 || code == 429 || code >= 500
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+// CollectAndVerify collects artifacts and verifies the saved files against the
+// run manifest. A collection error is recorded in CollectionErrors and
+// returned; otherwise verification runs and reports every missing, unreadable,
+// or failed required artifact.
 func (c Collector) CollectAndVerify(ctx context.Context, runID string, manifest model.RunManifest, sources []Source) (model.FailureArtifactReport, error) {
 	artifactReport := c.emptyArtifactReport(runID, manifest)
 	_, err := c.Collect(ctx, runID, manifest, sources)
@@ -124,7 +214,10 @@ func (c Collector) CollectAndVerify(ctx context.Context, runID string, manifest 
 }
 
 // VerifySavedArtifacts checks the existing collection report and all required
-// artifacts without making another request to the cluster.
+// artifacts without making another request to the cluster. Every problem is
+// appended to CollectionErrors; an error is returned when any required artifact
+// is absent, unreadable, a symlink, or recorded as a failed non-optional
+// attempt. A run with only optional-source failures verifies successfully.
 func (c Collector) VerifySavedArtifacts(runID string, manifest model.RunManifest) (model.FailureArtifactReport, error) {
 	artifactReport := c.emptyArtifactReport(runID, manifest)
 	if c.StateDir == "" || runID == "" {
@@ -295,7 +388,10 @@ func verifyFailedBuildLogs(root string, logs []model.FailedBuildLog) error {
 	return nil
 }
 
-// artifactRelativePath resolves path to a relative path contained by the run artifact root.
+// artifactRelativePath resolves path to a relative path contained by the run
+// artifact root. Absolute paths must already lie inside root. Relative paths are
+// tried against the working directory and root, preferring root for paths
+// directly under failed-builds/.
 func artifactRelativePath(root, path string) (string, error) {
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {

@@ -13,18 +13,27 @@ type GitHubAppChecker interface {
 	VerifyGitHubAppInstallation(context.Context, string) error
 }
 
+// PreflightSpec declares what RunPreflight must verify against the cluster. A
+// non-empty Scheduling.Platforms enables the scheduling checks.
 type PreflightSpec struct {
 	ExpectedServer string
 	AccessChecks   []AccessCheck
 	Scheduling     SchedulingSpec
 }
 
+// PreflightResult records every access and scheduling check that ran, including
+// failed ones. Scheduling stays empty when no platforms were requested.
 type PreflightResult struct {
 	Checks     []CheckResult `json:"checks"`
 	Scheduling []CheckResult `json:"scheduling"`
 }
 
-// RunPreflight validates cluster identity, API access, and requested scheduling readiness.
+// RunPreflight validates cluster identity, API access, and requested scheduling
+// readiness. It requires cluster and a non-empty expected server, compares the
+// cluster server ignoring trailing slashes, and fails on the first failed access
+// or scheduling check. On failure it returns the checks collected so far
+// alongside the error; scheduling checks run only when
+// spec.Scheduling.Platforms is non-empty.
 func RunPreflight(ctx context.Context, cluster Cluster, spec PreflightSpec) (PreflightResult, error) {
 	if cluster == nil {
 		return PreflightResult{}, fmt.Errorf("cluster is required")
@@ -57,8 +66,10 @@ func RunPreflight(ctx context.Context, cluster Cluster, spec PreflightSpec) (Pre
 	return result, nil
 }
 
-// VerifyGitHubAppOnboarding confirms the cluster's published GitHub App can onboard
-// the fixture repository before the run creates or deletes cluster resources.
+// VerifyGitHubAppOnboarding confirms the cluster's published GitHub App can
+// onboard the fixture repository before the run creates or deletes cluster
+// resources. It requires a non-nil checker, returns the app slug, and propagates
+// ConfigMap read, parse, and installation-check errors.
 func VerifyGitHubAppOnboarding(ctx context.Context, client kubernetes.Interface, checker GitHubAppChecker) (string, error) {
 	if checker == nil {
 		return "", fmt.Errorf("GitHub App checker is required")

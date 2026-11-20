@@ -20,7 +20,10 @@ const (
 )
 
 // authenticateROKS verifies or writes one kubeconfig per ROKS entry, returning
-// one error per cluster that remains unusable.
+// one error per cluster that remains unusable. A readable kubeconfig is checked
+// with oc whoami; only a credential rejection falls through to ibmcloud. The
+// session probe runs once for the whole batch, and non-interactive ibmcloud calls
+// are bounded by ibmcloudCommandTimeout while login --sso waits on the user.
 func (l Ladder) authenticateROKS(ctx context.Context, targets []clusterfile.Entry) map[string]error {
 	failures := make(map[string]error, len(targets))
 	if len(targets) == 0 {
@@ -72,7 +75,8 @@ func ibmcloudMissingFailure(entry clusterfile.Entry, rejected bool) error {
 }
 
 // ensureIBMCloudSession reuses an active ibmcloud session and runs the interactive
-// SSO login only when the CLI reports no session.
+// SSO login only when the CLI reports no session. The session probe is bounded by
+// ibmcloudCommandTimeout; a timed-out probe fails instead of prompting.
 func (l Ladder) ensureIBMCloudSession(ctx context.Context, binary string) error {
 	targetCtx, cancel := context.WithTimeout(ctx, ibmcloudCommandTimeout)
 	_, err := l.Runner.Output(targetCtx, CommandSpec{Name: binary, Args: []string{"target", "-q"}})
@@ -90,7 +94,8 @@ func (l Ladder) ensureIBMCloudSession(ctx context.Context, binary string) error 
 }
 
 // loginROKSCluster writes the entry's kubeconfig through the IBM Cloud CLI, then
-// proves it works with oc whoami.
+// proves it works with oc whoami. The CLI call is bounded by
+// ibmcloudCommandTimeout; verification uses verifyTimeout.
 func (l Ladder) loginROKSCluster(ctx context.Context, binary string, entry clusterfile.Entry) error {
 	if err := os.MkdirAll(filepath.Dir(entry.Kubeconfig), 0o700); err != nil {
 		return fmt.Errorf("authentication failed: create kubeconfig directory for cluster %s: %w", entry.Name, err)

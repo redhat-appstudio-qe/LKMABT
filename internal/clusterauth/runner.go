@@ -11,18 +11,22 @@ import (
 	"sync"
 )
 
-// CommandSpec describes one console command the ladder runs.
+// CommandSpec describes one console command the ladder runs. Name is resolved
+// through PATH unless it contains a path separator.
 type CommandSpec struct {
 	Name string
 	Args []string
-	Dir  string
-	Env  []string // extra KEY=VALUE entries appended to os.Environ()
+	// Dir is the child's working directory; empty inherits the caller's.
+	Dir string
+	// Env holds extra KEY=VALUE entries appended to os.Environ().
+	Env []string
 	// ClearEnv lists environment names removed from the inherited environment
 	// before Env is appended, so a spec can reliably override ambient values.
 	ClearEnv []string
 }
 
 // CommandRunner runs console commands for the authentication ladder.
+// Implementations must stop the command when ctx is done.
 type CommandRunner interface {
 	// LookPath resolves name against PATH.
 	LookPath(name string) (string, error)
@@ -80,6 +84,8 @@ func (w *lockedWriter) Write(p []byte) (int, error) {
 
 // ExecRunner runs commands through os/exec with the console attached.
 type ExecRunner struct {
+	// Log optionally receives copies of a command's stdout and stderr. Run
+	// serializes writes from the two streams onto it.
 	Log io.Writer
 }
 
@@ -88,7 +94,8 @@ func (r ExecRunner) LookPath(name string) (string, error) {
 	return exec.LookPath(name)
 }
 
-// Run executes spec with inherited stdin and stdout/stderr optionally tee'd to the log.
+// Run executes spec with inherited stdin and stdout/stderr optionally tee'd to the
+// log, and waits for it to finish. Canceling ctx kills the process.
 func (r ExecRunner) Run(ctx context.Context, spec CommandSpec) error {
 	command := spec.command(ctx)
 	out, errOut := io.Writer(os.Stdout), io.Writer(os.Stderr)
@@ -106,7 +113,8 @@ func (r ExecRunner) Run(ctx context.Context, spec CommandSpec) error {
 	return nil
 }
 
-// Output executes spec without the console and returns its combined stdout and stderr.
+// Output executes spec without the console and returns its combined stdout and
+// stderr. The captured output is returned even when the command fails.
 func (r ExecRunner) Output(ctx context.Context, spec CommandSpec) (string, error) {
 	output, err := spec.command(ctx).CombinedOutput()
 	if err != nil {
@@ -116,6 +124,7 @@ func (r ExecRunner) Output(ctx context.Context, spec CommandSpec) (string, error
 }
 
 // Stdout executes spec without the console and returns only its standard output.
+// Stderr is folded into the returned error text.
 func (r ExecRunner) Stdout(ctx context.Context, spec CommandSpec) (string, error) {
 	var stderr bytes.Buffer
 	command := spec.command(ctx)

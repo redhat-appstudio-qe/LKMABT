@@ -1,25 +1,46 @@
 # Copy to .lkmabt-clusters.yaml and edit locally. Never commit the copy.
-# name       required, unique, [A-Za-z0-9._-]+ ; the report directory name and the
-#            identity used by --cluster and in logs. The kflux catalog name is
-#            this name with a leading "kflux-" removed and is otherwise
-#            unchanged, e.g. name kflux-ocp-p01 is catalog cluster ocp-p01 for
-#            the API server host kflux-ocp-p01.7ayg.p1.openshiftapps.com. List
-#            catalog names with "kflux cluster list"; an unknown one fails with
-#            kflux's "unknown cluster" error.
-# type       optional, ocp (default) or roks ; roks logs in with "ibmcloud login --sso"
-#            and "ibmcloud ks cluster config" instead of kflux and oc login
-# ibmcloud   optional, roks only ; IBM Cloud cluster name or ID passed to
-#            "ibmcloud ks cluster config --cluster". Defaults to name.
+# Parsed strictly: only "clusters" and the fields below are accepted. Unknown
+# fields, including the removed "kflux" field, are rejected, and at least one
+# entry is required.
+#
+# name       required, unique; matches [A-Za-z0-9._-]+ but not "." or ".." ; the
+#            report directory name and the identity used by --cluster and in
+#            logs. The kflux catalog name is this name with a leading "kflux-"
+#            removed, and it must match that pattern too. For an entry that
+#            needs a login and whose derived catalog is unknown, authentication
+#            may resolve a real cluster host label (such as stone-stage-p01) or
+#            the server's host label to a kflux catalog alias (for example
+#            stg-p01) from "kflux cluster list"; the match must be unique and it
+#            renames only default-path kubeconfigs. A kflux missing from PATH is
+#            cloned and built from its internal GitLab repository, so git, make,
+#            and repository access are prerequisites. Set kubeconfig or server
+#            when kflux cannot resolve the name.
+# type       optional, ocp (default) or roks ; ocp verifies with "oc whoami" and
+#            logs in through kflux (default kubeconfig paths) or "oc login".
+#            roks probes "ibmcloud target -q", logs in with "ibmcloud login
+#            --sso" when no session exists, writes the kubeconfig with
+#            "ibmcloud ks cluster config", and verifies with "oc whoami".
+# ibmcloud   optional, roks only ; cluster name or ID passed to
+#            "ibmcloud ks cluster config --cluster". Defaults to name. Setting
+#            it on an ocp entry is an error.
 # ibmcloud-endpoint optional, roks only ; vpe (default), private, or link ; the
-#            master endpoint the written kubeconfig points at
+#            endpoint type passed as --endpoint, selecting the master endpoint
+#            the written kubeconfig points at. Setting it on an ocp entry is an
+#            error.
 # kubeconfig optional, defaults to ~/.kube/config-<catalog> (kflux's own
-#            per-cluster path, named from the derived catalog name); "~"
-#            expands, relative paths resolve against this file. Every
-#            kubeconfig is verified with "oc whoami" before the run; a rejected
-#            one is refreshed through kflux or "oc login".
-# server     optional API server URL ; omitted means the kubeconfig's own server is used
+#            per-cluster path, named from the catalog name); "~" and "~/" expand,
+#            other relative paths resolve against this file's directory, and two
+#            entries resolving to one path are rejected. Every kubeconfig is
+#            verified with "oc whoami" before the run; a rejected one is
+#            refreshed through kflux or "oc login", or through ibmcloud for roks.
+# server     optional absolute http or https API server URL ; trailing slashes
+#            are trimmed. Used as "oc login --server" and for kflux host
+#            matching; omitted means the kubeconfig's own server is used. With
+#            no readable kubeconfig, no server, and no kflux-resolvable catalog,
+#            authentication fails instead of using the ambient oc context.
 clusters:
   - name: kflux-ocp-p01
+#  - name: stone-stage-p01   # real host label; kflux resolves it to catalog stg-p01
 #  - name: kflux-rhel-p01
 #    server: https://api.kflux-rhel-p01.example.com:6443
 #  - name: kflux-osp-p01

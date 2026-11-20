@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Install lkmabt into a writable directory that is already on PATH.
+# Install lkmabt into a writable directory on PATH, preferring GOBIN, then
+# GOPATH/bin, then conventional user directories. When no PATH directory is
+# writable, install into $HOME/.local/bin and print the PATH change instead.
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -16,11 +18,14 @@ on_path() {
 	esac
 }
 
+# Candidate order: GOBIN, GOPATH/bin, ~/.local/bin, ~/bin, /usr/local/bin.
+# The first candidate that is already on PATH and writable wins.
 candidates=()
 if gobin=$(go env GOBIN) && [ -n "$gobin" ]; then
 	candidates+=("$gobin")
 fi
 if gopath=$(go env GOPATH) && [ -n "$gopath" ]; then
+	# GOPATH may be a colon-separated list; only its first entry holds bin/.
 	candidates+=("${gopath%%:*}/bin")
 fi
 if [ -n "${HOME:-}" ]; then
@@ -40,8 +45,9 @@ for directory in "${candidates[@]}"; do
 	break
 done
 
-# A custom directory on PATH is preferable to installing somewhere that needs
-# a PATH change. Only existing absolute PATH entries are used.
+# Second pass: any existing, writable, absolute directory already on PATH,
+# regardless of naming convention. Installing there still beats requiring a
+# PATH change.
 if [ -z "$target" ]; then
 	path_entries=()
 	IFS=: read -r -a path_entries <<< "$PATH"
@@ -55,8 +61,8 @@ if [ -z "$target" ]; then
 	done
 fi
 
-# No PATH directory is writable: install into the XDG user directory and
-# report the one-line PATH change instead of silently leaving lkmabt unusable.
+# No PATH directory is writable: install into $HOME/.local/bin and report the
+# one-line PATH change instead of silently leaving lkmabt unusable.
 if [ -z "$target" ]; then
 	if [ -z "${HOME:-}" ]; then
 		printf 'error: no writable directory on PATH and HOME is unset\n' >&2
@@ -67,6 +73,7 @@ if [ -z "$target" ]; then
 fi
 
 printf 'installing lkmabt in %s\n' "$target"
+# GOWORK=off ignores any enclosing go.work so the install builds this module.
 (
 	cd "$repo_root"
 	GOWORK=off GOBIN="$target" go install ./cmd/lkmabt

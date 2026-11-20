@@ -3,15 +3,32 @@ package collector
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+// transientSourceError is a retryable network-style source failure.
+type transientSourceError struct{ message string }
+
+// Error returns the configured failure text.
+func (e transientSourceError) Error() string { return e.message }
+
+// Timeout marks the error as a timeout for net.Error classification.
+func (e transientSourceError) Timeout() bool { return true }
+
+// Temporary marks the error as retryable for net.Error classification.
+func (e transientSourceError) Temporary() bool { return true }
 
 var _ = ginkgo.Describe("Collector", func() {
 	ginkgo.It("verifies required failure artifacts", func() {
@@ -296,7 +313,138 @@ var _ = ginkgo.Describe("Collector", func() {
 		err = verifyFailedBuildLogs(root, []model.FailedBuildLog{{LogPath: filepath.Join("failed-builds", "build.log")}})
 		Expect(err).NotTo(HaveOccurred())
 	})
+
+	ginkgo.It("retries a transient required source", func() {
+		root := ginkgo.GinkgoT().TempDir()
+		sources := requiredTestSources()
+		calls := 0
+		for index := range sources {
+			if sources[index].Path != "workload/pods.json" {
+				continue
+			}
+			collect := sources[index].Collect
+			sources[index].Collect = func(ctx context.Context, root string) error {
+				calls++
+				if calls < 3 {
+					return transientSourceError{"read pods: timeout"}
+				}
+				return collect(ctx, root)
+			}
+		}
+		collector := Collector{StateDir: root, RetryDelay: time.Millisecond}
+
+		report, err := collector.Collect(context.Background(), "run-retry", model.RunManifest{RunID: "run-retry"}, sources)
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(calls).To(Equal(3))
+		attempt := attemptForPath(report, "workload/pods.json")
+		Expect(attempt.Status).To(Equal("success"))
+		Expect(attempt.Retries).To(Equal(2))
+	})
+
+	ginkgo.It("keeps pods.json mandatory after retries are exhausted", func() {
+		root := ginkgo.GinkgoT().TempDir()
+		sources := requiredTestSources()
+		calls := 0
+		for index := range sources {
+			if sources[index].Path != "workload/pods.json" {
+				continue
+			}
+			sources[index].Collect = func(context.Context, string) error {
+				calls++
+				return transientSourceError{"read pods: timeout"}
+			}
+		}
+		collector := Collector{StateDir: root, Retries: 1, RetryDelay: time.Millisecond}
+
+		report, err := collector.Collect(context.Background(), "run-retry-fail", model.RunManifest{RunID: "run-retry-fail"}, sources)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(calls).To(Equal(2))
+		attempt := attemptForPath(report, "workload/pods.json")
+		Expect(attempt.Status).To(Equal("error"))
+		Expect(attempt.Retries).To(Equal(1))
+
+		_, err = collector.VerifySavedArtifacts("run-retry-fail", model.RunManifest{RunID: "run-retry-fail"})
+
+		Expect(err).Should(HaveOccurred())
+		Expect(err.Error()).Should(ContainSubstring("workload/pods.json"))
+	})
+
+	ginkgo.It("does not retry non-transient required source failures", func() {
+		root := ginkgo.GinkgoT().TempDir()
+		sources := requiredTestSources()
+		calls := 0
+		for index := range sources {
+			if sources[index].Path != "workload/pods.json" {
+				continue
+			}
+			sources[index].Collect = func(context.Context, string) error {
+				calls++
+				return errors.New("access denied")
+			}
+		}
+		collector := Collector{StateDir: root, Retries: 2, RetryDelay: time.Millisecond}
+
+		report, err := collector.Collect(context.Background(), "run-no-retry", model.RunManifest{RunID: "run-no-retry"}, sources)
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(calls).To(Equal(1))
+		attempt := attemptForPath(report, "workload/pods.json")
+		Expect(attempt.Status).To(Equal("error"))
+		Expect(attempt.Retries).To(BeZero())
+	})
+
+	ginkgo.It("stops retrying when the collection context ends", func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		root := ginkgo.GinkgoT().TempDir()
+		sources := requiredTestSources()
+		calls := 0
+		for index := range sources {
+			if sources[index].Path != "workload/pods.json" {
+				continue
+			}
+			sources[index].Collect = func(context.Context, string) error {
+				calls++
+				cancel()
+				return transientSourceError{"read pods: timeout"}
+			}
+		}
+		collector := Collector{StateDir: root, Retries: 2, RetryDelay: time.Millisecond}
+
+		report, err := collector.Collect(ctx, "run-canceled", model.RunManifest{RunID: "run-canceled"}, sources)
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(calls).To(Equal(1))
+		attempt := attemptForPath(report, "workload/pods.json")
+		Expect(attempt.Status).To(Equal("error"))
+		Expect(attempt.Retries).To(BeZero())
+	})
+
+	ginkgo.DescribeTable("classifies retryable collection errors",
+		func(err error, want bool) {
+			Expect(transientCollectionError(err)).To(Equal(want))
+		},
+		ginkgo.Entry("network timeout", fmt.Errorf("read: %w", transientSourceError{"timeout"}), true),
+		ginkgo.Entry("client-go body-read timeout", fmt.Errorf("unexpected error when reading response body. Please retry. Original error: %w", &url.Error{Op: "Get", URL: "https://api.example", Err: context.DeadlineExceeded}), true),
+		ginkgo.Entry("service unavailable", apierrors.NewServiceUnavailable("try later"), true),
+		ginkgo.Entry("too many requests", apierrors.NewTooManyRequests("slow down", 1), true),
+		ginkgo.Entry("forbidden", apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "pods", errors.New("denied")), false),
+		ginkgo.Entry("canceled", context.Canceled, false),
+		ginkgo.Entry("generic", errors.New("bad request"), false),
+	)
 })
+
+// attemptForPath returns the collection attempt for a source path.
+func attemptForPath(report Report, path string) Attempt {
+	for _, attempt := range report.Attempts {
+		if attempt.Path == path {
+			return attempt
+		}
+	}
+	ginkgo.Fail("no collection attempt for " + path)
+	return Attempt{}
+}
 
 // requiredTestSources returns source callbacks that create all baseline artifacts.
 func requiredTestSources() []Source {

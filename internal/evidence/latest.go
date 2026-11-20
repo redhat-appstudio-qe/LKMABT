@@ -1,3 +1,6 @@
+// Package evidence stores run manifests and status snapshots, rotates the
+// aggregate latest directory, and redacts credential-like keys before writing
+// JSON.
 package evidence
 
 import (
@@ -29,7 +32,8 @@ type aggregateMetadata struct {
 
 // LockLatest acquires the state-directory lock without changing latest. Callers
 // use it to keep the latest directory stable while reading a run from it. It
-// returns ErrLatestLocked when another process holds the lock.
+// creates the state root when absent and returns ErrLatestLocked when another
+// process holds the lock.
 func (s ManifestStore) LockLatest() (func(), error) {
 	if err := os.MkdirAll(s.Root, 0o750); err != nil {
 		return nil, err

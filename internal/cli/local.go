@@ -31,14 +31,21 @@ import (
 
 // LiveRunner executes provider workflows and cleanup against live cluster services.
 type LiveRunner struct {
-	Prompt      workflow.Confirmation
-	Out         io.Writer
+	// Prompt decides whether finalization and cleanup may delete the tenant
+	// namespace. A nil prompt never deletes during a run; during Cleanup it is
+	// an error, because cleanup accepts no implicit approval.
+	Prompt workflow.Confirmation
+	// Out receives human-facing notices. When Out is a *Console, steps,
+	// progress, and buffered prompts are routed through it.
+	Out io.Writer
+	// Interactive permits input prompts and browser logins.
 	Interactive bool
 }
 
-// NewLiveRunner returns a runner wired to live services, the supplied
-// confirmation prompt, the writer for human-facing notices, and whether the
-// run may prompt for input or open a browser.
+// NewLiveRunner returns a Runner backed by the live cluster services. prompt
+// approves finalization and cleanup deletions and stays nil when no deletion is
+// allowed; out receives human-facing notices; interactive permits input prompts
+// and browser logins.
 func NewLiveRunner(prompt workflow.Confirmation, out io.Writer, interactive bool) Runner {
 	return LiveRunner{Prompt: prompt, Out: out, Interactive: interactive}
 }
@@ -69,7 +76,8 @@ func (p consolePrompt) Confirm(ctx context.Context, message string) (bool, error
 	return p.console.confirm(ctx, p.prompt, message)
 }
 
-// providerLabel returns the step label for a split both run and "" otherwise.
+// providerLabel returns the provider name for a request split across providers
+// and "" for a single-provider request.
 func providerLabel(request config.Request) string {
 	if request.MultiProvider {
 		return request.Provider
@@ -95,7 +103,20 @@ func suspendOutput(out io.Writer) func() {
 	return func() {}
 }
 
-// Run executes a provider workflow against the request's cluster, writing its output to log.
+// Run executes one provider workflow against the request's cluster and then
+// finalizes it.
+//
+// The tenant namespace is reserved across processes before the workflow starts,
+// because a concurrent run must not delete resources this run still owns. The
+// lock stays held through finalization, which runs even when the workflow fails:
+// it collects failure artifacts or verifies saved ones, removes the run-scoped
+// GitLab Secret when the run created one, and prompts for optional namespace
+// deletion.
+//
+// Run may be called concurrently; the per-namespace lock serializes runs that
+// share a tenant namespace. Failures before the workflow starts return an
+// outcome carrying only the provider name. A workflow failure is wrapped with
+// its ending phase, and any finalization failure is joined into the same error.
 func (runner LiveRunner) Run(ctx context.Context, request config.Request, log RunLog) (RunOutcome, error) {
 	clients, err := cluster.NewClientSet(request.Kubeconfig)
 	if err != nil {
@@ -134,7 +155,6 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 		RunID:            request.RunID,
 		Provider:         request.Provider,
 		ClusterServer:    request.ClusterServer,
-		StateDir:         request.StateDir,
 		FixtureNamespace: request.TenantNamespace,
 		Application:      request.ApplicationName,
 		Timeouts:         workflow.PhaseTimeouts{Preflight: request.Timeouts.Preflight, Build: request.Timeouts.Build},
@@ -161,7 +181,16 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	return outcome, nil
 }
 
-// Cleanup resolves the named cluster, locates its run, and prompts before deleting the tenant namespace.
+// Cleanup resolves the named cluster, locates the run under the state directory,
+// and deletes the tenant namespace only after verification and explicit
+// confirmation.
+//
+// The configured server must match the server the kubeconfig connects to.
+// Cleanup acquires the latest-directory lock before searching, so a live run
+// cannot rotate latest underneath it. If a live run already holds that lock, it
+// searches only permanent aggregate directories and appends a retry hint when
+// the run is not found there. A nil prompt is an error; a declined confirmation
+// leaves the namespace in place and is not an error.
 func (runner LiveRunner) Cleanup(ctx context.Context, request config.Request) error {
 	if request.Command != config.CommandCleanup {
 		return fmt.Errorf("unsupported cleanup command %q", request.Command)
@@ -176,7 +205,11 @@ func (runner LiveRunner) Cleanup(ctx context.Context, request config.Request) er
 	}
 	authStep := stepFor(runner.Out, fmt.Sprintf("Authenticate cluster %s 🔐", entry.Name))
 	resume := suspendOutput(runner.Out)
-	failure := (clusterauth.Ladder{Runner: clusterauth.ExecRunner{Log: os.Stdout}}).Authenticate(ctx, []clusterfile.Entry{entry})[entry.Name]
+	resolved, failures := (clusterauth.Ladder{Runner: clusterauth.ExecRunner{Log: os.Stdout}}).Authenticate(ctx, []clusterfile.Entry{entry})
+	failure := failures[entry.Name]
+	if failure == nil && len(resolved) > 0 {
+		entry = resolved[0]
+	}
 	resume()
 	authStep.End(failure == nil)
 	if failure != nil {
@@ -235,7 +268,11 @@ func locateNamedRunStateRoot(stateDir, clusterName, runID string) (string, error
 	return locateRunStateRootSkipping(stateDir, clusterName, runID, "latest")
 }
 
-// locateRunStateRootSkipping scans aggregate directories, excluding skip when set.
+// locateRunStateRootSkipping returns the single <stateDir>/<aggregate>/<cluster>
+// directory whose runs include runID, ignoring the aggregate named skip and
+// hidden directories. Unreadable or malformed entries are skipped; the result is
+// an error when no directory matches or when several do, because the caller
+// cannot safely pick one.
 func locateRunStateRootSkipping(stateDir, clusterName, runID, skip string) (string, error) {
 	aggregates, err := os.ReadDir(stateDir)
 	if err != nil {
@@ -275,8 +312,11 @@ func locateRunStateRootSkipping(stateDir, clusterName, runID, skip string) (stri
 	return matches[0], nil
 }
 
-// cleanupRun verifies saved evidence and namespace ownership before prompting
-// for deletion. The declined-cleanup retention notice goes to out.
+// cleanupRun deletes one run's tenant namespace after refusing unsafe requests:
+// it requires an exact run ID, a manifest whose server matches the request, and
+// verified saved artifacts, then confirms the namespace labels and run ID before
+// locking it and prompting. A nil prompt is an error; a declined prompt writes a
+// retention notice to out and returns nil.
 func cleanupRun(ctx context.Context, request config.Request, store evidence.ManifestStore, namespaceService cleanup.NamespaceService, prompt workflow.Confirmation, out io.Writer) error {
 	if out == nil {
 		out = io.Discard
@@ -331,7 +371,6 @@ func cleanupRun(ctx context.Context, request config.Request, store evidence.Mani
 		return err
 	}
 	if !approved {
-		// The cleanup command writes its retention notice to the console writer supplied by the caller.
 		fmt.Fprintf(out, "retained tenant namespace %s\n", namespace)
 		return nil
 	}
@@ -355,13 +394,21 @@ func normalizeServer(server string) string {
 	return strings.TrimRight(strings.TrimSpace(server), "/")
 }
 
+// Lifecycle finalizes one run: it verifies or collects artifacts, deletes the
+// run-scoped GitLab Secret, and optionally deletes the run-owned tenant
+// namespace.
 type Lifecycle struct {
+	// Store persists failure-artifact reports when Root is set.
 	Store     evidence.ManifestStore
 	Namespace cleanup.NamespaceService
+	// Collector verifies saved artifacts; an empty StateDir disables verification.
 	Collector collector.Collector
-	Prompt    workflow.Confirmation
-	Sources   []collector.Source
-	Log       io.Writer
+	// Prompt must approve namespace deletion; a nil prompt never deletes.
+	Prompt workflow.Confirmation
+	// Sources overrides the collector sources otherwise derived from Namespace.Dynamic.
+	Sources []collector.Source
+	// Log receives retention notices; nil discards them.
+	Log io.Writer
 }
 
 // finalizationTimeout bounds cleanup work after the workflow context is done.
@@ -372,6 +419,8 @@ var namespaceDeletionTimeout = 5 * time.Minute
 
 // waitForNamespaceDeletion bounds the deletion wait so a lingering finalizer or
 // stuck API call fails with the namespace name instead of hanging the process.
+// When deletion times out, the reported error names the blocking resource if the
+// cluster can still be queried.
 func waitForNamespaceDeletion(ctx context.Context, service cleanup.NamespaceService, name string, uid types.UID) error {
 	waitCtx, cancel := context.WithTimeout(ctx, namespaceDeletionTimeout)
 	defer cancel()
@@ -386,10 +435,22 @@ func waitForNamespaceDeletion(ctx context.Context, service cleanup.NamespaceServ
 	return nil
 }
 
-// Finalize collects and verifies run artifacts, then prompts before optionally deleting the owned namespace.
-// Inspection, credential deletion, and artifact collection use a fresh bounded context so a canceled
-// run still removes the ephemeral GitLab Secret. The prompt and namespace deletion keep the run context,
-// so a canceled run retains the namespace.
+// Finalize verifies the run's saved artifacts, deletes the ephemeral GitLab
+// Secret, and asks whether to delete the run-owned tenant namespace. It returns
+// nil when the run has no tenant namespace or the namespace is already gone.
+//
+// Inspection, secret deletion, and artifact collection use a fresh context
+// bounded by finalizationTimeout, so they still complete after ctx is canceled.
+// The confirmation prompt and namespace deletion use ctx, so a canceled or
+// timed-out run retains its namespace. On failure, artifacts are collected into
+// manifest.FailureArtifacts and the manifest is saved when Store.Root is set.
+// Secret-deletion and collection errors are joined into the returned error.
+//
+// A namespace whose ownership cannot be confirmed is an error, except when the
+// run already failed and the manifest phase is failed; that case returns without
+// deleting the namespace or the Secret. A nil Prompt never deletes the
+// namespace. On a successful run with a non-nil Prompt, Collector.StateDir must
+// be set because cleanup requires verified artifacts.
 func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, runErr error) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
 	defer cancel()
@@ -417,7 +478,7 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 	if runErr != nil {
 		sources := l.Sources
 		if sources == nil && l.Namespace.Dynamic != nil {
-			sources = collector.KubernetesSources(l.Namespace.Dynamic, namespace, manifest.RunID)
+			sources = collector.KubernetesSources(l.Namespace.Dynamic, namespace)
 		}
 		report, collectErr := l.Collector.CollectAndVerify(cleanupCtx, manifest.RunID, manifest, sources)
 		manifest.FailureArtifacts = &report
@@ -432,7 +493,7 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 	} else if l.Collector.StateDir != "" {
 		sources := l.Sources
 		if sources == nil && l.Namespace.Dynamic != nil {
-			sources = collector.KubernetesSources(l.Namespace.Dynamic, namespace, manifest.RunID)
+			sources = collector.KubernetesSources(l.Namespace.Dynamic, namespace)
 		}
 		if _, err := l.Collector.CollectAndVerify(cleanupCtx, manifest.RunID, manifest, sources); err != nil {
 			return errors.Join(secretErr, err)
@@ -459,7 +520,10 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 }
 
 // deleteGitLabCredentialSecret removes the run-scoped GitLab SCM Secret after
-// confirming the harness owns it for runID. A missing Secret is already cleaned up.
+// confirming the harness owns it for runID. A missing Secret counts as already
+// cleaned up. Deletion is refused when the ownership labels do not match, and
+// otherwise carries the Secret's UID as a precondition so a replacement is not
+// deleted.
 func deleteGitLabCredentialSecret(ctx context.Context, client dynamic.Interface, namespace, runID string) error {
 	if client == nil {
 		return fmt.Errorf("dynamic client is required to delete the ephemeral GitLab SCM Secret")
@@ -495,6 +559,7 @@ func (l Lifecycle) logWriter() io.Writer {
 }
 
 // outcomeFromManifest reports the run identity and the stage the run ended on.
+// A recorded failure phase takes precedence over the manifest's final phase.
 func outcomeFromManifest(provider string, manifest model.RunManifest) RunOutcome {
 	stage := manifest.Phase
 	if manifest.Failure != nil {
@@ -511,8 +576,8 @@ func runErrorWithLogFailure(runErr, attachErr error) error {
 	return errors.Join(runErr, fmt.Errorf("attach run log: %w", attachErr))
 }
 
-// revokeGitLabToken revokes a run-acquired GitLab personal access token once,
-// after every cluster has finished using it.
+// revokeGitLabToken revokes a run-acquired GitLab personal access token.
+// RunClusters calls it once, after every cluster has finished using the token.
 var revokeGitLabToken = func(ctx context.Context, token, apiURL string) error {
 	adapter, err := gitlab.NewFromCredentials(token, apiURL)
 	if err != nil {
@@ -521,15 +586,20 @@ var revokeGitLabToken = func(ctx context.Context, token, apiURL string) error {
 	return adapter.RevokeToken(ctx)
 }
 
-// finalizeRun collects artifacts and finalizes the tenant namespace for one completed or failed run.
+// finalizeRun collects artifacts and finalizes the tenant namespace for one
+// completed or failed run. It derives collector sources from the live cluster,
+// including pod logs since manifest.CreatedAt from the tenant and default log
+// namespaces, and reuses the stage's prompt so the confirmation policy matches
+// the run.
 func (runner LiveRunner) finalizeRun(ctx context.Context, request config.Request, clients *cluster.ClientSet, stage *workflow.LiveStage, store evidence.ManifestStore, manifest model.RunManifest, runErr error, log io.Writer) error {
-	sources := collector.KubernetesSources(clients.Dynamic, manifest.Fixture.TenantNamespace, manifest.RunID)
+	sources := collector.KubernetesSources(clients.Dynamic, manifest.Fixture.TenantNamespace)
 	sources = append(sources, collector.KubernetesPodLogSources(clients.Kubernetes, manifest.Fixture.TenantNamespace, manifest.CreatedAt)...)
 	lifecycle := Lifecycle{Store: store, Namespace: stage.Namespace, Collector: collector.Collector{StateDir: request.StateDir}, Prompt: stage.Prompt, Sources: sources, Log: log}
 	return lifecycle.Finalize(ctx, manifest, runErr)
 }
 
-// providerFor constructs the provider client selected by request credentials.
+// providerFor returns the provider client selected by request.Provider and
+// request credentials, or an error when the provider is not GitHub or GitLab.
 func providerFor(request config.Request) (providers.Provider, error) {
 	switch request.Provider {
 	case config.ProviderGitHub:

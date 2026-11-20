@@ -48,11 +48,12 @@ var (
 var githubAccessCheckTimeout = 30 * time.Second
 
 // checkGitHubToken verifies, under a bounded context, that a token can list App
-// installations, update the fixture repository, and list the repositories of
-// selected App installations. It falls back to the existing
-// gh login and then to a browser login only when GitHub rejects the credential;
-// transient, rate-limit, timeout, and cancellation errors abort the run without
-// replacing a usable token.
+// installations, confirm push access to the fixture repository, and list the
+// repositories of selected App installations. It checks the configured token
+// first, then the existing gh login, and reports needsLogin when both are
+// rejected so the caller can start a browser login. Only an access rejection
+// triggers that fallback; transient, rate-limit, timeout, and cancellation
+// errors abort the run without replacing a usable token.
 func checkGitHubToken(ctx context.Context, request *config.Request, console *Console) (needsLogin bool, err error) {
 	check := func(token string) error {
 		checkCtx, cancel := context.WithTimeout(ctx, githubAccessCheckTimeout)
@@ -108,15 +109,34 @@ var readGitLabToken = func() (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
+// clusterRun holds one clusters-file entry's authentication failure or the
+// results of its providers.
 type clusterRun struct {
 	Entry   clusterfile.Entry
 	AuthErr error
 	Results []ProviderResult
 }
 
-// RunClusters authenticates every listed cluster, acquires provider credentials
-// when needed, rejects entries that resolve to one API server, runs the clusters
-// one at a time in clusters-file order, and writes the aggregate reports.
+// RunClusters loads the clusters file, acquires provider credentials,
+// authenticates the entries, runs each cluster in clusters-file order, and
+// writes the aggregate reports.
+//
+// Credentials are resolved before cluster authentication. In an interactive
+// run, a configured GitHub token is checked and replaced by the existing gh
+// login or a browser login only when GitHub rejects it; a non-interactive run
+// uses the configured token without checking it. A pasted GitLab token is
+// marked ephemeral and revoked after the last cluster finishes. Entries that
+// resolve to one API server are rejected after authentication, so one run
+// cannot delete another's namespace. Clusters run one at a time, while each
+// cluster's selected providers run concurrently. The run rotates the state
+// directory's latest aggregate directory before cluster authentication, falling
+// back to a permanent directory with a logged warning when preparation fails for
+// another reason; a concurrent run already holding the lock is refused.
+//
+// GitLab token revocation failures and gh credential-store destruction failures
+// are reported as a credentials row in the aggregate report and joined into the
+// returned error. Both operations are idempotent, so the deferred calls still
+// clean up when RunClusters returns before writing the report.
 func RunClusters(ctx context.Context, request config.Request, runner Runner, console *Console) (runErr error) {
 	entries, err := clusterfile.Load(request.ClustersFile)
 	if err != nil {
@@ -228,11 +248,13 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 	}
 	defer aggregate.Close()
 	ladder := clusterauth.Ladder{Runner: clusterauth.ExecRunner{Log: aggregate.Log}, Log: aggregate.Log}
-	authFailures := ladder.Authenticate(ctx, entries)
+	entries, authFailures := ladder.Authenticate(ctx, entries)
 	if err := rejectDuplicateServers(entries, authFailures); err != nil {
 		return err
 	}
 	runs := scheduleClusters(ctx, request, entries, authFailures, aggregate, runner, console)
+	// Clean up credentials before rendering so their failures appear in the
+	// report; the defers above remain a no-op after these calls.
 	var cleanupErr error
 	if store != nil {
 		cleanupErr = destroyCredentials(store)
@@ -245,7 +267,8 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 }
 
 // validateInteractiveGitLabURL rejects the token-page prompt for API endpoints
-// other than gitlab.com, because the page issues gitlab.com tokens.
+// other than gitlab.com, because the page issues gitlab.com tokens. An empty URL
+// means the default gitlab.com endpoint.
 func validateInteractiveGitLabURL(apiURL string) error {
 	apiURL = strings.TrimSpace(apiURL)
 	if apiURL == "" {
@@ -273,7 +296,8 @@ func providerNeedsGitLab(provider string) bool {
 
 // serverIdentity returns a comparison key for an API server URL, so equivalent
 // spellings cannot pass as distinct clusters. Scheme, host, port, and path all
-// participate; host case and an explicit default port are normalized away.
+// participate; scheme and host case and an explicit default port are normalized
+// away.
 func serverIdentity(server string) string {
 	normalized := normalizeServer(server)
 	parsed, err := url.Parse(normalized)
@@ -338,7 +362,9 @@ func rejectDuplicateServers(entries []clusterfile.Entry, authFailures map[string
 	return nil
 }
 
-// scheduleClusters runs authenticated clusters one at a time in clusters-file order.
+// scheduleClusters runs authenticated clusters one at a time in clusters-file
+// order. A cluster whose authentication failed keeps its AuthErr and produces no
+// provider results; the remaining clusters still run.
 func scheduleClusters(ctx context.Context, request config.Request, entries []clusterfile.Entry, authFailures map[string]error, aggregate *aggregateRun, runner Runner, console *Console) []clusterRun {
 	runs := make([]clusterRun, len(entries))
 	for index, entry := range entries {
@@ -367,19 +393,21 @@ func resultSummary(results []ProviderResult) string {
 	return fmt.Sprintf("%d passed, %d failed", passed, len(results)-passed)
 }
 
-// finishAggregateRun renders both reports, prints the summary, and reports the aggregate failure.
+// finishAggregateRun writes the run-named Markdown and HTML reports, prints one
+// summary line per row, and joins cluster, credential-cleanup, and report-writing
+// failures. A non-nil cleanupErr adds a credentials row to the report.
 func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []clusterRun, console *Console, cleanupErr error) error {
 	rows := reportRows(aggregate.Directory, aggregate.runLogName(), runs, providerNames(request.Provider))
 	if cleanupErr != nil {
 		rows = append(rows, report.Row{Cluster: "credentials", Provider: "auth", Stage: report.StageCleanup, Error: cleanupErr.Error(), Links: report.Links(aggregate.Directory, aggregate.runLogName(), "", "")})
 	}
-	document := report.Document{RunID: aggregate.RunID, ClustersFile: request.ClustersFile, StartedAt: aggregate.StartedAt, EndedAt: time.Now().UTC(), Passed: allPassed(rows), Rows: rows}
+	document := report.Document{RunID: aggregate.RunID, ClustersFile: request.ClustersFile, Architectures: request.Platforms, StartedAt: aggregate.StartedAt, EndedAt: time.Now().UTC(), Passed: allPassed(rows), Rows: rows}
 	step := console.StartStep("Write reports 📝")
 	writeErr := report.Write(aggregate.Directory, document, aggregate.Name)
 	step.End(writeErr == nil)
 	console.Printf("")
 	for _, row := range rows {
-		console.Printf("%s %s: %s (%s)", row.Cluster, row.Provider, row.Result(), row.Stage)
+		console.Printf("%s %s: %s (%s); architectures: %s", row.Cluster, row.Provider, row.Result(), row.Stage, document.ArchitecturesText())
 	}
 	markdownPath, htmlPath := aggregate.reportPaths()
 	console.Printf("report: %s", markdownPath)
@@ -404,7 +432,10 @@ func aggregateError(runs []clusterRun) error {
 	return errors.Join(failures...)
 }
 
-// runCluster prepares one cluster's state root and run log, then runs its providers.
+// runCluster prepares one cluster's state root and run log, resolves the API
+// server when the entry carries none, and runs the cluster's selected providers
+// concurrently. Setup failures are reported as the same failure for every
+// selected provider, so the aggregate report always has a row per provider.
 func runCluster(ctx context.Context, request config.Request, entry clusterfile.Entry, aggregateDirectory string, runner Runner) []ProviderResult {
 	directory := filepath.Join(aggregateDirectory, entry.Name)
 	if err := os.MkdirAll(directory, 0o750); err != nil {
@@ -429,7 +460,9 @@ func runCluster(ctx context.Context, request config.Request, entry clusterfile.E
 	return runProviders(ctx, clusterRequest, runner)
 }
 
-// reportRows builds one row per cluster and provider in clusters-file order.
+// reportRows builds one row per cluster and provider in clusters-file order. An
+// authentication failure yields one failed row per selected provider; otherwise
+// rows follow the provider results in their fixed order.
 func reportRows(aggregateDirectory, aggregateLog string, runs []clusterRun, providers []string) []report.Row {
 	rows := make([]report.Row, 0, len(runs)*len(providers))
 	for _, run := range runs {
@@ -464,7 +497,9 @@ func errorText(err error) string {
 	return err.Error()
 }
 
-// failedResults reports the same cluster-level failure for every selected provider.
+// failedResults reports the same cluster-level failure for every selected
+// provider, at the preflight stage because the cluster failed before a workflow
+// started.
 func failedResults(provider string, err error) []ProviderResult {
 	names := providerNames(provider)
 	results := make([]ProviderResult, 0, len(names))

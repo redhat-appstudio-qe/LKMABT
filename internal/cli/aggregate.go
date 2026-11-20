@@ -11,6 +11,8 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/evidence"
 )
 
+// aggregateRun holds one multi-cluster run: its identity, the directory and log
+// shared by every cluster, and the state-directory lock that Close releases.
 type aggregateRun struct {
 	RunID     string
 	Name      string
@@ -21,10 +23,12 @@ type aggregateRun struct {
 }
 
 // newAggregateRun rotates the previous latest aggregate directory in place,
-// creates a fresh real latest directory, and opens its run log. The returned
-// run holds the state-directory lock until Close. If latest preparation fails
-// for a reason other than another live run, the run falls back to a permanent
-// directory and records a warning in the run log.
+// creates a fresh real latest directory under stateDir, and opens its run log.
+// On success Directory is <stateDir>/latest and the returned run holds the
+// state-directory lock until Close. If latest preparation fails for a reason
+// other than another live run, the run falls back to a permanent
+// <stateDir>/<name> directory without the lock and records a warning in the run
+// log.
 func newAggregateRun(stateDir string) (*aggregateRun, error) {
 	startedAt := time.Now().UTC()
 	runID := "run-" + uuid.NewString()
@@ -58,7 +62,8 @@ func aggregateFileName(runName, base string) string {
 	return runName + "-" + base
 }
 
-// Close closes the run log and releases the state-directory lock.
+// Close closes the run log and releases the state-directory lock. It is safe to
+// call more than once; later calls are no-ops.
 func (a *aggregateRun) Close() error {
 	err := a.Log.Close()
 	if a.release != nil {
@@ -73,7 +78,7 @@ func (a *aggregateRun) reportPaths() (string, string) {
 	return filepath.Join(a.Directory, aggregateFileName(a.Name, "report.md")), filepath.Join(a.Directory, aggregateFileName(a.Name, "report.html"))
 }
 
-// runLogName returns the run-named aggregate log file.
+// runLogName returns the file name of the aggregate run log, without a directory.
 func (a *aggregateRun) runLogName() string {
 	return aggregateFileName(a.Name, "run.log")
 }

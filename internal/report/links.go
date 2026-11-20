@@ -7,7 +7,13 @@ import (
 	"path/filepath"
 )
 
-// Links lists every existing artifact for one report row, relative to the aggregate directory.
+// Links lists every existing artifact for one report row, relative to the
+// aggregate directory. aggregateLog is a slash-relative file name inside that
+// directory; providerDirectory is slash-relative to the cluster directory.
+// An empty cluster yields only the aggregate log, and an empty providerDirectory
+// stops after cluster-level links. Entries appear in a fixed order and only for
+// artifacts that exist when called; files found under logs/ and failed-builds/
+// are labeled with their path relative to the aggregate directory.
 func Links(aggregateDirectory, aggregateLog, cluster, providerDirectory string) []Link {
 	links := make([]Link, 0, 8)
 	links = appendFile(links, aggregateDirectory, aggregateLog, "aggregate run.log")
@@ -30,7 +36,8 @@ func Links(aggregateDirectory, aggregateLog, cluster, providerDirectory string) 
 	return links
 }
 
-// appendFile adds a link when relative names an existing regular file under root.
+// appendFile adds a link when relative names an existing regular file under
+// root. Symlinks are not followed: a symlink to a file is not reported.
 func appendFile(links []Link, root, relative, label string) []Link {
 	info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(relative)))
 	if err != nil || !info.Mode().IsRegular() {
@@ -39,7 +46,8 @@ func appendFile(links []Link, root, relative, label string) []Link {
 	return append(links, Link{Label: label, Target: "./" + relative})
 }
 
-// appendDir adds a link when relative names an existing directory under root.
+// appendDir adds a link with a trailing slash when relative names an existing
+// directory under root. A symlink to a directory is followed.
 func appendDir(links []Link, root, relative, label string) []Link {
 	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(relative)))
 	if err != nil || !info.IsDir() {
@@ -48,7 +56,8 @@ func appendDir(links []Link, root, relative, label string) []Link {
 	return append(links, Link{Label: label, Target: "./" + relative + "/"})
 }
 
-// appendTree adds one link per regular file found under the relative subtree.
+// appendTree adds one link per regular file found under the relative subtree,
+// labeling each with its path relative to root and skipping symlinks.
 func appendTree(links []Link, root, relative string) []Link {
 	base := filepath.Join(root, filepath.FromSlash(relative))
 	info, err := os.Stat(base)

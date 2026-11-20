@@ -1,3 +1,6 @@
+// Package auth acquires and stores run-scoped credentials: it reuses or creates
+// a GitHub login and keeps tokens in a private temporary directory that is
+// deleted when the run ends.
 package auth
 
 import (
@@ -17,9 +20,11 @@ const (
 	ghConfigSubdir      = "gh"
 )
 
-// ExistingGitHubToken returns the token stored by the user's normal gh login.
-// It clears provider token variables so gh reads its own credential instead of
-// an ambient GH_TOKEN or GITHUB_TOKEN.
+// ExistingGitHubToken returns the token stored by the user's normal gh login for
+// github.com. It clears provider token variables so gh reads its own credential
+// instead of an ambient GH_TOKEN or GITHUB_TOKEN. It requires gh on PATH and
+// returns an error when gh is missing, the token lookup fails, or gh prints an
+// empty token.
 func ExistingGitHubToken(ctx context.Context, runner clusterauth.CommandRunner) (string, error) {
 	if runner == nil {
 		return "", fmt.Errorf("command runner is required")
@@ -42,8 +47,11 @@ func ExistingGitHubToken(ctx context.Context, runner clusterauth.CommandRunner) 
 	return token, nil
 }
 
-// GitHubToken runs the gh web login in an isolated configuration directory and
-// stores the resulting token in store.
+// GitHubToken runs the gh web login in an isolated configuration directory under
+// store and stores the resulting token there. The login requests the repo,
+// read:org, and read:user scopes and writes gh's insecure plain-file credential
+// inside that directory, which is removed before returning. It fails when
+// interactive is false, the runner or store is missing, or gh is not on PATH.
 func GitHubToken(ctx context.Context, runner clusterauth.CommandRunner, store *Store, interactive bool) (string, error) {
 	if !interactive {
 		return "", fmt.Errorf("GitHub authentication is required: set GITHUB_TOKEN or run in a terminal to use the gh browser login")
