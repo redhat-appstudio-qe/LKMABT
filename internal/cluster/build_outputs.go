@@ -21,8 +21,9 @@ var (
 	TaskRunGVR = schema.GroupVersionResource{Group: "tekton.dev", Version: "v1", Resource: "taskruns"}
 )
 
-// BuildOutputInspector verifies that a successful PipelineRun's Buildah
-// TaskRuns produced one image per expected platform.
+// BuildOutputInspector verifies that a PipelineRun's successful Buildah
+// TaskRuns produced one image per expected platform. It does not require the
+// PipelineRun to finish, so post-build tasks cannot mask verified build outputs.
 type BuildOutputInspector struct {
 	// Dynamic reads PipelineRuns and TaskRuns for Verify; VerifyListed ignores it.
 	Dynamic dynamic.Interface
@@ -118,9 +119,10 @@ func (i BuildOutputInspector) verifyPipelineRun(ctx context.Context, identity mo
 
 // verifyObjects validates a supplied PipelineRun and its TaskRuns and extracts
 // the successful Buildah outputs. The PipelineRun must match the identity UID
-// when set, carry a component identity, and have a Succeeded=True condition. A
-// failed build TaskRun is an error; TaskRuns that have not succeeded are
-// ignored. Every expected platform must have an output URL and digest.
+// when set and carry a component identity; its own Succeeded condition is not a
+// gate, because LKMABT stops at the build stage and post-build tasks are out of
+// scope. A failed Buildah TaskRun is an error; TaskRuns that have not succeeded
+// are ignored. Every expected platform must have an output URL and digest.
 func (i BuildOutputInspector) verifyObjects(identity model.PipelineRunIdentity, pipelineRun *unstructured.Unstructured, taskRuns []unstructured.Unstructured, expected []string, verifiedAt time.Time) (model.BuildOutputEvidence, error) {
 	if strings.TrimSpace(identity.Namespace) == "" || strings.TrimSpace(identity.Name) == "" {
 		return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun identity is incomplete")
@@ -133,9 +135,6 @@ func (i BuildOutputInspector) verifyObjects(identity model.PipelineRunIdentity, 
 	}
 	if identity.Component == "" {
 		return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun %s/%s has no component identity", identity.Namespace, identity.Name)
-	}
-	if conditionStatus(pipelineRun) != "True" {
-		return model.BuildOutputEvidence{}, fmt.Errorf("PipelineRun %s/%s has not succeeded", identity.Namespace, identity.Name)
 	}
 	createdOutputs := make(map[string]string)
 	outputDigests := make(map[string]string)

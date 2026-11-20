@@ -157,7 +157,7 @@ definitions via import when the same GVR is needed across packages.
 1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries (a static `host.<name>.platform` entry must also have `address`, `user`, and `secret`), and the cluster's GitHub App installation (GitHub runs; interactive runs wait for and can extend a missing installation wait). Each requested platform is classified against the live host-config: an undeclared platform is informational and the selection is narrowed to the supported subset for this cluster; a declared but incomplete platform fails, as does a cluster that supports none of the requested platforms. The GitHub App check is independent of architecture support
 2. **Fixture Ready** — Validate test repositories are accessible, read current Dockerfile SHAs
 3. **Triggered** — Set each fixture PipelineRun's `build-platforms` parameter to the selected architectures, append trigger comments to Dockerfiles, commit changes. Configuration commits use the `lkmabt configure [skip ci]` subject so PaC creates no throwaway PipelineRun for them
-4. **Builds Verified** — Wait for PipelineRuns to succeed (timeout configurable); capture each component's build-output evidence on the poll that observes its success, while its PipelineRun and TaskRuns still exist
+4. **Builds Verified** — Wait for each component's Buildah TaskRuns to succeed (timeout configurable); capture each component's build-output evidence on the poll that observes its build success, while its PipelineRun and TaskRuns still exist. The PipelineRun's post-build tasks are not a completion gate
 5. **Build Outputs Verified** — Confirm the captured evidence provides one successful output per selected architecture, fetching only components that were not captured
 6. **Completed** — Prompt for namespace cleanup
 
@@ -180,12 +180,13 @@ reconciled by the PaC watcher, and a reconciled run with
 `secret-created=false` has not finished Secret creation. An unreconciled run
 causes one automatic component retrigger and a second build wait; a second
 unreconciled run fails with the same diagnosis. A Secret read that fails for any
-other reason warns once and keeps waiting. A matched
-PipelineRun with a `Succeeded=False` condition, or a failed Buildah TaskRun
-under a still-pending PipelineRun, fails the wait immediately instead of waiting
-for more TaskRuns. Successful Buildah TaskRuns do not finish the wait while the
-PipelineRun is still pending; the pipeline must report `Succeeded=True`, so
-image-index or later tasks cannot fail after LKMABT calls the run passed.
+other reason warns once and keeps waiting. A failed Buildah TaskRun, or a
+PipelineRun that fails before all of its Buildah TaskRuns complete, fails the
+wait immediately instead of waiting for more TaskRuns. Successful Buildah
+TaskRuns finish the component as soon as they are observed; LKMABT does not wait
+for image-index, scans, tagging, or other post-build tasks, and a PipelineRun
+that reports failure only after every Buildah TaskRun succeeded is not a build
+failure.
 
 Build-output evidence is captured on the same poll that observes a component
 succeed, from the PipelineRun and TaskRun objects already listed, so PaC
@@ -434,8 +435,9 @@ cleanup:
 - **Required for cleanup**: namespace deletion is blocked if TaskRun YAML collection fails
 
 ### Failed Build Log Collection
-When a PipelineRun fails, container logs are collected from failed TaskRun step
-containers:
+When the build stage fails — a failed Buildah TaskRun or a PipelineRun failure
+before its Buildah TaskRuns complete — container logs are collected from failed
+TaskRun step containers:
 - Last 80 lines per container (configurable via `FailedBuildCollector.TailLines`)
 - Logs written to `failed-builds/<taskrun>_<container>.log`
 - Critical for diagnosing pod admission failures and step container errors
@@ -457,7 +459,7 @@ harness:
 
 If verification fails, check that:
 1. The multi-platform-controller is running and its `host-config` declares every platform the cluster is expected to run (an undeclared platform narrows the selection instead of failing preflight)
-2. The PipelineRuns completed successfully (builds-verified phase passed)
+2. The Buildah TaskRuns completed successfully (builds-verified phase passed); the PipelineRun's post-build tasks are not required
 3. The fixture PipelineRun `build-platforms` parameter and `build-images` matrix use the selected platforms
 
 ### Provider API Rate Limits

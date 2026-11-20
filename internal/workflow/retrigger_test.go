@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"context"
-	"errors"
 	"sync/atomic"
 	"time"
 
@@ -115,7 +114,7 @@ var _ = Describe("VerifyBuilds retrigger", func() {
 		Expect(manifest.PipelineRuns[0].Name).Should(Equal("run-new"))
 	})
 
-	It("does not retrigger when a duplicate run for the commit failed", func() {
+	It("does not retrigger when duplicate runs for the commit are ambiguous", func() {
 		const (
 			component = "mathwizz-web-server"
 			sha       = "old-sha"
@@ -148,9 +147,7 @@ var _ = Describe("VerifyBuilds retrigger", func() {
 		}
 
 		err := stage.VerifyBuilds(context.Background(), manifest)
-		var failure *PipelineRunFailedError
-		Expect(errors.As(err, &failure)).Should(BeTrue())
-		Expect(failure.Name).Should(Equal("run-failed"))
+		Expect(err).Should(MatchError(ContainSubstring("ambiguous PipelineRuns")))
 		Expect(retriggered.Load()).Should(BeFalse())
 	})
 })

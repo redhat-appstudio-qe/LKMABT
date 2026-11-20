@@ -52,14 +52,26 @@ var _ = Describe("BuildOutputInspector", func() {
 		Expect(err.Error()).Should(ContainSubstring(platform.LinuxPPC64LE))
 	})
 
-	It("rejects a PipelineRun that has not succeeded", func() {
+	It("verifies Buildah outputs while the PipelineRun is still running", func() {
 		pipeline := pipelineRunObject("build", "tenant", "uid-1", "Unknown")
 		amd64 := taskRunWithDeclaredPlatform("build-task-amd64", "tenant", "uid-1", "linux/amd64", "quay.io/example/amd64", "sha256:amd64")
 		arm64 := taskRunWithDeclaredPlatform("build-task-arm64", "tenant", "uid-1", "linux/arm64", "quay.io/example/arm64", "sha256:arm64")
 		client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, amd64, arm64)
 
-		_, err := (cluster.BuildOutputInspector{Dynamic: client, Platforms: []string{"linux/amd64", "linux/arm64"}}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
-		Expect(err).Should(MatchError(ContainSubstring("has not succeeded")))
+		evidence, err := (cluster.BuildOutputInspector{Dynamic: client, Platforms: []string{"linux/amd64", "linux/arm64"}}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(evidence).Should(HaveLen(1))
+	})
+
+	It("verifies Buildah outputs after a post-build PipelineRun failure", func() {
+		pipeline := pipelineRunObject("build", "tenant", "uid-1", "False")
+		amd64 := taskRunWithDeclaredPlatform("build-task-amd64", "tenant", "uid-1", "linux/amd64", "quay.io/example/amd64", "sha256:amd64")
+		arm64 := taskRunWithDeclaredPlatform("build-task-arm64", "tenant", "uid-1", "linux/arm64", "quay.io/example/arm64", "sha256:arm64")
+		client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds(), pipeline, amd64, arm64)
+
+		evidence, err := (cluster.BuildOutputInspector{Dynamic: client, Platforms: []string{"linux/amd64", "linux/arm64"}}).Verify(context.Background(), []model.PipelineRunIdentity{buildIdentity()})
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(evidence).Should(HaveLen(1))
 	})
 
 	It("ignores non-Buildah TaskRuns after the PipelineRun succeeds", func() {
@@ -205,13 +217,24 @@ var _ = Describe("BuildOutputInspector", func() {
 			Expect(evidence.CreatedOutputs).Should(HaveKeyWithValue("linux/arm64", "quay.io/example/arm64"))
 		})
 
-		It("rejects a PipelineRun that has not succeeded", func() {
+		It("verifies supplied Buildah outputs while the PipelineRun is still running", func() {
 			pipeline := pipelineRunObject("build", "tenant", "uid-1", "Unknown")
 			amd64 := taskRunWithDeclaredPlatform("build-task-amd64", "tenant", "uid-1", "linux/amd64", "quay.io/example/amd64", "sha256:amd64")
 			inspector := cluster.BuildOutputInspector{Platforms: []string{"linux/amd64"}}
 
-			_, err := inspector.VerifyListed(buildIdentity(), pipeline, []unstructured.Unstructured{*amd64})
-			Expect(err).Should(MatchError(ContainSubstring("has not succeeded")))
+			evidence, err := inspector.VerifyListed(buildIdentity(), pipeline, []unstructured.Unstructured{*amd64})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(evidence.Platforms).Should(Equal([]string{"linux/amd64"}))
+		})
+
+		It("verifies supplied Buildah outputs after a post-build PipelineRun failure", func() {
+			pipeline := pipelineRunObject("build", "tenant", "uid-1", "False")
+			amd64 := taskRunWithDeclaredPlatform("build-task-amd64", "tenant", "uid-1", "linux/amd64", "quay.io/example/amd64", "sha256:amd64")
+			inspector := cluster.BuildOutputInspector{Platforms: []string{"linux/amd64"}}
+
+			evidence, err := inspector.VerifyListed(buildIdentity(), pipeline, []unstructured.Unstructured{*amd64})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(evidence.Platforms).Should(Equal([]string{"linux/amd64"}))
 		})
 
 		It("rejects missing expected platforms", func() {

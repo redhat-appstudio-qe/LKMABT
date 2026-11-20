@@ -114,30 +114,26 @@ func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []u
 			succeeded++
 		}
 	}
+	if len(buildTasks) > 0 && succeeded == len(buildTasks) {
+		return fmt.Sprintf("succeeded (PipelineRun %s, buildah %d/%d)", candidate.GetName(), succeeded, len(buildTasks))
+	}
 	switch status := pipelineRunConditionStatus(candidate); status {
 	case "False":
 		return fmt.Sprintf("failed (PipelineRun %s)", candidate.GetName())
 	case "True":
 		if len(buildTasks) == 0 {
-			return fmt.Sprintf("PipelineRun %s succeeded; waiting for Buildah TaskRuns", candidate.GetName())
+			return fmt.Sprintf("PipelineRun %s succeeded; no Buildah TaskRuns", candidate.GetName())
 		}
-		if succeeded < len(buildTasks) {
-			return fmt.Sprintf("PipelineRun %s succeeded; buildah %d/%d succeeded", candidate.GetName(), succeeded, len(buildTasks))
-		}
-		return fmt.Sprintf("succeeded (PipelineRun %s, buildah %d/%d)", candidate.GetName(), succeeded, len(buildTasks))
+		return fmt.Sprintf("PipelineRun %s succeeded; buildah %d/%d succeeded", candidate.GetName(), succeeded, len(buildTasks))
 	default:
 		if admission := admissionStatusDetail(candidate, taskRuns, now, admissionReason); admission != "" {
 			return admission
 		}
 		age := buildAge(candidate, now)
-		switch {
-		case len(buildTasks) == 0:
+		if len(buildTasks) == 0 {
 			return fmt.Sprintf("pending for %s (PipelineRun %s, no Buildah TaskRun)", age, candidate.GetName())
-		case succeeded < len(buildTasks):
-			return fmt.Sprintf("running for %s (PipelineRun %s, buildah %d/%d succeeded)", age, candidate.GetName(), succeeded, len(buildTasks))
-		default:
-			return fmt.Sprintf("buildah %d/%d succeeded; waiting for PipelineRun %s to finish", succeeded, len(buildTasks), candidate.GetName())
 		}
+		return fmt.Sprintf("running for %s (PipelineRun %s, buildah %d/%d succeeded)", age, candidate.GetName(), succeeded, len(buildTasks))
 	}
 }
 

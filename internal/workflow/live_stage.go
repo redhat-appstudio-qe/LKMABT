@@ -682,10 +682,12 @@ func fixtureFromManifest(identity model.FixtureIdentity) providers.FixtureReposi
 const maxPacRetriggersPerComponent = 1
 
 // VerifyBuilds waits for successful Buildah TaskRuns and records their PipelineRun identities.
-// Build evidence is captured from the same polls that prove each build succeeded. A PipelineRun
-// PaC never reconciled is retriggered once per component, restarting the wait with fresh trigger
-// and build timeouts; any other failure collects failed build logs and returns. Successful
-// identities are merged into manifest.PipelineRuns.
+// Build evidence is captured from the same polls that prove each build succeeded. LKMABT stops
+// at the build stage: a PipelineRun's image-index, scans, and other post-build tasks are not a
+// completion gate. A failed Buildah TaskRun, or a PipelineRun failure before every Buildah
+// TaskRun completes, still fails the wait and collects failed build logs. A PipelineRun PaC never
+// reconciled is retriggered once per component, restarting the wait with fresh trigger and build
+// timeouts. Successful identities are merged into manifest.PipelineRuns.
 func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifest) error {
 	namespace := manifest.Fixture.TenantNamespace
 	if namespace == "" {
@@ -737,9 +739,10 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 // waitForBuilds waits for one attempt at successful Buildah TaskRuns.
 // The check runs after each poll has matched and captured evidence, so a
 // component onboarding failure or a missing PaC git auth Secret is reported
-// only once another component's completed build is safely recorded. A matched
-// failed PipelineRun is returned by the poll itself, ahead of any Secret
-// diagnosis, so failed-build log collection still runs.
+// only once another component's completed build is safely recorded. A failed
+// Buildah TaskRun or a PipelineRun failure before its builds complete is
+// returned by the match, ahead of any Secret diagnosis, so failed-build log
+// collection still runs.
 func (s *LiveStage) waitForBuilds(ctx context.Context, manifest *model.RunManifest, namespace string, inspector cluster.PacAuthInspector, evidence buildEvidenceCache) ([]model.PipelineRunIdentity, error) {
 	inspectionWarned := false
 	var componentErr error
@@ -779,11 +782,6 @@ func (s *LiveStage) waitForBuilds(ctx context.Context, manifest *model.RunManife
 		pipelineRuns, err := s.Clients.Dynamic.Resource(PipelineRunGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, nil, err
-		}
-		// A matched failed PipelineRun wins over a missing PaC Secret so the
-		// failed-build log collection still runs.
-		if failed := matchedFailedPipelineRun(pipelineRuns.Items, manifest.TriggerCommits); failed != nil {
-			return nil, nil, failed
 		}
 		taskRuns, err := s.Clients.Dynamic.Resource(cluster.TaskRunGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
@@ -899,10 +897,12 @@ func componentSpec(name, repository, branch, componentPath string) cluster.Compo
 
 // waitForBuildTaskRuns polls for matching PipelineRuns and successful Buildah TaskRuns.
 // It first waits up to triggerTimeout for every uncaptured commit to get a PipelineRun,
-// then up to buildTimeout for the runs to succeed. Each poll matches, records observed
-// runs, captures newly completed evidence, and only then runs check, so check errors never
-// discard evidence from the same poll; a matched failure returns before that capture step.
-// It returns only when every commit has evidence, either captured earlier or proven here.
+// then up to buildTimeout for each component's Buildah TaskRuns to succeed. Each poll
+// matches, records observed runs, captures newly completed evidence, and only then runs
+// check, so check errors never discard evidence from the same poll; a matched build
+// failure returns before that capture step. A PipelineRun's post-build tasks are not a
+// completion gate. It returns only when every commit has evidence, either captured
+// earlier or proven here.
 func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, interval time.Duration, namespace string, commits []model.TriggerCommit, list func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error), notice func(string, ...any), check func(context.Context, []unstructured.Unstructured) error, evidence buildEvidenceCache) ([]model.PipelineRunIdentity, error) {
 	if triggerTimeout <= 0 {
 		return nil, fmt.Errorf("trigger timeout must be positive")
@@ -1075,32 +1075,15 @@ func assembleBuildIdentities(commits []model.TriggerCommit, completed []model.Pi
 	return identities, nil
 }
 
-// matchedFailedPipelineRun returns the first matched PipelineRun reporting
-// failure, even when another run for the same commit is still pending, so
-// callers can fail before other checks hide it.
-func matchedFailedPipelineRun(pipelineRuns []unstructured.Unstructured, commits []model.TriggerCommit) *PipelineRunFailedError {
-	for _, commit := range commits {
-		for _, candidate := range matchingPipelineRuns(pipelineRuns, commit) {
-			if pipelineRunConditionStatus(candidate) == "False" {
-				return &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
-			}
-		}
-	}
-	return nil
-}
-
 // matchBuildTaskRuns matches every commit to one PipelineRun and its
 // successful Buildah TaskRuns. Captured components count as satisfied; any
-// other commit without a successful run is pending. It returns the components
-// proven in this poll and whether another poll is still needed.
+// other commit without a successful build is pending. A component is proven
+// when every Buildah TaskRun for its PipelineRun succeeds; the PipelineRun's
+// post-build tasks are outside LKMABT's scope and are not a completion gate.
+// It returns the components proven in this poll and whether another poll is
+// still needed.
 func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, commits []model.TriggerCommit, captured func(string) bool) ([]model.PipelineRunIdentity, bool, error) {
 	identities := make([]model.PipelineRunIdentity, 0, len(commits))
-	// Fail on any matched failed PipelineRun before reporting another component as
-	// pending; otherwise a later component's failure can hide behind an earlier
-	// component that never produces a PipelineRun.
-	if failed := matchedFailedPipelineRun(pipelineRuns, commits); failed != nil {
-		return nil, false, failed
-	}
 	pending := false
 	for _, commit := range commits {
 		candidates := matchingPipelineRuns(pipelineRuns, commit)
@@ -1133,37 +1116,44 @@ func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, comm
 			continue
 		}
 		candidate := candidates[0]
-		if pipelineRunConditionStatus(candidate) == "False" {
-			return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
-		}
+		pipelineStatus := pipelineRunConditionStatus(candidate)
 		buildTasks := buildTaskRunsForPipelineRun(taskRuns, candidate)
+		if len(buildTasks) == 0 {
+			if pipelineStatus == "False" {
+				return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
+			}
+			if pipelineStatus == "True" {
+				return nil, false, fmt.Errorf("PipelineRun %s/%s succeeded without Buildah TaskRuns for component %s", candidate.GetNamespace(), candidate.GetName(), commit.Component)
+			}
+			pending = true
+			continue
+		}
 		failed := false
+		allSucceeded := true
 		for _, taskRun := range buildTasks {
-			if pipelineRunConditionStatus(taskRun) == "False" {
+			switch pipelineRunConditionStatus(taskRun) {
+			case "False":
 				failed = true
-				break
+			case "True":
+			default:
+				allSucceeded = false
 			}
 		}
 		if failed {
 			return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
 		}
-		// Successful Buildah TaskRuns are only evidence after the PipelineRun
-		// itself succeeds; later tasks can still be running or fail.
-		if pipelineRunConditionStatus(candidate) != "True" || len(buildTasks) == 0 {
-			pending = true
-			continue
-		}
-		allSucceeded := true
-		for _, taskRun := range buildTasks {
-			if pipelineRunConditionStatus(taskRun) != "True" {
-				allSucceeded = false
-				break
-			}
-		}
 		if !allSucceeded {
+			// A failure before every Buildah TaskRun completes is an early
+			// pipeline failure; a post-build failure leaves all builds done.
+			if pipelineStatus == "False" {
+				return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
+			}
 			pending = true
 			continue
 		}
+		// Every Buildah TaskRun succeeded. Do not wait for image-index, scans, or
+		// other post-build tasks; LKMABT verifies the build outputs, not the full
+		// PipelineRun lifecycle.
 		identity := identityFromObject(candidate, commit.Component, pipelineRunSHA(candidate))
 		identity.Succeeded = true
 		identities = append(identities, identity)

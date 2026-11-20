@@ -9,7 +9,7 @@ cluster in the clusters file it:
 2. Creates or reuses the tenant namespace, Application, and Components;
 3. Selects the architectures in each fixture PipelineRun and appends one
    harmless comment to each fixture Dockerfile;
-4. Waits for the matching PipelineRuns to succeed;
+4. Waits for each component's Buildah TaskRuns to succeed;
 5. Verifies the pre-publication Buildah outputs cover the selected
    architectures. All four are selected by default: `linux/amd64`,
    `linux/arm64`, `linux/s390x`, and `linux/ppc64le`.
@@ -579,12 +579,13 @@ selection. This applies to configured tokens and browser logins.
 
 ### During the run
 
-- A component is accepted only after its PipelineRun reports `Succeeded=True`;
-  successful Buildah TaskRuns alone are not enough, so
-  `waiting for PipelineRun ... to finish` means the run is still in progress. A
-  matched failure is reported on the spot; LKMABT does not wait for the rest of
-  the class to finish. Missing platform metadata in a Buildah TaskRun or a
-  missing selected-platform output fails verification.
+- A component is accepted when every Buildah TaskRun for its triggered
+  PipelineRun succeeds. LKMABT stops at the build stage: the PipelineRun's
+  image-index, scans, tagging, and other post-build tasks are outside its scope
+  and are not a completion gate. A failed Buildah TaskRun, or a PipelineRun that
+  fails before its Buildah TaskRuns complete, is reported on the spot; LKMABT
+  does not wait for the rest of the class to finish. Missing platform metadata
+  in a Buildah TaskRun or a missing selected-platform output fails verification.
 - A missing tenant namespace is requested through an OpenShift `ProjectRequest`,
   which binds the requester as project admin; if that API is unavailable or
   forbidden, LKMABT creates a bare `Namespace` with the ownership labels already
@@ -595,8 +596,10 @@ selection. This applies to configured tokens and browser logins.
   `--preflight-timeout` bounds preflight and fixture setup. `--build-timeout`
   bounds each of triggering, the build wait, and build-output verification.
   `--trigger-timeout` bounds only the wait for a triggered PipelineRun to
-  appear. A matching PipelineRun that has already failed fails the wait
-  immediately.
+  appear. A matching PipelineRun that fails before its Buildah TaskRuns
+  complete, or a failed Buildah TaskRun, fails the wait immediately. A
+  PipelineRun that fails only in a post-build task does not fail the build
+  result.
 - Owned stale tenant namespaces (`<tenant>` and `<tenant>-*`) are deleted
   automatically and logged. Namespaces with absent or different ownership
   labels are prompted individually and re-inspected before deletion. Declining

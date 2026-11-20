@@ -93,7 +93,9 @@ type PipelineRunIdentity struct {
 	SourceSHA   string    `json:"sourceSHA"`
 	StartedAt   time.Time `json:"startedAt"`
 	CompletedAt time.Time `json:"completedAt"`
-	Succeeded   bool      `json:"succeeded"`
+	// Succeeded reports that the PipelineRun's build stage succeeded. LKMABT
+	// does not wait for later image-index or scan tasks.
+	Succeeded bool `json:"succeeded"`
 }
 
 // TriggerCommit records the fixture-branch commit pushed to trigger one
