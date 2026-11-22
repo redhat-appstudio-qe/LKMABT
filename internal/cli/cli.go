@@ -110,11 +110,15 @@ func providerNames(provider string) []string {
 }
 
 // runProviders runs every selected provider concurrently, in providerNames
-// order, and returns one result per provider in that order. Each provider gets
-// its own buffered RunLog, attached by the runner once the provider's run
-// directory exists.
+// order, and returns one result per provider in that order.
 func runProviders(ctx context.Context, request config.Request, runner Runner) []ProviderResult {
-	names := providerNames(request.Provider)
+	return runProvidersFor(ctx, request, runner, providerNames(request.Provider))
+}
+
+// runProvidersFor runs the named providers concurrently and returns one result
+// per name in the supplied order. A subset retry uses this so a passing or
+// failing sibling is not re-run and its first-attempt result is preserved.
+func runProvidersFor(ctx context.Context, request config.Request, runner Runner, names []string) []ProviderResult {
 	results := make([]ProviderResult, len(names))
 	var waitGroup sync.WaitGroup
 	for index, name := range names {

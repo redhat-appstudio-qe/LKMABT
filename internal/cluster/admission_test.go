@@ -86,6 +86,29 @@ var _ = Describe("AdmissionInspector", func() {
 		})
 	})
 
+	When("only the v1beta1 API is served", func() {
+		It("falls back to v1beta1 and returns the quota message", func() {
+			pipelineRun := pendingPipelineRun("build-abc", "uid-abc")
+			workload := kueueWorkload("build-abc-workload", "build-abc", "uid-abc", "False", "older Kueue quota")
+			clients := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+				KueueWorkloadGVR:        "WorkloadList",
+				KueueWorkloadV1Beta1GVR: "WorkloadList",
+			})
+			clients.PrependReactor("list", "workloads", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				if action.GetResource().Version == "v1beta2" {
+					return true, nil, apierrors.NewNotFound(schema.GroupResource{Group: "kueue.x-k8s.io", Resource: "workloads"}, "workloads")
+				}
+				return true, &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*workload}}, nil
+			})
+			inspector := AdmissionInspector{Dynamic: clients}
+
+			message, err := inspector.QuotaMessage(context.Background(), "tenant", pipelineRun)
+
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(message).Should(Equal("older Kueue quota"))
+		})
+	})
+
 	When("the Workload list cannot be read", func() {
 		It("returns the list error for the caller to fall back on", func() {
 			clients := kueueClients()

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -15,6 +17,10 @@ import (
 // admission. Kueue is diagnostic: an absent API, forbidden list, or missing
 // Workload falls back to the PipelineRun's own condition message.
 var KueueWorkloadGVR = schema.GroupVersionResource{Group: "kueue.x-k8s.io", Version: "v1beta2", Resource: "workloads"}
+
+// KueueWorkloadV1Beta1GVR is the older Kueue Workload API. QuotaMessage falls
+// back to it when v1beta2 is not served.
+var KueueWorkloadV1Beta1GVR = schema.GroupVersionResource{Group: "kueue.x-k8s.io", Version: "v1beta1", Resource: "workloads"}
 
 // AdmissionInspector reads the Kueue Workload owned by a pending PipelineRun.
 type AdmissionInspector struct {
@@ -33,7 +39,14 @@ func (i AdmissionInspector) QuotaMessage(ctx context.Context, namespace string, 
 		return "", nil
 	}
 	workloads, err := i.Dynamic.Resource(KueueWorkloadGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
+	if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+		// Kueue pre-0.15 serves only v1beta1; the owner and QuotaReserved
+		// fields are unchanged.
+		workloads, err = i.Dynamic.Resource(KueueWorkloadV1Beta1GVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return "", fmt.Errorf("list Kueue Workloads in namespace %s (v1beta2 and v1beta1): %w", namespace, err)
+		}
+	} else if err != nil {
 		return "", fmt.Errorf("list Kueue Workloads in namespace %s: %w", namespace, err)
 	}
 	for index := range workloads.Items {

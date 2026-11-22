@@ -729,6 +729,11 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 		if err == nil {
 			break
 		}
+		if IsDeferred(err) {
+			// A deferral returns before the normal identity merge. Keep the
+			// already captured successful builds in the durable manifest.
+			manifest.PipelineRuns = mergePipelineRunIdentities(manifest.PipelineRuns, buildOutputIdentities(manifest.BuildOutputs))
+		}
 		missing, retry := unreconciledPacRun(err)
 		if !retry || s.Provider == nil || retriggerCount(manifest, missing.Component) >= maxPacRetriggersPerComponent {
 			s.collectFailedBuildLogs(ctx, namespace, manifest, err)
@@ -971,7 +976,7 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 			break
 		}
 		if !awaitPoll(triggerCtx, interval, triggerHeartbeat, func() {
-			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now(), evidence.isCaptured, evidence.admissionReason))
+			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now(), evidence.isCaptured, evidence.admissionReason, evidence.ExpectedPlatforms))
 		}) {
 			return nil, noPipelineRunError(namespace, commits, pipelineRuns, evidence.isCaptured)
 		}
@@ -1009,7 +1014,7 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 			return assembleBuildIdentities(commits, identities, evidence)
 		}
 		if !awaitPoll(buildCtx, interval, buildHeartbeat, func() {
-			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now(), evidence.isCaptured, evidence.admissionReason))
+			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now(), evidence.isCaptured, evidence.admissionReason, evidence.ExpectedPlatforms))
 		}) {
 			return nil, fmt.Errorf("timed out waiting for Buildah TaskRuns after trigger: %w", buildCtx.Err())
 		}
@@ -1174,10 +1179,17 @@ func matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns []unstructured.Unstru
 		}
 		if len(expectedPlatforms) > 0 {
 			observed := make(map[string]bool, len(buildTasks))
+			platformPending := false
 			for _, taskRun := range buildTasks {
 				taskPlatform := cluster.BuildTaskRunPlatform(taskRun)
 				if taskPlatform == "" {
-					return nil, false, fmt.Errorf("build TaskRun %s/%s has no platform label — pipeline misconfiguration", taskRun.GetNamespace(), taskRun.GetName())
+					if pipelineRunConditionStatus(taskRun) == "True" {
+						return nil, false, fmt.Errorf("build TaskRun %s/%s has no platform label — pipeline misconfiguration", taskRun.GetNamespace(), taskRun.GetName())
+					}
+					// A running TaskRun may still publish its platform in its
+					// PLATFORM result; do not reject it until it succeeds.
+					platformPending = true
+					continue
 				}
 				observed[taskPlatform] = true
 			}
@@ -1187,12 +1199,15 @@ func matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns []unstructured.Unstru
 					missing = append(missing, expected)
 				}
 			}
-			if len(missing) > 0 {
+			if len(missing) > 0 || platformPending {
 				if pipelineStatus == "False" {
 					return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
 				}
 				if pipelineStatus == "True" {
-					return nil, false, fmt.Errorf("PipelineRun %s/%s is missing Buildah TaskRuns for %s", candidate.GetNamespace(), candidate.GetName(), strings.Join(missing, ", "))
+					if len(missing) > 0 {
+						return nil, false, fmt.Errorf("PipelineRun %s/%s is missing Buildah TaskRuns for %s", candidate.GetNamespace(), candidate.GetName(), strings.Join(missing, ", "))
+					}
+					return nil, false, fmt.Errorf("PipelineRun %s/%s has a Buildah TaskRun without platform metadata", candidate.GetNamespace(), candidate.GetName())
 				}
 				pending = true
 				continue
@@ -1424,6 +1439,16 @@ func removeBuildOutputEvidence(evidence []model.BuildOutputEvidence, component s
 		kept = append(kept, output)
 	}
 	return kept
+}
+
+// buildOutputIdentities returns the PipelineRun identity recorded in each
+// captured build evidence entry.
+func buildOutputIdentities(outputs []model.BuildOutputEvidence) []model.PipelineRunIdentity {
+	identities := make([]model.PipelineRunIdentity, 0, len(outputs))
+	for _, output := range outputs {
+		identities = append(identities, output.PipelineRun)
+	}
+	return identities
 }
 
 // mergePipelineRunIdentities merges identities, deduplicating by the build evidence key

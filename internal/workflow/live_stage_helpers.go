@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redhat-appstudio/lkmabt/internal/cluster"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -81,11 +82,12 @@ func paCWaitStatus(names []string, objects []unstructured.Unstructured) string {
 // buildWaitStatus names each component's current build phase in trigger order.
 // captured marks components whose outputs were already evidenced; a nil
 // captured treats every component as uncaptured. admissionReason supplies an
-// optional Kueue diagnostic for admission-pending runs.
-func buildWaitStatus(commits []model.TriggerCommit, pipelineRuns, taskRuns []unstructured.Unstructured, now time.Time, captured func(string) bool, admissionReason func(*unstructured.Unstructured) string) string {
+// optional Kueue diagnostic for admission-pending runs. expectedPlatforms
+// prevents a partially created matrix from being reported as success.
+func buildWaitStatus(commits []model.TriggerCommit, pipelineRuns, taskRuns []unstructured.Unstructured, now time.Time, captured func(string) bool, admissionReason func(*unstructured.Unstructured) string, expectedPlatforms []string) string {
 	parts := make([]string, 0, len(commits))
 	for _, commit := range commits {
-		parts = append(parts, commit.Component+": "+buildComponentStatus(commit, pipelineRuns, taskRuns, now, captured, admissionReason))
+		parts = append(parts, commit.Component+": "+buildComponentStatus(commit, pipelineRuns, taskRuns, now, captured, admissionReason, expectedPlatforms))
 	}
 	return "builds: " + strings.Join(parts, "; ")
 }
@@ -93,7 +95,7 @@ func buildWaitStatus(commits []model.TriggerCommit, pipelineRuns, taskRuns []uns
 // buildComponentStatus describes one component as missing, failed, running, or
 // succeeded. A captured component with no matching PipelineRun reports success
 // from the recorded evidence. now supplies the age shown for pending runs.
-func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []unstructured.Unstructured, now time.Time, captured func(string) bool, admissionReason func(*unstructured.Unstructured) string) string {
+func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []unstructured.Unstructured, now time.Time, captured func(string) bool, admissionReason func(*unstructured.Unstructured) string, expectedPlatforms []string) string {
 	isCaptured := captured != nil && captured(commit.Component)
 	candidates := matchingPipelineRuns(pipelineRuns, commit)
 	switch len(candidates) {
@@ -114,8 +116,12 @@ func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []u
 			succeeded++
 		}
 	}
+	covered := buildPlatformsCovered(buildTasks, expectedPlatforms)
 	if len(buildTasks) > 0 && succeeded == len(buildTasks) {
-		return fmt.Sprintf("succeeded (PipelineRun %s, buildah %d/%d)", candidate.GetName(), succeeded, len(buildTasks))
+		if covered {
+			return fmt.Sprintf("succeeded (PipelineRun %s, buildah %d/%d)", candidate.GetName(), succeeded, len(buildTasks))
+		}
+		return fmt.Sprintf("buildah %d/%d succeeded; waiting for platform results (PipelineRun %s)", succeeded, len(buildTasks), candidate.GetName())
 	}
 	switch status := pipelineRunConditionStatus(candidate); status {
 	case "False":
@@ -123,6 +129,9 @@ func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []u
 	case "True":
 		if len(buildTasks) == 0 {
 			return fmt.Sprintf("PipelineRun %s succeeded; no Buildah TaskRuns", candidate.GetName())
+		}
+		if !covered {
+			return fmt.Sprintf("PipelineRun %s succeeded; waiting for platform results (buildah %d/%d)", candidate.GetName(), succeeded, len(buildTasks))
 		}
 		return fmt.Sprintf("PipelineRun %s succeeded; buildah %d/%d succeeded", candidate.GetName(), succeeded, len(buildTasks))
 	default:
@@ -135,6 +144,26 @@ func buildComponentStatus(commit model.TriggerCommit, pipelineRuns, taskRuns []u
 		}
 		return fmt.Sprintf("running for %s (PipelineRun %s, buildah %d/%d succeeded)", age, candidate.GetName(), succeeded, len(buildTasks))
 	}
+}
+
+// buildPlatformsCovered reports whether the listed Buildah TaskRuns expose
+// every expected platform. An empty expected set disables the check.
+func buildPlatformsCovered(buildTasks []*unstructured.Unstructured, expected []string) bool {
+	if len(expected) == 0 {
+		return true
+	}
+	observed := make(map[string]bool, len(buildTasks))
+	for _, taskRun := range buildTasks {
+		if taskPlatform := cluster.BuildTaskRunPlatform(taskRun); taskPlatform != "" {
+			observed[taskPlatform] = true
+		}
+	}
+	for _, taskPlatform := range expected {
+		if !observed[taskPlatform] {
+			return false
+		}
+	}
+	return true
 }
 
 // buildAge renders how long a PipelineRun has been pending, rounded to the

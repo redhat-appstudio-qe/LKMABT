@@ -246,7 +246,7 @@ var _ = Describe("build admission", func() {
 			object := pendingPipelineRun("run-web", "web", "sha-web", "uid-web", now.Add(-2*time.Minute), pipelineRunPendingStatus, "", "condition message")
 
 			status := buildWaitStatus([]model.TriggerCommit{commit}, []unstructured.Unstructured{object}, nil, now, nil,
-				func(*unstructured.Unstructured) string { return "kueue quota message" })
+				func(*unstructured.Unstructured) string { return "kueue quota message" }, nil)
 			Expect(status).Should(Equal("builds: web: PipelineRunPending for 2m0s (PipelineRun run-web; kueue quota message)"))
 		})
 	})

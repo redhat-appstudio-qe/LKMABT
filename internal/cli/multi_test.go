@@ -77,6 +77,7 @@ type deferringRunner struct {
 	requests   []config.Request
 	remaining  map[string]int // key "<cluster>/<provider>" -> remaining deferrals
 	cleanupErr map[string]error
+	fail       map[string]error
 	reason     string
 }
 
@@ -90,6 +91,7 @@ func (r *deferringRunner) Run(_ context.Context, req config.Request, _ RunLog) (
 		r.remaining[key]--
 	}
 	cleanupErr := r.cleanupErr[key]
+	failErr := r.fail[key]
 	r.mu.Unlock()
 
 	reason := r.reason
@@ -103,7 +105,7 @@ func (r *deferringRunner) Run(_ context.Context, req config.Request, _ RunLog) (
 		outcome.CleanupErr = cleanupErr
 		return outcome, &workflow.AdmissionPendingError{Namespace: "tenant", Pending: []workflow.AdmissionPending{{Component: "component", PipelineRun: "pipeline-run", Reason: reason}}}
 	}
-	return outcome, nil
+	return outcome, failErr
 }
 
 // requestKeys returns the recorded cluster/provider keys in call order.
@@ -462,8 +464,40 @@ var _ = Describe("scheduleClusters", func() {
 		})
 	})
 
+	When("one provider defers while its sibling fails", func() {
+		It("should retry only the deferred provider and preserve the sibling failure", func() {
+			entries := []clusterfile.Entry{{Name: "c1", Server: "https://api.c1.example"}}
+			request := config.Request{Provider: config.ProviderBoth}
+			runner := &deferringRunner{
+				remaining: map[string]int{"c1/github": 1},
+				fail:      map[string]error{"c1/gitlab": errors.New("gitlab build failed")},
+			}
+			console := &Console{Out: io.Discard}
+			aggregate := &aggregateRun{Directory: GinkgoT().TempDir()}
+
+			runs := scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
+
+			Expect(runner.requests).Should(HaveLen(3))
+			Expect(runs[0].Results).Should(HaveLen(2))
+			byProvider := map[string]ProviderResult{}
+			for _, result := range runs[0].Results {
+				byProvider[result.Provider] = result
+			}
+			Expect(byProvider["github"].Err).ShouldNot(HaveOccurred())
+			Expect(byProvider["gitlab"].Err).Should(MatchError("gitlab build failed"))
+			Expect(aggregateError(runs)).Should(MatchError(ContainSubstring("gitlab build failed")))
+			rows := reportRows(aggregate.Directory, aggregate.runLogName(), runs, []string{"github", "gitlab"})
+			Expect(rows).Should(HaveLen(2))
+			for _, row := range rows {
+				if row.Provider == "gitlab" {
+					Expect(row.Passed).Should(BeFalse())
+				}
+			}
+		})
+	})
+
 	When("one provider defers while its sibling passes", func() {
-		It("should retry both and keep one row per provider", func() {
+		It("should retry only the deferred provider and preserve the sibling pass", func() {
 			entries := []clusterfile.Entry{{Name: "c1", Server: "https://api.c1.example"}}
 			request := config.Request{Provider: config.ProviderBoth}
 			runner := &deferringRunner{remaining: map[string]int{"c1/github": 1}}
@@ -472,17 +506,18 @@ var _ = Describe("scheduleClusters", func() {
 
 			runs := scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
 
-			Expect(runner.requests).Should(HaveLen(4))
+			Expect(runner.requests).Should(HaveLen(3))
 			Expect(runs[0].FirstAttempt).Should(HaveLen(2))
 			Expect(runs[0].Results).Should(HaveLen(2))
 			runIDs := map[string][]string{}
 			for _, request := range runner.requests {
 				runIDs[request.Provider] = append(runIDs[request.Provider], request.RunID)
 			}
-			for _, provider := range []string{"github", "gitlab"} {
-				Expect(runIDs[provider]).Should(HaveLen(2))
-				Expect(runIDs[provider][0]).ShouldNot(Equal(runIDs[provider][1]))
-			}
+			Expect(runIDs["github"]).Should(HaveLen(2))
+			Expect(runIDs["github"][0]).ShouldNot(Equal(runIDs["github"][1]))
+			Expect(runIDs["gitlab"]).Should(HaveLen(1))
+			Expect(runner.requests[2].Provider).Should(Equal("github"))
+			Expect(runner.requests[2].MultiProvider).Should(BeTrue())
 
 			rows := reportRows(aggregate.Directory, aggregate.runLogName(), runs, []string{"github", "gitlab"})
 			Expect(rows).Should(HaveLen(2))

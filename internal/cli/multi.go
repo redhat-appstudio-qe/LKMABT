@@ -397,10 +397,10 @@ func scheduleClusters(ctx context.Context, request config.Request, entries []clu
 		console.Printf("cluster %s: finished (%s)", entry.Name, resultSummary(runs[index].Results))
 	}
 	for _, index := range deferred {
-		// A failed deferred cleanup stays in FirstAttempt.DeferredReason. The
-		// retry's preflight deletes or fails on any stale scoped namespace before
-		// its builds start, so a successful retry proves the failure was transient
-		// or the namespace was already gone; the row note keeps it visible.
+		// A failed deferred cleanup stays in FirstAttempt.CleanupErr. The retry's
+		// preflight must clear any stale scoped namespace before its builds start;
+		// if cleanup failed, the matching retry result is failed below even when
+		// the retry builds succeed, and the row note keeps the reason visible.
 		entry := runs[index].Entry
 		console.Printf("")
 		console.Printf("cluster %s: retrying deferred attempt (fresh run)", entry.Name)
@@ -409,22 +409,24 @@ func scheduleClusters(ctx context.Context, request config.Request, entries []clu
 			console.Printf("cluster %s: retry skipped (%v)", entry.Name, ctx.Err())
 			continue
 		}
-		results := runCluster(ctx, request, entry, aggregate.Directory, runner)
+		retryNames := deferredProviderNames(runs[index].FirstAttempt)
+		results := runClusterProviders(ctx, request, entry, aggregate.Directory, runner, retryNames)
 		if attemptDeferred(results) {
 			results = exhaustedDeferred(results, nil)
 		}
-		for resultIndex := range results {
-			first, ok := firstAttemptResult(runs[index].FirstAttempt, results[resultIndex].Provider)
+		final := mergeProviderResults(runs[index].FirstAttempt, results)
+		for resultIndex := range final {
+			first, ok := firstAttemptResult(runs[index].FirstAttempt, final[resultIndex].Provider)
 			if !ok || first.CleanupErr == nil {
 				continue
 			}
 			// A deferred cleanup failure is not erased by a successful build
 			// retry; surface it as a cluster failure even though the retry's
 			// preflight should have reconciled the stale namespace.
-			results[resultIndex].Err = errors.Join(results[resultIndex].Err, fmt.Errorf("first attempt deferred cleanup failed: %w", first.CleanupErr))
+			final[resultIndex].Err = errors.Join(final[resultIndex].Err, fmt.Errorf("first attempt deferred cleanup failed: %w", first.CleanupErr))
 		}
-		runs[index].Results = results
-		console.Printf("cluster %s: retry finished (%s)", entry.Name, resultSummary(results))
+		runs[index].Results = final
+		console.Printf("cluster %s: retry finished (%s)", entry.Name, resultSummary(final))
 	}
 	return runs
 }
@@ -438,6 +440,35 @@ func attemptDeferred(results []ProviderResult) bool {
 		}
 	}
 	return false
+}
+
+// deferredProviderNames returns the providers that need a fresh retry.
+func deferredProviderNames(results []ProviderResult) []string {
+	names := make([]string, 0, len(results))
+	for _, result := range results {
+		if result.Deferred {
+			names = append(names, result.Provider)
+		}
+	}
+	return names
+}
+
+// mergeProviderResults replaces retried providers in their original positions
+// and preserves every non-retried sibling result.
+func mergeProviderResults(first, retried []ProviderResult) []ProviderResult {
+	merged := append([]ProviderResult(nil), first...)
+	positions := make(map[string]int, len(merged))
+	for index, result := range merged {
+		positions[result.Provider] = index
+	}
+	for _, result := range retried {
+		if index, ok := positions[result.Provider]; ok {
+			merged[index] = result
+			continue
+		}
+		merged = append(merged, result)
+	}
+	return merged
 }
 
 // deferredSummary names the scheduler reason that deferred the attempt.
@@ -544,13 +575,20 @@ func aggregateError(runs []clusterRun) error {
 // concurrently. Setup failures are reported as the same failure for every
 // selected provider, so the aggregate report always has a row per provider.
 func runCluster(ctx context.Context, request config.Request, entry clusterfile.Entry, aggregateDirectory string, runner Runner) []ProviderResult {
+	return runClusterProviders(ctx, request, entry, aggregateDirectory, runner, providerNames(request.Provider))
+}
+
+// runClusterProviders runs the named providers for one cluster and returns one
+// result per name. A subset retry uses it to leave a sibling provider's
+// first-attempt result untouched.
+func runClusterProviders(ctx context.Context, request config.Request, entry clusterfile.Entry, aggregateDirectory string, runner Runner, names []string) []ProviderResult {
 	directory := filepath.Join(aggregateDirectory, entry.Name)
 	if err := os.MkdirAll(directory, 0o750); err != nil {
-		return failedResults(request.Provider, fmt.Errorf("create cluster directory %s: %w", directory, err))
+		return failedResultsFor(names, fmt.Errorf("create cluster directory %s: %w", directory, err))
 	}
 	log, err := newAttachedRunLog(filepath.Join(directory, "run.log"))
 	if err != nil {
-		return failedResults(request.Provider, err)
+		return failedResultsFor(names, err)
 	}
 	defer log.Close()
 	server := entry.Server
@@ -558,13 +596,17 @@ func runCluster(ctx context.Context, request config.Request, entry clusterfile.E
 		server, err = cluster.ServerFromKubeconfig(entry.Kubeconfig)
 		if err != nil {
 			fmt.Fprintf(log, "resolve API server: %v\n", err)
-			return failedResults(request.Provider, fmt.Errorf("resolve API server for cluster %s: %w", entry.Name, err))
+			return failedResultsFor(names, fmt.Errorf("resolve API server for cluster %s: %w", entry.Name, err))
 		}
 	}
 	clusterRequest := request
 	clusterRequest.ClusterName, clusterRequest.Kubeconfig, clusterRequest.ClusterServer, clusterRequest.StateDir = entry.Name, entry.Kubeconfig, server, directory
-	fmt.Fprintf(log, "cluster %s: running %s against %s with kubeconfig %s\n", entry.Name, request.Provider, server, entry.Kubeconfig)
-	return runProviders(ctx, clusterRequest, runner)
+	label := request.Provider
+	if len(names) < len(providerNames(request.Provider)) {
+		label = strings.Join(names, ", ")
+	}
+	fmt.Fprintf(log, "cluster %s: running %s against %s with kubeconfig %s\n", entry.Name, label, server, entry.Kubeconfig)
+	return runProvidersFor(ctx, clusterRequest, runner, names)
 }
 
 // reportRows builds one row per cluster and provider in clusters-file order. An
@@ -608,6 +650,10 @@ func retryNote(run clusterRun, provider string) string {
 	if !ok {
 		return ""
 	}
+	final, ok := resultForProvider(run.Results, provider)
+	if !ok || !wasRetried(first, final) {
+		return ""
+	}
 	if first.Deferred {
 		reason := first.DeferredReason
 		if reason == "" {
@@ -639,6 +685,11 @@ func testedPlatformsNote(requested, tested []string) string {
 
 // firstAttemptResult returns a provider's result from the deferred first pass.
 func firstAttemptResult(results []ProviderResult, provider string) (ProviderResult, bool) {
+	return resultForProvider(results, provider)
+}
+
+// resultForProvider returns a provider's result from a result list.
+func resultForProvider(results []ProviderResult, provider string) (ProviderResult, bool) {
 	for _, result := range results {
 		if result.Provider == provider {
 			return result, true
@@ -647,12 +698,24 @@ func firstAttemptResult(results []ProviderResult, provider string) (ProviderResu
 	return ProviderResult{}, false
 }
 
+// wasRetried reports whether first was replaced by final. A preserved sibling
+// keeps the same run identity and artifact directory; a retry gets a fresh run.
+func wasRetried(first, final ProviderResult) bool {
+	if first.RunID != "" || final.RunID != "" {
+		return first.RunID != final.RunID
+	}
+	if first.ArtifactDirectory != "" || final.ArtifactDirectory != "" {
+		return first.ArtifactDirectory != final.ArtifactDirectory
+	}
+	return first.Deferred != final.Deferred || first.CleanupErr != nil
+}
+
 // resultLinks links the final attempt and keeps the deferred first attempt's
 // provider directory and log reachable.
 func resultLinks(aggregateDirectory, aggregateLog string, run clusterRun, result ProviderResult) []report.Link {
 	links := report.Links(aggregateDirectory, aggregateLog, run.Entry.Name, result.ArtifactDirectory)
 	first, ok := firstAttemptResult(run.FirstAttempt, result.Provider)
-	if !ok || first.ArtifactDirectory == "" {
+	if !ok || first.ArtifactDirectory == "" || !wasRetried(first, result) {
 		return links
 	}
 	for _, link := range report.Links(aggregateDirectory, aggregateLog, run.Entry.Name, first.ArtifactDirectory) {
@@ -686,7 +749,11 @@ func errorText(err error) string {
 // provider, at the preflight stage because the cluster failed before a workflow
 // started.
 func failedResults(provider string, err error) []ProviderResult {
-	names := providerNames(provider)
+	return failedResultsFor(providerNames(provider), err)
+}
+
+// failedResultsFor reports a cluster setup failure for the named providers.
+func failedResultsFor(names []string, err error) []ProviderResult {
 	results := make([]ProviderResult, 0, len(names))
 	for _, name := range names {
 		results = append(results, ProviderResult{Provider: name, Stage: model.PhasePreflight, Err: err})

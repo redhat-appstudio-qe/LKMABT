@@ -1094,6 +1094,25 @@ var _ = Describe("LiveStage", func() {
 		Expect(identities).Should(HaveLen(1))
 	})
 
+	It("waits for a running Buildah TaskRun to publish its platform", func() {
+		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
+		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "Unknown")
+		running := buildTaskRunForWorkflow("build-task", "uid-build", "Unknown", "buildah-oci-ta")
+		unstructured.RemoveNestedField(running.Object, "status", "results")
+		succeeded := buildTaskRunForWorkflowOnPlatform("build-task", "uid-build", "True", "buildah-oci-ta", platform.LinuxAMD64)
+		expected := []string{platform.LinuxAMD64}
+
+		identities, pending, err := matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{running}, []model.TriggerCommit{commit}, expected, nil)
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeTrue())
+		Expect(identities).Should(BeEmpty())
+
+		identities, pending, err = matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{succeeded}, []model.TriggerCommit{commit}, expected, nil)
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeFalse())
+		Expect(identities).Should(HaveLen(1))
+	})
+
 	It("rejects a succeeded PipelineRun that is missing a matrix platform", func() {
 		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
 		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "True")
@@ -1224,6 +1243,41 @@ var _ = Describe("LiveStage", func() {
 		Expect(manifest.PipelineRuns).Should(HaveLen(1))
 		Expect(manifest.BuildOutputs).Should(HaveLen(1))
 		Expect(manifest.FailedBuildLogs).Should(BeEmpty())
+	})
+
+	It("keeps completed component identities in a deferred manifest", func() {
+		previousThreshold := admissionPendingThreshold
+		admissionPendingThreshold = time.Millisecond
+		DeferCleanup(func() { admissionPendingThreshold = previousThreshold })
+		previousPoll := buildPollInterval
+		buildPollInterval = time.Millisecond
+		DeferCleanup(func() { buildPollInterval = previousPoll })
+
+		doneCommit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "sha-web"}
+		pendingCommit := model.TriggerCommit{Component: "mathwizz-history-worker", SHA: "sha-worker"}
+		doneRun := pipelineRun("run-web", "mathwizz-web-server", "sha-web", "uid-web", "Unknown")
+		doneTask := buildTaskRunForWorkflow("task-web", "uid-web", "True", "buildah-oci-ta")
+		pendingRun := pendingPipelineRun("run-worker", "mathwizz-history-worker", "sha-worker", "uid-worker", time.Now().Add(-time.Hour), pipelineRunPendingStatus, pipelineRunPendingStatus, "")
+		stage := &LiveStage{
+			Request: config.Request{
+				Platforms: []string{platform.LinuxAMD64},
+				Timeouts:  config.Timeouts{Trigger: time.Second, Build: time.Second},
+			},
+			Clients: &cluster.ClientSet{Dynamic: namespaceDynamicClient(&doneRun, &doneTask, &pendingRun), Kubernetes: kubernetesfake.NewSimpleClientset()},
+		}
+		manifest := &model.RunManifest{
+			Fixture:        model.FixtureIdentity{TenantNamespace: "mathwizz-test"},
+			TriggerCommits: []model.TriggerCommit{doneCommit, pendingCommit},
+		}
+
+		err := stage.VerifyBuilds(context.Background(), manifest)
+
+		var admission *AdmissionPendingError
+		Expect(errors.As(err, &admission)).Should(BeTrue())
+		Expect(manifest.BuildOutputs).Should(HaveLen(1))
+		Expect(manifest.BuildOutputs[0].Component).Should(Equal("mathwizz-web-server"))
+		Expect(manifest.PipelineRuns).Should(HaveLen(1))
+		Expect(manifest.PipelineRuns[0].Name).Should(Equal("run-web"))
 	})
 
 	It("rejects PipelineRun overshoot for an exact trigger SHA", func() {
