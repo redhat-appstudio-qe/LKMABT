@@ -281,10 +281,17 @@ func taskRunOutput(taskRun *unstructured.Unstructured) (string, string, string) 
 	return platform, imageURL, digest
 }
 
+// BuildTaskRunPlatform returns the canonical platform a Buildah TaskRun
+// declares in its labels, annotations, spec, or results.
+func BuildTaskRunPlatform(taskRun *unstructured.Unstructured) string {
+	taskPlatform, _, _ := taskRunOutput(taskRun)
+	return taskPlatform
+}
+
 // taskRunPlatform returns the first recognized platform declared by the
 // build.appstudio.redhat.com/platform, build.appstudio.redhat.com/target-platform,
 // or build.appstudio.openshift.io/platform label, then annotation, then spec
-// PLATFORM param. It returns "" when none normalize.
+// PLATFORM param. It returns "" when none normalize and does not read results.
 func taskRunPlatform(taskRun *unstructured.Unstructured) string {
 	for _, values := range []map[string]string{taskRun.GetLabels(), taskRun.GetAnnotations()} {
 		for _, key := range []string{

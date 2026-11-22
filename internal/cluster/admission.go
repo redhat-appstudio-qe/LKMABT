@@ -56,8 +56,13 @@ func workloadOwnedByPipelineRun(workload, pipelineRun *unstructured.Unstructured
 		if owner.Kind != "PipelineRun" {
 			continue
 		}
-		if pipelineRun.GetUID() != "" && owner.UID == pipelineRun.GetUID() {
-			return true
+		// A non-empty owner UID identifies the exact object. Do not fall back
+		// to the name when that UID belongs to a replaced PipelineRun.
+		if pipelineRun.GetUID() != "" && owner.UID != "" {
+			if owner.UID == pipelineRun.GetUID() {
+				return true
+			}
+			continue
 		}
 		if owner.Name != "" && owner.Name == pipelineRun.GetName() {
 			return true

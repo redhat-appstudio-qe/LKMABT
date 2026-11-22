@@ -46,10 +46,10 @@ var buildPollInterval = 10 * time.Second
 type buildEvidenceCache struct {
 	Captured func(component string) (model.PipelineRunIdentity, bool)
 	Capture  func(model.PipelineRunIdentity, *unstructured.Unstructured, []unstructured.Unstructured) error
-	// ExpectedBuilds is the number of Buildah TaskRuns one component's matrix
-	// wait requires before the component can be accepted. Zero disables the
-	// count check for callers that do not know the platform count.
-	ExpectedBuilds int
+	// ExpectedPlatforms is the set of platforms one component's matrix must
+	// cover before the component can be accepted. Empty disables the coverage
+	// check for callers that do not know the platform selection.
+	ExpectedPlatforms []string
 	// AdmissionReason resolves the scheduler reason for an admission-pending
 	// PipelineRun. It is optional and diagnostic; the PipelineRun condition is
 	// the fallback.
@@ -710,8 +710,8 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 			identity, ok := captured[component]
 			return identity, ok
 		},
-		ExpectedBuilds:  len(s.platforms()),
-		AdmissionReason: s.admissionDiagnostic(ctx, namespace),
+		ExpectedPlatforms: s.platforms(),
+		AdmissionReason:   s.admissionDiagnostic(ctx, namespace),
 		Capture: func(identity model.PipelineRunIdentity, pipelineRun *unstructured.Unstructured, taskRuns []unstructured.Unstructured) error {
 			output, err := inspector.VerifyListed(identity, pipelineRun, taskRuns)
 			if err != nil {
@@ -946,7 +946,7 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 		if err != nil {
 			return nil, err
 		}
-		identities, pending, err := matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns, commits, evidence.ExpectedBuilds, evidence.isCaptured)
+		identities, pending, err := matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns, commits, evidence.ExpectedPlatforms, evidence.isCaptured)
 		if err != nil {
 			return nil, err
 		}
@@ -987,7 +987,7 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 		if err != nil {
 			return nil, err
 		}
-		identities, pending, err := matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns, commits, evidence.ExpectedBuilds, evidence.isCaptured)
+		identities, pending, err := matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns, commits, evidence.ExpectedPlatforms, evidence.isCaptured)
 		if err != nil {
 			return nil, err
 		}
@@ -1103,15 +1103,16 @@ func assembleBuildIdentities(commits []model.TriggerCommit, completed []model.Pi
 // It returns the components proven in this poll and whether another poll is
 // still needed.
 func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, commits []model.TriggerCommit, captured func(string) bool) ([]model.PipelineRunIdentity, bool, error) {
-	return matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns, commits, 0, captured)
+	return matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns, commits, nil, captured)
 }
 
-// matchBuildTaskRunsWithExpected is matchBuildTaskRuns with a minimum matrix
-// TaskRun count. A multi-platform matrix can create one TaskRun before the
-// others; accepting that poll would capture evidence before every requested
-// platform has a TaskRun and turn a normal startup race into a verification
-// failure. Zero disables the count check.
-func matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns []unstructured.Unstructured, commits []model.TriggerCommit, expectedBuilds int, captured func(string) bool) ([]model.PipelineRunIdentity, bool, error) {
+// matchBuildTaskRunsWithExpected is matchBuildTaskRuns with a required matrix
+// platform set. A multi-platform matrix can create one TaskRun before the
+// others, or a duplicate TaskRun for one platform; accepting that poll would
+// capture evidence before every requested platform has an output and turn a
+// normal startup race into a verification failure. Nil disables the coverage
+// check.
+func matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns []unstructured.Unstructured, commits []model.TriggerCommit, expectedPlatforms []string, captured func(string) bool) ([]model.PipelineRunIdentity, bool, error) {
 	identities := make([]model.PipelineRunIdentity, 0, len(commits))
 	pending := false
 	for _, commit := range commits {
@@ -1171,15 +1172,31 @@ func matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns []unstructured.Unstru
 		if failed {
 			return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
 		}
-		if expectedBuilds > 0 && len(buildTasks) < expectedBuilds {
-			if pipelineStatus == "False" {
-				return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
+		if len(expectedPlatforms) > 0 {
+			observed := make(map[string]bool, len(buildTasks))
+			for _, taskRun := range buildTasks {
+				taskPlatform := cluster.BuildTaskRunPlatform(taskRun)
+				if taskPlatform == "" {
+					return nil, false, fmt.Errorf("build TaskRun %s/%s has no platform label — pipeline misconfiguration", taskRun.GetNamespace(), taskRun.GetName())
+				}
+				observed[taskPlatform] = true
 			}
-			if pipelineStatus == "True" {
-				return nil, false, fmt.Errorf("PipelineRun %s/%s has %d Buildah TaskRuns but component %s requires %d", candidate.GetNamespace(), candidate.GetName(), len(buildTasks), commit.Component, expectedBuilds)
+			missing := make([]string, 0, len(expectedPlatforms))
+			for _, expected := range expectedPlatforms {
+				if !observed[expected] {
+					missing = append(missing, expected)
+				}
 			}
-			pending = true
-			continue
+			if len(missing) > 0 {
+				if pipelineStatus == "False" {
+					return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
+				}
+				if pipelineStatus == "True" {
+					return nil, false, fmt.Errorf("PipelineRun %s/%s is missing Buildah TaskRuns for %s", candidate.GetNamespace(), candidate.GetName(), strings.Join(missing, ", "))
+				}
+				pending = true
+				continue
+			}
 		}
 		if !allSucceeded {
 			// A failure before every Buildah TaskRun completes is an early

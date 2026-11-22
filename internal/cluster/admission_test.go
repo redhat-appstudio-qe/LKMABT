@@ -73,6 +73,17 @@ var _ = Describe("AdmissionInspector", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(message).Should(BeEmpty())
 		})
+
+		It("ignores a same-name Workload owned by a replaced PipelineRun", func() {
+			pipelineRun := pendingPipelineRun("build-abc", "new-uid")
+			workload := kueueWorkload("build-abc-workload", "build-abc", "old-uid", "False", "stale quota")
+			inspector := AdmissionInspector{Dynamic: kueueClients(workload)}
+
+			message, err := inspector.QuotaMessage(context.Background(), "tenant", pipelineRun)
+
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(message).Should(BeEmpty())
+		})
 	})
 
 	When("the Workload list cannot be read", func() {

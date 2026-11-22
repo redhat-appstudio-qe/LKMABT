@@ -22,6 +22,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/evidence"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
 	"github.com/redhat-appstudio/lkmabt/internal/workflow"
@@ -72,10 +73,11 @@ func (r *artifactWritingRunner) Run(ctx context.Context, req config.Request, log
 // deferringRunner records requests and returns an admission deferral while the
 // configured call budget for a cluster/provider remains, then succeeds.
 type deferringRunner struct {
-	mu        sync.Mutex
-	requests  []config.Request
-	remaining map[string]int // key "<cluster>/<provider>" -> remaining deferrals
-	reason    string
+	mu         sync.Mutex
+	requests   []config.Request
+	remaining  map[string]int // key "<cluster>/<provider>" -> remaining deferrals
+	cleanupErr map[string]error
+	reason     string
 }
 
 // Run records the request and defers while the configured budget is positive.
@@ -87,6 +89,7 @@ func (r *deferringRunner) Run(_ context.Context, req config.Request, _ RunLog) (
 	if deferred {
 		r.remaining[key]--
 	}
+	cleanupErr := r.cleanupErr[key]
 	r.mu.Unlock()
 
 	reason := r.reason
@@ -97,6 +100,7 @@ func (r *deferringRunner) Run(_ context.Context, req config.Request, _ RunLog) (
 	if deferred {
 		outcome.Deferred = true
 		outcome.DeferredReason = reason
+		outcome.CleanupErr = cleanupErr
 		return outcome, &workflow.AdmissionPendingError{Namespace: "tenant", Pending: []workflow.AdmissionPending{{Component: "component", PipelineRun: "pipeline-run", Reason: reason}}}
 	}
 	return outcome, nil
@@ -413,6 +417,29 @@ var _ = Describe("scheduleClusters", func() {
 		})
 	})
 
+	When("a deferred cleanup failed", func() {
+		It("should fail the cluster even when the retry succeeds", func() {
+			entries := []clusterfile.Entry{{Name: "c1", Server: "https://api.c1.example"}}
+			request := config.Request{Provider: config.ProviderGitHub}
+			runner := &deferringRunner{
+				remaining:  map[string]int{"c1/github": 1},
+				cleanupErr: map[string]error{"c1/github": errors.New("delete failed")},
+			}
+			console := &Console{Out: io.Discard}
+			aggregate := &aggregateRun{Directory: GinkgoT().TempDir()}
+
+			runs := scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
+
+			Expect(runs).Should(HaveLen(1))
+			Expect(runs[0].Results).Should(HaveLen(1))
+			Expect(runs[0].Results[0].Err).Should(MatchError(ContainSubstring("first attempt deferred cleanup failed: delete failed")))
+			Expect(aggregateError(runs)).Should(MatchError(ContainSubstring("delete failed")))
+			rows := reportRows(aggregate.Directory, aggregate.runLogName(), runs, []string{"github"})
+			Expect(rows).Should(HaveLen(1))
+			Expect(rows[0].Passed).Should(BeFalse())
+		})
+	})
+
 	When("a retry defers again", func() {
 		It("should become a terminal error with no further retry", func() {
 			entries := []clusterfile.Entry{{Name: "c1", Server: "https://api.c1.example"}}
@@ -568,6 +595,19 @@ var _ = Describe("reportRows", func() {
 			rows := reportRows(aggregateDirectory, testAggregateLog, runs, []string{"github"})
 			Expect(rows).Should(HaveLen(1))
 			Expect(rows[0].Note).Should(Equal("tested: linux/amd64"))
+		})
+
+		It("should not note a default full selection", func() {
+			aggregateDirectory := GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(aggregateDirectory, testAggregateLog), []byte("aggregate\n"), 0o640)).Should(Succeed())
+			runs := []clusterRun{{
+				Entry:   clusterfile.Entry{Name: "c1"},
+				Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Platforms: platform.All()}},
+			}}
+
+			rows := reportRows(aggregateDirectory, testAggregateLog, runs, []string{"github"})
+			Expect(rows).Should(HaveLen(1))
+			Expect(rows[0].Note).Should(BeEmpty())
 		})
 	})
 

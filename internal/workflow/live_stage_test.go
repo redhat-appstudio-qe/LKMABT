@@ -1070,30 +1070,37 @@ var _ = Describe("LiveStage", func() {
 		Expect(identities[0].Name).Should(Equal("run-build"))
 	})
 
-	It("waits for every matrix Buildah TaskRun before accepting a component", func() {
+	It("waits for every distinct matrix platform before accepting a component", func() {
 		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
 		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "Unknown")
 		amd64 := buildTaskRunForWorkflow("build-task-amd64", "uid-build", "True", "buildah-oci-ta")
-		arm64 := buildTaskRunForWorkflow("build-task-arm64", "uid-build", "True", "buildah-oci-ta")
+		duplicateAMD64 := buildTaskRunForWorkflow("build-task-amd64-2", "uid-build", "True", "buildah-oci-ta")
+		arm64 := buildTaskRunForWorkflowOnPlatform("build-task-arm64", "uid-build", "True", "buildah-oci-ta", platform.LinuxARM64)
+		expected := []string{platform.LinuxAMD64, platform.LinuxARM64}
 
-		identities, pending, err := matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64}, []model.TriggerCommit{commit}, 2, nil)
+		identities, pending, err := matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64}, []model.TriggerCommit{commit}, expected, nil)
 		Expect(err).ShouldNot(HaveOccurred())
 		Expect(pending).Should(BeTrue())
 		Expect(identities).Should(BeEmpty())
 
-		identities, pending, err = matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64, arm64}, []model.TriggerCommit{commit}, 2, nil)
+		identities, pending, err = matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64, duplicateAMD64}, []model.TriggerCommit{commit}, expected, nil)
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeTrue())
+		Expect(identities).Should(BeEmpty())
+
+		identities, pending, err = matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64, arm64}, []model.TriggerCommit{commit}, expected, nil)
 		Expect(err).ShouldNot(HaveOccurred())
 		Expect(pending).Should(BeFalse())
 		Expect(identities).Should(HaveLen(1))
 	})
 
-	It("rejects a succeeded PipelineRun with fewer Buildah TaskRuns than platforms", func() {
+	It("rejects a succeeded PipelineRun that is missing a matrix platform", func() {
 		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
 		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "True")
 		amd64 := buildTaskRunForWorkflow("build-task-amd64", "uid-build", "True", "buildah-oci-ta")
 
-		_, _, err := matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64}, []model.TriggerCommit{commit}, 2, nil)
-		Expect(err).Should(MatchError(ContainSubstring("requires 2")))
+		_, _, err := matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64}, []model.TriggerCommit{commit}, []string{platform.LinuxAMD64, platform.LinuxARM64}, nil)
+		Expect(err).Should(MatchError(ContainSubstring("missing Buildah TaskRuns for " + platform.LinuxARM64)))
 	})
 
 	It("accepts a post-build PipelineRun failure when its Buildah TaskRuns succeeded", func() {
@@ -1846,6 +1853,25 @@ func buildTaskRunForWorkflow(name, ownerUID, status, task string) unstructured.U
 		},
 		"status": taskStatus,
 	}}
+}
+
+// buildTaskRunForWorkflowOnPlatform creates a Buildah TaskRun whose PLATFORM
+// result names the requested platform.
+func buildTaskRunForWorkflowOnPlatform(name, ownerUID, status, task, taskPlatform string) unstructured.Unstructured {
+	taskRun := buildTaskRunForWorkflow(name, ownerUID, status, task)
+	results, found, err := unstructured.NestedSlice(taskRun.Object, "status", "results")
+	if err != nil || !found {
+		return taskRun
+	}
+	for index := range results {
+		result, ok := results[index].(map[string]any)
+		if !ok || result["name"] != "PLATFORM" {
+			continue
+		}
+		result["value"] = taskPlatform
+	}
+	_ = unstructured.SetNestedSlice(taskRun.Object, results, "status", "results")
+	return taskRun
 }
 
 // componentWithPaCStatus creates a component fixture with the requested PaC state.

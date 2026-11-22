@@ -178,6 +178,7 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 		runErr = runErrorWithLogFailure(runErr, logAttachErr)
 		outcome.DeferredReason = runErr.Error()
 		if finalizeErr := runner.finalizeDeferredRun(ctx, stage, manifest, log); finalizeErr != nil {
+			outcome.CleanupErr = finalizeErr
 			runErr = fmt.Errorf("%w; deferred cleanup failed: %v", runErr, finalizeErr)
 			outcome.DeferredReason = runErr.Error()
 		}

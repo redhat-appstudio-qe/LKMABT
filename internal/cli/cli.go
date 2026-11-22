@@ -32,6 +32,8 @@ type RunOutcome struct {
 	// Platforms is the effective selection for this cluster after preflight
 	// narrowed undeclared architectures.
 	Platforms []string
+	// CleanupErr records a deferred attempt's failed namespace cleanup.
+	CleanupErr error
 }
 
 // Runner executes provider workflows for Execute; LiveRunner is the production
@@ -57,6 +59,7 @@ type ProviderResult struct {
 	Deferred       bool
 	DeferredReason string
 	Platforms      []string
+	CleanupErr     error
 }
 
 // CleanupRunner is the optional Runner capability behind the cleanup command.
@@ -139,7 +142,7 @@ func providerResult(provider string, outcome RunOutcome, err error) ProviderResu
 	if deferred && reason == "" && err != nil {
 		reason = err.Error()
 	}
-	return ProviderResult{Provider: provider, RunID: outcome.RunID, ArtifactDirectory: outcome.ArtifactDirectory, Stage: stage, Err: err, Deferred: deferred, DeferredReason: reason, Platforms: append([]string(nil), outcome.Platforms...)}
+	return ProviderResult{Provider: provider, RunID: outcome.RunID, ArtifactDirectory: outcome.ArtifactDirectory, Stage: stage, Err: err, Deferred: deferred, DeferredReason: reason, Platforms: append([]string(nil), outcome.Platforms...), CleanupErr: outcome.CleanupErr}
 }
 
 // requestForProvider creates a run request with a fresh run ID, the fixture

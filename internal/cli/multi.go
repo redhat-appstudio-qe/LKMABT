@@ -18,6 +18,7 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	"github.com/redhat-appstudio/lkmabt/internal/providers/github"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
@@ -412,6 +413,16 @@ func scheduleClusters(ctx context.Context, request config.Request, entries []clu
 		if attemptDeferred(results) {
 			results = exhaustedDeferred(results, nil)
 		}
+		for resultIndex := range results {
+			first, ok := firstAttemptResult(runs[index].FirstAttempt, results[resultIndex].Provider)
+			if !ok || first.CleanupErr == nil {
+				continue
+			}
+			// A deferred cleanup failure is not erased by a successful build
+			// retry; surface it as a cluster failure even though the retry's
+			// preflight should have reconciled the stale namespace.
+			results[resultIndex].Err = errors.Join(results[resultIndex].Err, fmt.Errorf("first attempt deferred cleanup failed: %w", first.CleanupErr))
+		}
 		runs[index].Results = results
 		console.Printf("cluster %s: retry finished (%s)", entry.Name, resultSummary(results))
 	}
@@ -613,7 +624,14 @@ func retryNote(run clusterRun, provider string) string {
 // testedPlatformsNote reports a per-cluster architecture narrowing so the row
 // and console summary do not claim a skipped architecture was exercised.
 func testedPlatformsNote(requested, tested []string) string {
-	if len(tested) == 0 || slices.Equal(requested, tested) {
+	if len(tested) == 0 {
+		return ""
+	}
+	if len(requested) == 0 {
+		// An empty request means the default all-platform selection.
+		requested = platform.All()
+	}
+	if slices.Equal(requested, tested) {
 		return ""
 	}
 	return "tested: " + strings.Join(tested, ", ")
