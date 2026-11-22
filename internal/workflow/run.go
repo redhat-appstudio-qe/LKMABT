@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -138,7 +137,19 @@ func (r Runner) Run(ctx context.Context, options Options) (model.RunManifest, er
 				deferral := deferralFor(err, step.phase, now())
 				manifest.Deferred = &deferral
 				if saveErr := r.Store.Save(&manifest); saveErr != nil {
-					err = errors.Join(err, fmt.Errorf("save deferred run: %w", saveErr))
+					// Without a durable deferral record the attempt cannot be
+					// retried as a deferral: a later retry would have no first
+					// attempt to reference, and LiveRunner would delete the
+					// namespace on an unrecorded outcome. Treat it as a normal
+					// failure instead.
+					manifest.Deferred = nil
+					failureErr := fmt.Errorf("record deferred admission wait: %w; admission wait: %v", saveErr, err)
+					manifest.Failure = &model.Failure{Phase: step.phase, Reason: failureReason(step.phase), Message: failureErr.Error()}
+					_ = r.Store.Transition(&manifest, model.PhaseFailed)
+					if options.OnPhaseEnd != nil {
+						options.OnPhaseEnd(step.phase, failureErr)
+					}
+					return manifest, failureErr
 				}
 				if options.OnPhaseEnd != nil {
 					options.OnPhaseEnd(step.phase, err)

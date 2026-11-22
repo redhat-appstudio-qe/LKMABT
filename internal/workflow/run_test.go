@@ -19,11 +19,16 @@ type fakeStage struct {
 	// deferAt names the step that returns deferErr to simulate a deferral.
 	deferAt  string
 	deferErr error
+	// before runs at the start of a named stage.
+	before func(string)
 }
 
 // call records a fake stage invocation and optionally returns a canceled-context error.
 func (s *fakeStage) call(ctx context.Context, name string) error {
 	s.calls = append(s.calls, name)
+	if s.before != nil {
+		s.before(name)
+	}
 	if _, ok := ctx.Deadline(); ok {
 		if s.deadlines == nil {
 			s.deadlines = map[string]bool{}
@@ -70,6 +75,30 @@ func fixedClock(at time.Time) func() time.Time {
 }
 
 var _ = Describe("Runner", func() {
+	It("fails instead of deferring when the deferral cannot be persisted", func() {
+		root := GinkgoT().TempDir()
+		stage := &fakeStage{
+			deferAt:  "builds",
+			deferErr: &AdmissionPendingError{Namespace: "tenant", Pending: []AdmissionPending{{Component: "web", PipelineRun: "run-web"}}},
+			before: func(name string) {
+				if name != "builds" {
+					return
+				}
+				Expect(os.RemoveAll(root)).Should(Succeed())
+				Expect(os.WriteFile(root, []byte("not a directory"), 0o600)).Should(Succeed())
+			},
+		}
+		runner := Runner{Store: evidence.NewManifestStore(root), Stage: stage, Now: fixedClock(time.Unix(100, 0))}
+
+		manifest, err := runner.Run(context.Background(), Options{RunID: "run-1", Provider: "github", ClusterServer: "https://api.example", FixtureNamespace: "tenant", Application: "app"})
+
+		Expect(err).Should(HaveOccurred())
+		Expect(IsDeferred(err)).Should(BeFalse())
+		Expect(manifest.Deferred).Should(BeNil())
+		Expect(manifest.Failure).ShouldNot(BeNil())
+		Expect(manifest.Failure.Message).Should(ContainSubstring("record deferred admission wait"))
+	})
+
 	It("persists successful phase sequence", func() {
 		stage := &fakeStage{}
 		runner := Runner{Store: evidence.NewManifestStore(GinkgoT().TempDir()), Stage: stage, Now: fixedClock(time.Unix(100, 0))}
