@@ -756,7 +756,7 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 func (s *LiveStage) waitForBuilds(ctx context.Context, manifest *model.RunManifest, namespace string, inspector cluster.PacAuthInspector, evidence buildEvidenceCache) ([]model.PipelineRunIdentity, error) {
 	inspectionWarned := false
 	var componentErr error
-	check := func(checkCtx context.Context, pipelineRuns []unstructured.Unstructured) error {
+	check := func(checkCtx context.Context, pipelineRuns, taskRuns []unstructured.Unstructured) error {
 		// Report a component onboarding failure only after completed builds are
 		// captured, so another component's evidence is never lost to it.
 		if componentErr != nil {
@@ -764,7 +764,17 @@ func (s *LiveStage) waitForBuilds(ctx context.Context, manifest *model.RunManife
 		}
 		// Inspect the PaC Secret only after completed builds are captured, so a
 		// pending run's missing Secret cannot preempt another component's evidence.
-		missing, inspectErr := inspector.Missing(checkCtx, namespace, candidatePipelineRunsForCommits(pipelineRuns, manifest.TriggerCommits, evidence.isCaptured))
+		// Admission-pending runs are left to the deferral threshold: while Kueue
+		// holds the run, a missing Secret is not a reliable PaC diagnosis.
+		candidates := candidatePipelineRunsForCommits(pipelineRuns, manifest.TriggerCommits, evidence.isCaptured)
+		inspectable := make([]unstructured.Unstructured, 0, len(candidates))
+		for index := range candidates {
+			if admissionPending(&candidates[index], taskRuns) {
+				continue
+			}
+			inspectable = append(inspectable, candidates[index])
+		}
+		missing, inspectErr := inspector.Missing(checkCtx, namespace, inspectable)
 		if inspectErr != nil {
 			if !inspectionWarned {
 				inspectionWarned = true
@@ -913,7 +923,7 @@ func componentSpec(name, repository, branch, componentPath string) cluster.Compo
 // failure returns before that capture step. A PipelineRun's post-build tasks are not a
 // completion gate. It returns only when every commit has evidence, either captured
 // earlier or proven here.
-func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, interval time.Duration, namespace string, commits []model.TriggerCommit, list func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error), notice func(string, ...any), check func(context.Context, []unstructured.Unstructured) error, evidence buildEvidenceCache) ([]model.PipelineRunIdentity, error) {
+func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, interval time.Duration, namespace string, commits []model.TriggerCommit, list func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error), notice func(string, ...any), check func(context.Context, []unstructured.Unstructured, []unstructured.Unstructured) error, evidence buildEvidenceCache) ([]model.PipelineRunIdentity, error) {
 	if triggerTimeout <= 0 {
 		return nil, fmt.Errorf("trigger timeout must be positive")
 	}
@@ -947,10 +957,7 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 			return nil, err
 		}
 		if check != nil {
-			// A missing PaC git-auth Secret is an actionable PaC deadlock and
-			// intentionally preempts admission deferral: retrying is the fix,
-			// not waiting for quota.
-			if err := check(triggerCtx, pipelineRuns); err != nil {
+			if err := check(triggerCtx, pipelineRuns, taskRuns); err != nil {
 				return nil, err
 			}
 		}
@@ -991,7 +998,7 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 			return nil, err
 		}
 		if check != nil {
-			if err := check(buildCtx, pipelineRuns); err != nil {
+			if err := check(buildCtx, pipelineRuns, taskRuns); err != nil {
 				return nil, err
 			}
 		}

@@ -1369,6 +1369,31 @@ var _ = Describe("LiveStage", func() {
 				Expect(missing.Pending).Should(BeNumerically(">", cluster.PacAuthSecretGracePeriod))
 			})
 
+			It("should defer an admission-pending build before failing its missing Secret", func() {
+				previousThreshold := admissionPendingThreshold
+				admissionPendingThreshold = time.Millisecond
+				DeferCleanup(func() { admissionPendingThreshold = previousThreshold })
+				previousPoll := buildPollInterval
+				buildPollInterval = time.Millisecond
+				DeferCleanup(func() { buildPollInterval = previousPoll })
+
+				pipeline := pendingPipelineRun("run-pending", "mathwizz-web-server", "sha-1", "uid-pending", time.Now().Add(-time.Hour), pipelineRunPendingStatus, pipelineRunPendingStatus, "")
+				pipeline.SetAnnotations(map[string]string{cluster.PacGitAuthSecretAnnotation: "git-auth-secret"})
+				stage := &LiveStage{
+					Request: config.Request{Platforms: []string{platform.LinuxAMD64}, Timeouts: config.Timeouts{Trigger: time.Second, Build: time.Second}},
+					Clients: &cluster.ClientSet{Dynamic: namespaceDynamicClient(&pipeline), Kubernetes: kubernetesfake.NewSimpleClientset()},
+					Out:     &bytes.Buffer{},
+				}
+				manifest := &model.RunManifest{Fixture: model.FixtureIdentity{TenantNamespace: "mathwizz-test"}, TriggerCommits: []model.TriggerCommit{{Component: "mathwizz-web-server", SHA: "sha-1"}}}
+
+				err := stage.VerifyBuilds(context.Background(), manifest)
+
+				var admission *AdmissionPendingError
+				Expect(errors.As(err, &admission)).Should(BeTrue())
+				var missing *cluster.MissingPacAuthSecretError
+				Expect(errors.As(err, &missing)).Should(BeFalse())
+			})
+
 			It("should report a matched failed PipelineRun before a missing Secret", func() {
 				failed := pipelineRun("run-failed", "mathwizz-web-server", "sha-1", "uid-failed", "False")
 				pending := annotatedPipelineRun("run-pending", "mathwizz-history-worker", "sha-2", "uid-pending", "Unknown", "git-auth-secret", time.Now().Add(-5*time.Minute))
@@ -1860,6 +1885,7 @@ func namespaceDynamicClient(objects ...runtime.Object) *dynamicfake.FakeDynamicC
 		{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "releases"}:          "ReleaseList",
 		{Group: "tekton.dev", Version: "v1", Resource: "pipelineruns"}:                      "PipelineRunList",
 		{Group: "tekton.dev", Version: "v1", Resource: "taskruns"}:                          "TaskRunList",
+		cluster.KueueWorkloadGVR: "WorkloadList",
 	}, objects...)
 }
 

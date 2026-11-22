@@ -396,6 +396,10 @@ func scheduleClusters(ctx context.Context, request config.Request, entries []clu
 		console.Printf("cluster %s: finished (%s)", entry.Name, resultSummary(runs[index].Results))
 	}
 	for _, index := range deferred {
+		// A failed deferred cleanup stays in FirstAttempt.DeferredReason. The
+		// retry's preflight deletes or fails on any stale scoped namespace before
+		// its builds start, so a successful retry proves the failure was transient
+		// or the namespace was already gone; the row note keeps it visible.
 		entry := runs[index].Entry
 		console.Printf("")
 		console.Printf("cluster %s: retrying deferred attempt (fresh run)", entry.Name)
