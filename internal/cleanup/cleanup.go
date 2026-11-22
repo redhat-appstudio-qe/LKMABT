@@ -204,6 +204,33 @@ func (s NamespaceService) Delete(ctx context.Context, name, runID string) (types
 	return info.UID, nil
 }
 
+// DeleteVerified removes a namespace after re-reading it and confirming its
+// name, identity, labels, and run ID match the inspected snapshot. It sends the
+// approved UID and resourceVersion as delete preconditions before any finalizer
+// stripping; WaitDeleted performs UID-guarded stripping afterwards. A
+// replacement namespace therefore cannot be modified or deleted. A namespace
+// that disappears between inspection and the delete request is not an error.
+func (s NamespaceService) DeleteVerified(ctx context.Context, approved NamespaceInfo) (types.UID, error) {
+	if strings.TrimSpace(approved.Name) == "" {
+		return "", fmt.Errorf("namespace name is required")
+	}
+	if approved.UID == "" {
+		return "", fmt.Errorf("namespace UID is required for verified deletion")
+	}
+	current, err := s.Inspect(ctx, approved.Name)
+	if err != nil {
+		return "", fmt.Errorf("re-read namespace %s: %w", approved.Name, err)
+	}
+	if current.Name != approved.Name || current.RunID != approved.RunID || current.UID != approved.UID || current.ResourceVersion != approved.ResourceVersion || !maps.Equal(current.Labels, approved.Labels) {
+		return "", fmt.Errorf("namespace %q changed after verification; refusing to delete", approved.Name)
+	}
+	options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &approved.UID, ResourceVersion: &approved.ResourceVersion}}
+	if err := s.Dynamic.Resource(NamespaceGVR).Delete(ctx, approved.Name, options); err != nil && !apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("delete namespace %s: %w", approved.Name, err)
+	}
+	return approved.UID, nil
+}
+
 // DeleteApproved removes an explicitly approved namespace after re-reading it and
 // confirming its name, identity, labels, and run ID are unchanged since the
 // approval. Any drift invalidates the approval. Finalizer stripping runs after

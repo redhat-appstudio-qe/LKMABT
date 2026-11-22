@@ -633,16 +633,17 @@ func (runner LiveRunner) finalizeDeferredRun(ctx context.Context, stage *workflo
 	if info.Name != namespace || !info.Owned() || info.RunID != manifest.RunID {
 		return fmt.Errorf("refusing to delete tenant namespace %s: not owned by deferred run %s", namespace, manifest.RunID)
 	}
-	// DeleteApproved re-reads the namespace and carries its UID and
-	// resourceVersion as preconditions, so a replacement object is refused
-	// instead of deleted.
-	if err := stage.Namespace.DeleteApproved(cleanupCtx, info); err != nil {
+	// DeleteVerified re-reads the namespace and sends UID/resourceVersion
+	// preconditions before any finalizer stripping; WaitDeleted then verifies
+	// the UID again before each strip. A replacement object is never modified.
+	uid, err := stage.Namespace.DeleteVerified(cleanupCtx, info)
+	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
 		return err
 	}
-	if err := waitForNamespaceDeletion(cleanupCtx, stage.Namespace, namespace, info.UID); err != nil {
+	if err := waitForNamespaceDeletion(cleanupCtx, stage.Namespace, namespace, uid); err != nil {
 		return err
 	}
 	if log != nil {

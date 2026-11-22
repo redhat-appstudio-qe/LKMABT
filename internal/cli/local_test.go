@@ -231,7 +231,10 @@ func namespaceListKinds() map[schema.GroupVersionResource]string {
 var _ = Describe("finalizeDeferredRun", func() {
 	When("the tenant namespace is owned by the deferred run", func() {
 		It("should delete it without prompting or collecting artifacts", func() {
-			client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), namespaceListKinds(), namespaceObject("tenant", "run-1"))
+			owned := namespaceObject("tenant", "run-1")
+			owned.SetUID("uid-1")
+			owned.SetResourceVersion("7")
+			client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), namespaceListKinds(), owned)
 			prompt := &fakePrompt{approved: false}
 			stage := &workflow.LiveStage{Namespace: cleanup.NamespaceService{Dynamic: client}, Prompt: prompt}
 			stateDir := GinkgoT().TempDir()
@@ -279,14 +282,20 @@ var _ = Describe("finalizeDeferredRun", func() {
 	})
 
 	When("the namespace is replaced after inspection", func() {
-		It("should refuse to delete the replacement", func() {
-			client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"))
+		It("should refuse to modify or delete the replacement", func() {
+			original := namespaceObject("tenant", "run-1")
+			original.SetUID("uid-1")
+			original.SetResourceVersion("7")
+			replacement := namespaceObject("tenant", "run-2")
+			replacement.SetUID("uid-2")
+			replacement.SetResourceVersion("8")
+			client := fake.NewSimpleDynamicClient(runtime.NewScheme(), original)
 			var gets atomic.Int32
 			client.PrependReactor("get", "namespaces", func(kubetesting.Action) (bool, runtime.Object, error) {
 				if gets.Add(1) == 1 {
 					return false, nil, nil
 				}
-				return true, namespaceObject("tenant", "run-2"), nil
+				return true, replacement, nil
 			})
 			var deletes atomic.Int32
 			client.PrependReactor("delete", "namespaces", func(kubetesting.Action) (bool, runtime.Object, error) {
@@ -297,7 +306,7 @@ var _ = Describe("finalizeDeferredRun", func() {
 			manifest := model.RunManifest{RunID: "run-1", Fixture: model.FixtureIdentity{TenantNamespace: "tenant"}}
 
 			err := (LiveRunner{}).finalizeDeferredRun(context.Background(), stage, manifest, io.Discard)
-			Expect(err).Should(MatchError(ContainSubstring("changed after approval")))
+			Expect(err).Should(MatchError(ContainSubstring("changed after verification")))
 			Expect(deletes.Load()).Should(BeZero())
 		})
 	})
