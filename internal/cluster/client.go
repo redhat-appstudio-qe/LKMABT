@@ -58,6 +58,27 @@ type SchedulingSpec struct {
 	Platforms  []string
 }
 
+// SchedulingResult reports controller readiness and per-platform host-config
+// support. Checks are hard prerequisites; Platforms classifies each requested
+// platform so callers can narrow a selection without treating an undeclared
+// architecture as a preflight failure.
+type SchedulingResult struct {
+	Checks    []CheckResult     `json:"checks"`
+	Platforms []PlatformSupport `json:"platforms,omitempty"`
+}
+
+// PlatformSupport classifies one requested platform against the cluster's
+// live multi-platform-controller host-config.
+type PlatformSupport struct {
+	Platform string `json:"platform"`
+	// Supported is true when host-config can schedule the platform.
+	Supported bool `json:"supported"`
+	// Configured is true when host-config declares the platform at all,
+	// whether or not the declaration is complete.
+	Configured bool   `json:"configured"`
+	Details    string `json:"details,omitempty"`
+}
+
 // PipelineRunSelector restricts PipelineRun lookups by label.
 type PipelineRunSelector struct {
 	Labels map[string]string
@@ -70,8 +91,9 @@ type Cluster interface {
 	// CheckAccess checks served API group versions and, when requested, verb
 	// authorization in the check namespace.
 	CheckAccess(context.Context, []AccessCheck) []CheckResult
-	// CheckScheduling validates controller readiness and platform configuration.
-	CheckScheduling(context.Context, SchedulingSpec) []CheckResult
+	// CheckScheduling validates controller readiness and classifies platform
+	// configuration.
+	CheckScheduling(context.Context, SchedulingSpec) SchedulingResult
 }
 
 // ClientSet holds one REST config and the typed, dynamic, and discovery clients
@@ -238,64 +260,73 @@ func withGuidance(details, guidance string) string {
 	return details + "; " + guidance
 }
 
-// CheckScheduling verifies that the controller deployment is available and that
-// host-config declares and configures every requested platform. Failures are
-// returned as results.
-func (c *RealCluster) CheckScheduling(ctx context.Context, spec SchedulingSpec) []CheckResult {
+// CheckScheduling verifies that the controller deployment is available and
+// classifies every requested platform against the live host-config ConfigMap.
+// Checks are hard prerequisites; Platforms separates undeclared platforms,
+// which callers may narrow around, from declarations that are present but
+// unusable, which remain failures.
+//
+// The live ConfigMap is authoritative for this cluster. The host-values.yaml
+// files in infra-deployments are its source, but reading the deployed state
+// avoids guessing the cluster's ring and adds no network dependency.
+func (c *RealCluster) CheckScheduling(ctx context.Context, spec SchedulingSpec) SchedulingResult {
 	if c == nil || c.Clients == nil || c.Clients.Kubernetes == nil {
-		return []CheckResult{{Name: "multi-platform-controller", Details: "kubernetes client is not initialized"}}
+		return SchedulingResult{Checks: []CheckResult{{Name: "multi-platform-controller", Details: "kubernetes client is not initialized"}}}
 	}
 	if strings.TrimSpace(spec.Namespace) == "" || strings.TrimSpace(spec.Deployment) == "" || strings.TrimSpace(spec.ConfigMap) == "" {
-		return []CheckResult{{Name: "multi-platform-controller", Details: "controller namespace, deployment, and config map are required"}}
+		return SchedulingResult{Checks: []CheckResult{{Name: "multi-platform-controller", Details: "controller namespace, deployment, and config map are required"}}}
 	}
 	deployment, err := c.Clients.Kubernetes.AppsV1().Deployments(spec.Namespace).Get(ctx, spec.Deployment, metav1.GetOptions{})
 	if err != nil {
-		return []CheckResult{{Name: spec.Deployment, Details: fmt.Sprintf("get controller deployment: %v", err)}}
+		return SchedulingResult{Checks: []CheckResult{{Name: spec.Deployment, Details: fmt.Sprintf("get controller deployment: %v", err)}}}
 	}
 	if !controllerDeploymentReady(deployment) {
-		return []CheckResult{{Name: spec.Deployment, Details: fmt.Sprintf("controller deployment is not ready: generation=%d observed=%d ready=%d available=%d updated=%d", deployment.Generation, deployment.Status.ObservedGeneration, deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas, deployment.Status.UpdatedReplicas)}}
+		return SchedulingResult{Checks: []CheckResult{{Name: spec.Deployment, Details: fmt.Sprintf("controller deployment is not ready: generation=%d observed=%d ready=%d available=%d updated=%d", deployment.Generation, deployment.Status.ObservedGeneration, deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas, deployment.Status.UpdatedReplicas)}}}
 	}
 	configMap, err := c.Clients.Kubernetes.CoreV1().ConfigMaps(spec.Namespace).Get(ctx, spec.ConfigMap, metav1.GetOptions{})
 	if err != nil {
-		return []CheckResult{{Name: spec.ConfigMap, Details: fmt.Sprintf("get controller host configuration: %v", err)}}
+		return SchedulingResult{Checks: []CheckResult{{Name: spec.ConfigMap, Details: fmt.Sprintf("get controller host configuration: %v", err)}}}
 	}
 	if strings.TrimSpace(configMap.Labels[MultiPlatformControllerConfigLabel]) == "" {
-		return []CheckResult{{Name: spec.ConfigMap, Details: "controller host configuration is not labeled for multi-platform-controller"}}
+		return SchedulingResult{Checks: []CheckResult{{Name: spec.ConfigMap, Details: "controller host configuration is not labeled for multi-platform-controller"}}}
 	}
-	results := []CheckResult{{Name: spec.Deployment, Passed: true, Details: "controller deployment is available"}}
-	for _, platform := range spec.Platforms {
-		result := CheckResult{Name: spec.Namespace + "/" + platform}
-		scheduling := configuredPlatform(configMap.Data, platform)
-		if scheduling.mode == "" {
-			result.Details = "platform is not configured in host-config"
-			results = append(results, result)
-			continue
-		}
-		if scheduling.mode == "static" {
-			host, details := staticHostForPlatform(configMap.Data, platform, scheduling.hosts)
-			if host == "" {
-				result.Details = details
-				results = append(results, result)
-				continue
-			}
-			result.Passed = true
-			result.Details = fmt.Sprintf("platform is configured via static host %s", host)
-			results = append(results, result)
-			continue
-		}
-		if scheduling.mode == "dynamic" || scheduling.mode == "dynamic-pool" {
-			prefix := "dynamic." + strings.ReplaceAll(platform, "/", "-") + "."
-			if strings.TrimSpace(configMap.Data[prefix+"type"]) == "" {
-				result.Details = fmt.Sprintf("%s platform has no provider type", scheduling.mode)
-				results = append(results, result)
-				continue
-			}
-		}
-		result.Passed = true
-		result.Details = fmt.Sprintf("platform is configured via %s host scheduling", scheduling.mode)
-		results = append(results, result)
+	result := SchedulingResult{Checks: []CheckResult{{Name: spec.Deployment, Passed: true, Details: "controller deployment is available"}}}
+	for _, requested := range spec.Platforms {
+		result.Platforms = append(result.Platforms, platformSupport(configMap.Data, requested))
 	}
-	return results
+	return result
+}
+
+// platformSupport classifies one platform against host-config. An undeclared
+// platform is not a failure; a declared but incomplete or untyped platform is.
+func platformSupport(data map[string]string, target string) PlatformSupport {
+	support := PlatformSupport{Platform: target}
+	scheduling := configuredPlatform(data, target)
+	if scheduling.mode == "" {
+		support.Details = "platform is not configured in host-config"
+		return support
+	}
+	support.Configured = true
+	if scheduling.mode == "static" {
+		host, details := staticHostForPlatform(data, target, scheduling.hosts)
+		if host == "" {
+			support.Details = details
+			return support
+		}
+		support.Supported = true
+		support.Details = fmt.Sprintf("platform is configured via static host %s", host)
+		return support
+	}
+	if scheduling.mode == "dynamic" || scheduling.mode == "dynamic-pool" {
+		prefix := "dynamic." + strings.ReplaceAll(target, "/", "-") + "."
+		if strings.TrimSpace(data[prefix+"type"]) == "" {
+			support.Details = fmt.Sprintf("%s platform has no provider type", scheduling.mode)
+			return support
+		}
+	}
+	support.Supported = true
+	support.Details = fmt.Sprintf("platform is configured via %s host scheduling", scheduling.mode)
+	return support
 }
 
 // controllerDeploymentReady reports whether the deployment has observed and available desired replicas.

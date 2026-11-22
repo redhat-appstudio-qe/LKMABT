@@ -9,7 +9,7 @@ cluster in the clusters file it:
 2. Creates or reuses the tenant namespace, Application, and Components;
 3. Selects the architectures in each fixture PipelineRun and appends one
    harmless comment to each fixture Dockerfile;
-4. Waits for the matching PipelineRuns to succeed;
+4. Waits for each component's Buildah TaskRuns to succeed;
 5. Verifies the pre-publication Buildah outputs cover the selected
    architectures. All four are selected by default: `linux/amd64`,
    `linux/arm64`, `linux/s390x`, and `linux/ppc64le`.
@@ -20,9 +20,11 @@ resources. No dashboard, no telemetry, no *narishkeit*: the evidence lands in
 `.lkmabt-runs/`.
 
 It is a smoke test with a clipboard: trigger, wait, verify, file the evidence.
-A cluster that cannot run the selected platforms fails at preflight, before
-LKMABT touches the fixture; a broken build fails later and leaves its receipt
-in `.lkmabt-runs/`.
+A cluster that declares none of the selected platforms, or that declares an
+incomplete or unschedulable platform, fails at preflight, before LKMABT touches
+the fixture. A platform the cluster does not declare is informational: LKMABT
+continues on that cluster with the platforms its live `host-config` supports. A
+broken build fails later and leaves its receipt in `.lkmabt-runs/`.
 
 ## Contents
 
@@ -43,6 +45,7 @@ in `.lkmabt-runs/`.
 - [Running LKMABT](#running-lkmabt)
   - [Selecting architectures](#selecting-architectures)
   - [LKMABT under the hood](#lkmabt-under-the-hood)
+  - [Admission deferral](#admission-deferral)
   - [When the cluster GitHub App is not installed](#when-the-cluster-github-app-is-not-installed)
   - [During the run](#during-the-run)
 - [Cleaning up a namespace](#cleaning-up-a-namespace)
@@ -131,13 +134,24 @@ at preflight, before triggering three components that cannot build.
 
 - The `multi-platform-controller` deployment is ready in namespace
   `multi-platform-controller`, and its `host-config` ConfigMap carries the
-  `build.appstudio.redhat.com/multi-platform-config` label. The ConfigMap must
-  declare every architecture the run selects, either in a local, dynamic, or
-  dynamic-pool platform list or on a complete static `host.<name>.platform`
-  entry with `address`, `user`, and `secret`. By default LKMABT requires
-  `linux/amd64`, `linux/arm64`, `linux/s390x`, and `linux/ppc64le`; select
-  `aws`, `ibm`, or a single architecture to narrow the requirement. Dynamic
-  provisioning is sufficient; physical architecture nodes are not required.
+  `build.appstudio.redhat.com/multi-platform-config` label. That live ConfigMap
+  is authoritative for the architectures each cluster can run. By default
+  LKMABT selects `linux/amd64`, `linux/arm64`, `linux/s390x`, and
+  `linux/ppc64le`; select `aws`, `ibm`, or a single architecture to narrow the
+  selection. Dynamic provisioning is sufficient; physical architecture nodes
+  are not required.
+  - An architecture the cluster does not declare is informational, not a
+    preflight failure. LKMABT prints a notice and continues on that cluster with
+    the selected architectures the cluster does declare.
+  - A declared architecture must be schedulable. A static
+    `host.<name>.platform` entry needs `address`, `user`, and `secret`; a
+    dynamic entry needs a provider type. A declared but incomplete or
+    misconfigured entry still fails preflight.
+  - A cluster that declares none of the selected architectures fails preflight,
+    because it cannot run the selection at all.
+  - GitHub App onboarding is a separate preflight check. A cluster that cannot
+    install the fixture's GitHub App still fails preflight even when its
+    architecture support is sufficient.
 - PaC onboarding is complete for all three components, with current `.tekton`
   configuration on the fixture branch. Each push PipelineRun must declare a
   `build-platforms` parameter; LKMABT rewrites it and fails when it is absent.
@@ -411,8 +425,9 @@ The optional architecture arguments select the architectures the triggered
 builds must produce. One or more arguments follow the fixture command and
 precede flags; separate them with spaces or commas (`s390x arm64`,
 `s390x,arm64`, or shell-split `s390x, arm64`). Repeated platforms expand once,
-in argument order. Omit every architecture argument to build and verify all
-four.
+in argument order. Omit every architecture argument to select all four by
+default; each cluster builds and verifies the subset its `host-config`
+declares.
 
 | Argument | Builds |
 | --- | --- |
@@ -438,9 +453,13 @@ LKMABT applies the selection to every component:
    selected architecture. Two architectures across three components therefore
    produce three PipelineRuns and six architecture builds, not six
    PipelineRuns.
-4. Preflight requires the cluster to declare every selected platform. Build
-   verification requires one successful Buildah output per platform, and the
-   final result line lists the tested architectures.
+4. Each cluster runs the subset of selected platforms its live `host-config`
+   declares. An undeclared platform is informational; a declared but
+   incomplete or unschedulable platform fails preflight, and a cluster that
+   declares none of the selection fails preflight outright. Build verification
+   requires one successful Buildah output per platform the cluster runs. The
+   final result line lists the requested architectures; the per-cluster notice
+   and the row's `tested:` note name the subset that cluster actually builds.
 
 The fixtures are shared; the configuration and Dockerfile commits are visible
 to other users. Your trigger commit is a postcard to everyone else at the
@@ -477,11 +496,46 @@ lies *mishigas*.
   and never overwritten.
 - The console prints a `cluster <name>` heading per cluster,
   `cluster <name>: finished (<n> passed, <n> failed)`, one result line per
-  provider and cluster with the tested architectures, and the report paths. A
-  cluster that fails authentication prints
+  provider and cluster with the requested architectures and a `tested:` note
+  when preflight narrowed them, and the report paths. A notice names any
+  per-cluster architecture subset. A cluster that fails authentication prints
   ` ✗ Authenticate cluster <name> 🔐` and the reason.
 - Reports and evidence are stored by default under `.lkmabt-runs/`; see
   [Run logs and artifact retention](#run-logs-and-artifact-retention).
+
+### Admission deferral
+
+Kueue or another admission controller can hold a triggered PipelineRun before
+it starts. LKMABT treats that as a scheduler deferral, not a failure, when all
+three are true for more than 10 minutes: the PipelineRun is `PipelineRunPending`
+(in `spec.status` or as the `Succeeded` condition reason), it has no
+`startTime`, and it has no child TaskRuns.
+
+While the wait continues, the once-per-minute build heartbeat names
+`PipelineRunPending`, the PipelineRun age, and the Kueue quota message from the
+Workload's `QuotaReserved=False` condition when one is available. When the
+threshold passes, the active step ends with a pause marker,
+` ⏸ <action> - deferred`, with the reason appended in parentheses when one is
+available, instead of a success or failure marker.
+The deferral is recorded in the run manifest, not as a failure, and the last
+completed phase is kept.
+
+The cluster is deferred: LKMABT continues with the next cluster in the file.
+After the first pass it retries each deferred cluster once, with fresh provider
+run IDs and fresh trigger commits. The deferred provider attempt deletes
+only its own run-owned tenant namespace, without prompting, so its pending
+workloads release their Kueue queue positions; it skips failure-artifact
+collection. In a `both` run the sibling provider finalizes normally. If the
+retry stays admission-pending too, that cluster fails with
+`cluster remained admission-pending after one retry: <reason>`, where `<reason>`
+carries the Kueue quota message or the PipelineRun condition.
+
+Reports keep one row per cluster and provider. A row whose first attempt
+deferred uses the retry result and puts `first attempt deferred: <reason>` in
+the Note column; the first attempt's run directory and `run.log` remain
+available as additional artifact links. When the retry completes or fails
+normally, its namespace cleanup follows the normal prompt; a retry that also
+defers is cleaned up without one.
 
 ### When the cluster GitHub App is not installed
 
@@ -525,12 +579,13 @@ selection. This applies to configured tokens and browser logins.
 
 ### During the run
 
-- A component is accepted only after its PipelineRun reports `Succeeded=True`;
-  successful Buildah TaskRuns alone are not enough, so
-  `waiting for PipelineRun ... to finish` means the run is still in progress. A
-  matched failure is reported on the spot; LKMABT does not wait for the rest of
-  the class to finish. Missing platform metadata in a Buildah TaskRun or a
-  missing selected-platform output fails verification.
+- A component is accepted when every Buildah TaskRun for its triggered
+  PipelineRun succeeds. LKMABT stops at the build stage: the PipelineRun's
+  image-index, scans, tagging, and other post-build tasks are outside its scope
+  and are not a completion gate. A failed Buildah TaskRun, or a PipelineRun that
+  fails before its Buildah TaskRuns complete, is reported on the spot; LKMABT
+  does not wait for the rest of the class to finish. Missing platform metadata
+  in a Buildah TaskRun or a missing selected-platform output fails verification.
 - A missing tenant namespace is requested through an OpenShift `ProjectRequest`,
   which binds the requester as project admin; if that API is unavailable or
   forbidden, LKMABT creates a bare `Namespace` with the ownership labels already
@@ -541,8 +596,10 @@ selection. This applies to configured tokens and browser logins.
   `--preflight-timeout` bounds preflight and fixture setup. `--build-timeout`
   bounds each of triggering, the build wait, and build-output verification.
   `--trigger-timeout` bounds only the wait for a triggered PipelineRun to
-  appear. A matching PipelineRun that has already failed fails the wait
-  immediately.
+  appear. A matching PipelineRun that fails before its Buildah TaskRuns
+  complete, or a failed Buildah TaskRun, fails the wait immediately. A
+  PipelineRun that fails only in a post-build task does not fail the build
+  result.
 - Owned stale tenant namespaces (`<tenant>` and `<tenant>-*`) are deleted
   automatically and logged. Namespaces with absent or different ownership
   labels are prompted individually and re-inspected before deletion. Declining
@@ -567,7 +624,10 @@ selection. This applies to configured tokens and browser logins.
   so delete such a Secret manually before the run.
 - Long waits are never silent: PaC onboarding and build waits report at most
   once per minute, naming pending components, PipelineRun ages, and Buildah
-  counts. A pending PipelineRun whose annotated PaC git-auth Secret is missing
+  counts. An admission-pending component reports `PipelineRunPending` and the
+  Kueue quota message; after ten minutes it defers the cluster for one retry
+  (see [Admission deferral](#admission-deferral)). A pending PipelineRun whose
+  annotated PaC git-auth Secret is missing
   past two minutes fails with the Secret name and whether PaC created it: a
   lost created Secret hints at a concurrent run, while a PipelineRun without
   the PaC finalizer was never reconciled by the PaC watcher. An unreconciled

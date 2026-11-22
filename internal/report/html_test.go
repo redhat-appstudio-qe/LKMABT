@@ -31,8 +31,19 @@ var _ = Describe("RenderHTML", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(html).Should(ContainSubstring("<!DOCTYPE html>"))
 			Expect(html).Should(ContainSubstring("<title>LKMABT aggregate run run-1</title>"))
-			Expect(html).Should(ContainSubstring("<li>Architectures: linux/amd64, linux/arm64</li>"))
+			Expect(html).Should(ContainSubstring("<li>Requested architectures: linux/amd64, linux/arm64</li>"))
 			Expect(html).Should(ContainSubstring("<table>"))
+			Expect(html).Should(ContainSubstring("<th>Note</th>"))
+		})
+	})
+
+	When("a row records a first-attempt note", func() {
+		It("should render the note in its own cell", func() {
+			document := Document{Rows: []Row{{Cluster: "c1", Provider: "github", Passed: true, Stage: "completed", Note: "first attempt deferred: admission pending"}}}
+
+			html, err := RenderHTML(document)
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(html).Should(ContainSubstring("<td>first attempt deferred: admission pending</td>"))
 		})
 	})
 

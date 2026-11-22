@@ -22,8 +22,10 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/evidence"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
+	"github.com/redhat-appstudio/lkmabt/internal/workflow"
 )
 
 // testAggregateLog is the run-named aggregate log used by report-row fixtures.
@@ -66,6 +68,53 @@ func (r *artifactWritingRunner) Run(ctx context.Context, req config.Request, log
 		stage = s
 	}
 	return RunOutcome{Provider: req.Provider, RunID: req.RunID, ArtifactDirectory: filepath.Base(dir), Stage: stage}, r.fail[key]
+}
+
+// deferringRunner records requests and returns an admission deferral while the
+// configured call budget for a cluster/provider remains, then succeeds.
+type deferringRunner struct {
+	mu         sync.Mutex
+	requests   []config.Request
+	remaining  map[string]int // key "<cluster>/<provider>" -> remaining deferrals
+	cleanupErr map[string]error
+	fail       map[string]error
+	reason     string
+}
+
+// Run records the request and defers while the configured budget is positive.
+func (r *deferringRunner) Run(_ context.Context, req config.Request, _ RunLog) (RunOutcome, error) {
+	r.mu.Lock()
+	r.requests = append(r.requests, req)
+	key := req.ClusterName + "/" + req.Provider
+	deferred := r.remaining[key] > 0
+	if deferred {
+		r.remaining[key]--
+	}
+	cleanupErr := r.cleanupErr[key]
+	failErr := r.fail[key]
+	r.mu.Unlock()
+
+	reason := r.reason
+	if reason == "" {
+		reason = "admission pending"
+	}
+	outcome := RunOutcome{Provider: req.Provider, RunID: req.RunID, ArtifactDirectory: "artifacts-" + req.Provider, Stage: model.PhaseTriggered}
+	if deferred {
+		outcome.Deferred = true
+		outcome.DeferredReason = reason
+		outcome.CleanupErr = cleanupErr
+		return outcome, &workflow.AdmissionPendingError{Namespace: "tenant", Pending: []workflow.AdmissionPending{{Component: "component", PipelineRun: "pipeline-run", Reason: reason}}}
+	}
+	return outcome, failErr
+}
+
+// requestKeys returns the recorded cluster/provider keys in call order.
+func (r *deferringRunner) requestKeys() []string {
+	keys := make([]string, len(r.requests))
+	for index, request := range r.requests {
+		keys[index] = request.ClusterName + "/" + request.Provider
+	}
+	return keys
 }
 
 // gatedRunner blocks each Run until release closes and records peak concurrency.
@@ -336,6 +385,153 @@ var _ = Describe("scheduleClusters", func() {
 			Expect(output).Should(ContainSubstring("cluster c1: finished (1 passed, 0 failed)"))
 		})
 	})
+	When("a cluster defers on its first attempt", func() {
+		It("should retry it after the first pass with a fresh run ID", func() {
+			entries := []clusterfile.Entry{
+				{Name: "c1", Server: "https://api.c1.example"},
+				{Name: "c2", Server: "https://api.c2.example"},
+			}
+			request := config.Request{Provider: config.ProviderGitHub}
+			runner := &deferringRunner{remaining: map[string]int{"c1/github": 1}}
+			console := &Console{Out: &bytes.Buffer{}}
+			aggregate := &aggregateRun{Directory: GinkgoT().TempDir()}
+
+			runs := scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
+
+			Expect(runner.requestKeys()).Should(Equal([]string{"c1/github", "c2/github", "c1/github"}))
+			Expect(runner.requests[0].RunID).ShouldNot(Equal(runner.requests[2].RunID))
+
+			Expect(runs[0].FirstAttempt).Should(HaveLen(1))
+			Expect(runs[0].FirstAttempt[0].Deferred).Should(BeTrue())
+			Expect(runs[0].FirstAttempt[0].RunID).Should(Equal(runner.requests[0].RunID))
+			Expect(runs[0].Results).Should(HaveLen(1))
+			Expect(runs[0].Results[0].Deferred).Should(BeFalse())
+			Expect(runs[0].Results[0].Err).Should(BeNil())
+			Expect(runs[0].Results[0].RunID).Should(Equal(runner.requests[2].RunID))
+			Expect(runs[1].FirstAttempt).Should(BeEmpty())
+			Expect(runs[1].Results[0].Err).Should(BeNil())
+
+			output := console.Out.(*bytes.Buffer).String()
+			Expect(output).Should(ContainSubstring("cluster c1: deferred (admission pending); continuing with the next cluster"))
+			Expect(output).Should(ContainSubstring("cluster c1: will retry after the first pass"))
+			Expect(output).Should(ContainSubstring("cluster c1: retrying deferred attempt (fresh run)"))
+			Expect(output).Should(ContainSubstring("cluster c1: retry finished (1 passed, 0 failed)"))
+		})
+	})
+
+	When("a deferred cleanup failed", func() {
+		It("should fail the cluster even when the retry succeeds", func() {
+			entries := []clusterfile.Entry{{Name: "c1", Server: "https://api.c1.example"}}
+			request := config.Request{Provider: config.ProviderGitHub}
+			runner := &deferringRunner{
+				remaining:  map[string]int{"c1/github": 1},
+				cleanupErr: map[string]error{"c1/github": errors.New("delete failed")},
+			}
+			console := &Console{Out: io.Discard}
+			aggregate := &aggregateRun{Directory: GinkgoT().TempDir()}
+
+			runs := scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
+
+			Expect(runs).Should(HaveLen(1))
+			Expect(runs[0].Results).Should(HaveLen(1))
+			Expect(runs[0].Results[0].Err).Should(MatchError(ContainSubstring("first attempt deferred cleanup failed: delete failed")))
+			Expect(aggregateError(runs)).Should(MatchError(ContainSubstring("delete failed")))
+			rows := reportRows(aggregate.Directory, aggregate.runLogName(), runs, []string{"github"})
+			Expect(rows).Should(HaveLen(1))
+			Expect(rows[0].Passed).Should(BeFalse())
+		})
+	})
+
+	When("a retry defers again", func() {
+		It("should become a terminal error with no further retry", func() {
+			entries := []clusterfile.Entry{{Name: "c1", Server: "https://api.c1.example"}}
+			request := config.Request{Provider: config.ProviderGitHub}
+			runner := &deferringRunner{remaining: map[string]int{"c1/github": 2}}
+			console := &Console{Out: io.Discard}
+			aggregate := &aggregateRun{Directory: GinkgoT().TempDir()}
+
+			runs := scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
+
+			Expect(runner.requests).Should(HaveLen(2))
+			Expect(runs[0].Results).Should(HaveLen(1))
+			Expect(runs[0].Results[0].Deferred).Should(BeFalse())
+			Expect(runs[0].Results[0].Err).Should(MatchError(ContainSubstring("admission-pending")))
+
+			rows := reportRows(aggregate.Directory, aggregate.runLogName(), runs, []string{"github"})
+			Expect(rows).Should(HaveLen(1))
+			Expect(rows[0].Passed).Should(BeFalse())
+			Expect(rows[0].Note).Should(ContainSubstring("first attempt deferred"))
+		})
+	})
+
+	When("one provider defers while its sibling fails", func() {
+		It("should retry only the deferred provider and preserve the sibling failure", func() {
+			entries := []clusterfile.Entry{{Name: "c1", Server: "https://api.c1.example"}}
+			request := config.Request{Provider: config.ProviderBoth}
+			runner := &deferringRunner{
+				remaining: map[string]int{"c1/github": 1},
+				fail:      map[string]error{"c1/gitlab": errors.New("gitlab build failed")},
+			}
+			console := &Console{Out: io.Discard}
+			aggregate := &aggregateRun{Directory: GinkgoT().TempDir()}
+
+			runs := scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
+
+			Expect(runner.requests).Should(HaveLen(3))
+			Expect(runs[0].Results).Should(HaveLen(2))
+			byProvider := map[string]ProviderResult{}
+			for _, result := range runs[0].Results {
+				byProvider[result.Provider] = result
+			}
+			Expect(byProvider["github"].Err).ShouldNot(HaveOccurred())
+			Expect(byProvider["gitlab"].Err).Should(MatchError("gitlab build failed"))
+			Expect(aggregateError(runs)).Should(MatchError(ContainSubstring("gitlab build failed")))
+			rows := reportRows(aggregate.Directory, aggregate.runLogName(), runs, []string{"github", "gitlab"})
+			Expect(rows).Should(HaveLen(2))
+			for _, row := range rows {
+				if row.Provider == "gitlab" {
+					Expect(row.Passed).Should(BeFalse())
+				}
+			}
+		})
+	})
+
+	When("one provider defers while its sibling passes", func() {
+		It("should retry only the deferred provider and preserve the sibling pass", func() {
+			entries := []clusterfile.Entry{{Name: "c1", Server: "https://api.c1.example"}}
+			request := config.Request{Provider: config.ProviderBoth}
+			runner := &deferringRunner{remaining: map[string]int{"c1/github": 1}}
+			console := &Console{Out: io.Discard}
+			aggregate := &aggregateRun{Directory: GinkgoT().TempDir()}
+
+			runs := scheduleClusters(context.Background(), request, entries, nil, aggregate, runner, console)
+
+			Expect(runner.requests).Should(HaveLen(3))
+			Expect(runs[0].FirstAttempt).Should(HaveLen(2))
+			Expect(runs[0].Results).Should(HaveLen(2))
+			runIDs := map[string][]string{}
+			for _, request := range runner.requests {
+				runIDs[request.Provider] = append(runIDs[request.Provider], request.RunID)
+			}
+			Expect(runIDs["github"]).Should(HaveLen(2))
+			Expect(runIDs["github"][0]).ShouldNot(Equal(runIDs["github"][1]))
+			Expect(runIDs["gitlab"]).Should(HaveLen(1))
+			Expect(runner.requests[2].Provider).Should(Equal("github"))
+			Expect(runner.requests[2].MultiProvider).Should(BeTrue())
+
+			rows := reportRows(aggregate.Directory, aggregate.runLogName(), runs, []string{"github", "gitlab"})
+			Expect(rows).Should(HaveLen(2))
+			byProvider := map[string]report.Row{}
+			for _, row := range rows {
+				byProvider[row.Provider] = row
+			}
+			Expect(byProvider).Should(HaveLen(2))
+			Expect(byProvider["github"].Passed).Should(BeTrue())
+			Expect(byProvider["github"].Note).Should(ContainSubstring("first attempt deferred: admission pending"))
+			Expect(byProvider["gitlab"].Passed).Should(BeTrue())
+			Expect(byProvider["gitlab"].Note).Should(BeEmpty())
+		})
+	})
 })
 
 var _ = Describe("resultSummary", func() {
@@ -345,6 +541,8 @@ var _ = Describe("resultSummary", func() {
 		},
 		Entry("no results", nil, "0 passed, 0 failed"),
 		Entry("one passed and one failed", []ProviderResult{{Err: nil}, {Err: errors.New("boom")}}, "1 passed, 1 failed"),
+		Entry("a deferred provider", []ProviderResult{{Err: nil}, {Deferred: true, DeferredReason: "admission pending"}}, "1 passed, 1 deferred"),
+		Entry("a failed and a deferred provider", []ProviderResult{{Err: errors.New("boom")}, {Deferred: true, DeferredReason: "admission pending"}}, "0 passed, 1 failed, 1 deferred"),
 	)
 })
 
@@ -390,6 +588,83 @@ var _ = Describe("reportRows", func() {
 			for _, link := range row.Links {
 				Expect(link.Label).ShouldNot(Equal("collection-report.json"))
 			}
+		})
+	})
+
+	When("a first attempt deferred", func() {
+		It("should note the deferral and keep both attempts' links", func() {
+			aggregateDirectory := GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(aggregateDirectory, testAggregateLog), []byte("aggregate\n"), 0o640)).Should(Succeed())
+			firstDirectory := filepath.Join(aggregateDirectory, "c1", "artifacts-github-first")
+			finalDirectory := filepath.Join(aggregateDirectory, "c1", "artifacts-github-final")
+			for _, directory := range []string{firstDirectory, finalDirectory} {
+				Expect(os.MkdirAll(directory, 0o750)).Should(Succeed())
+				Expect(os.WriteFile(filepath.Join(directory, "run.log"), []byte("provider\n"), 0o640)).Should(Succeed())
+			}
+			runs := []clusterRun{{
+				Entry:        clusterfile.Entry{Name: "c1"},
+				FirstAttempt: []ProviderResult{{Provider: "github", Stage: model.PhaseTriggered, Deferred: true, DeferredReason: "admission pending", ArtifactDirectory: "artifacts-github-first"}},
+				Results:      []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, ArtifactDirectory: "artifacts-github-final"}},
+			}}
+
+			rows := reportRows(aggregateDirectory, testAggregateLog, runs, []string{"github"})
+			Expect(rows).Should(HaveLen(1))
+			Expect(rows[0].Passed).Should(BeTrue())
+			Expect(rows[0].Note).Should(Equal("first attempt deferred: admission pending"))
+			Expect(rows[0].Links).Should(ContainElement(report.Link{Label: "run directory", Target: "./c1/artifacts-github-final/"}))
+			Expect(rows[0].Links).Should(ContainElement(report.Link{Label: "first attempt run directory", Target: "./c1/artifacts-github-first/"}))
+			Expect(rows[0].Links).Should(ContainElement(report.Link{Label: "first attempt run.log", Target: "./c1/artifacts-github-first/run.log"}))
+		})
+	})
+
+	When("a cluster narrowed its architecture selection", func() {
+		It("should report the tested subset", func() {
+			aggregateDirectory := GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(aggregateDirectory, testAggregateLog), []byte("aggregate\n"), 0o640)).Should(Succeed())
+			runs := []clusterRun{{
+				Entry:              clusterfile.Entry{Name: "c1"},
+				RequestedPlatforms: []string{"linux/amd64", "linux/s390x"},
+				Results:            []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Platforms: []string{"linux/amd64"}}},
+			}}
+
+			rows := reportRows(aggregateDirectory, testAggregateLog, runs, []string{"github"})
+			Expect(rows).Should(HaveLen(1))
+			Expect(rows[0].Note).Should(Equal("tested: linux/amd64"))
+		})
+
+		It("should not note a default full selection", func() {
+			aggregateDirectory := GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(aggregateDirectory, testAggregateLog), []byte("aggregate\n"), 0o640)).Should(Succeed())
+			runs := []clusterRun{{
+				Entry:   clusterfile.Entry{Name: "c1"},
+				Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Platforms: platform.All()}},
+			}}
+
+			rows := reportRows(aggregateDirectory, testAggregateLog, runs, []string{"github"})
+			Expect(rows).Should(HaveLen(1))
+			Expect(rows[0].Note).Should(BeEmpty())
+		})
+	})
+
+	When("the first attempt recorded an error", func() {
+		It("should aggregate only the final attempt", func() {
+			runs := []clusterRun{{
+				Entry:        clusterfile.Entry{Name: "c1"},
+				FirstAttempt: []ProviderResult{{Provider: "github", Err: errors.New("first attempt failed")}},
+				Results:      []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted}},
+			}}
+			Expect(aggregateError(runs)).Should(BeNil())
+		})
+
+		It("should report a final attempt failure", func() {
+			runs := []clusterRun{{
+				Entry:        clusterfile.Entry{Name: "c1"},
+				FirstAttempt: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted}},
+				Results:      []ProviderResult{{Provider: "github", Stage: model.PhaseBuildsVerified, Err: errors.New("final attempt failed")}},
+			}}
+			err := aggregateError(runs)
+			Expect(err).Should(MatchError(ContainSubstring("final attempt failed")))
+			Expect(err).ShouldNot(MatchError(ContainSubstring("first attempt failed")))
 		})
 	})
 
@@ -469,12 +744,12 @@ var _ = Describe("finishAggregateRun", func() {
 				Expect(info.Mode().Perm()).Should(Equal(os.FileMode(0o640)))
 			}
 			output := console.Out.(*bytes.Buffer).String()
-			Expect(output).Should(ContainSubstring("c1 github: passed (completed); architectures: linux/arm64"))
+			Expect(output).Should(ContainSubstring("c1 github: passed (completed); requested architectures: linux/arm64"))
 			Expect(output).Should(ContainSubstring("report: " + markdownPath))
 			Expect(output).Should(ContainSubstring("report: " + htmlPath))
 			markdown, readErr := os.ReadFile(markdownPath)
 			Expect(readErr).ShouldNot(HaveOccurred())
-			Expect(string(markdown)).Should(ContainSubstring("- Architectures: linux/arm64"))
+			Expect(string(markdown)).Should(ContainSubstring("- Requested architectures: linux/arm64"))
 		})
 	})
 
@@ -1116,7 +1391,7 @@ var _ = Describe("RunClusters credential authentication", func() {
 			Expect(err).Should(MatchError(ContainSubstring("temporary credentials are still present")))
 			Expect(runner.requests).Should(HaveLen(1))
 			markdown := readFile(latestReportPath(request.StateDir, "md"))
-			Expect(markdown).Should(ContainSubstring("| credentials | auth | failed | cleanup | temporary credentials are still present |"))
+			Expect(markdown).Should(ContainSubstring("| credentials | auth | failed | cleanup |  | temporary credentials are still present |"))
 			Expect(markdown).Should(ContainSubstring("- Result: **failed**"))
 		})
 	})

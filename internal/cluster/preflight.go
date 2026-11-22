@@ -23,17 +23,55 @@ type PreflightSpec struct {
 
 // PreflightResult records every access and scheduling check that ran, including
 // failed ones. Scheduling stays empty when no platforms were requested.
+// Platforms classifies each requested platform; an undeclared platform is
+// reported here without failing preflight, while a declared but unusable
+// platform still fails it.
 type PreflightResult struct {
-	Checks     []CheckResult `json:"checks"`
-	Scheduling []CheckResult `json:"scheduling"`
+	Checks     []CheckResult     `json:"checks"`
+	Scheduling []CheckResult     `json:"scheduling"`
+	Platforms  []PlatformSupport `json:"platforms,omitempty"`
+}
+
+// Supported returns the requested platforms the cluster can schedule, in
+// request order.
+func (r PreflightResult) Supported() []string {
+	return r.platformsMatching(true)
+}
+
+// Unsupported returns the requested platforms the cluster does not declare, in
+// request order. A declared but unusable platform is not listed here because it
+// fails preflight instead.
+func (r PreflightResult) Unsupported() []string {
+	return r.platformsMatching(false)
+}
+
+// platformsMatching filters the classified platforms by support. The
+// unsupported list contains only platforms host-config does not declare;
+// declared-but-unusable platforms fail preflight and are listed in neither.
+func (r PreflightResult) platformsMatching(supported bool) []string {
+	result := make([]string, 0, len(r.Platforms))
+	for _, platform := range r.Platforms {
+		if supported && platform.Supported {
+			result = append(result, platform.Platform)
+			continue
+		}
+		if !supported && !platform.Configured {
+			result = append(result, platform.Platform)
+		}
+	}
+	return result
 }
 
 // RunPreflight validates cluster identity, API access, and requested scheduling
 // readiness. It requires cluster and a non-empty expected server, compares the
 // cluster server ignoring trailing slashes, and fails on the first failed access
-// or scheduling check. On failure it returns the checks collected so far
-// alongside the error; scheduling checks run only when
-// spec.Scheduling.Platforms is non-empty.
+// or scheduling check. An architecture the cluster's host-config does not
+// declare is reported in Platforms without failing preflight, so the caller can
+// narrow the selection; a declared platform that cannot be scheduled still
+// fails. When every requested platform is undeclared, preflight fails because
+// the cluster cannot run the selection at all. On failure RunPreflight returns
+// the checks collected so far alongside the error; scheduling checks run only
+// when spec.Scheduling.Platforms is non-empty.
 func RunPreflight(ctx context.Context, cluster Cluster, spec PreflightSpec) (PreflightResult, error) {
 	if cluster == nil {
 		return PreflightResult{}, fmt.Errorf("cluster is required")
@@ -56,11 +94,21 @@ func RunPreflight(ctx context.Context, cluster Cluster, spec PreflightSpec) (Pre
 		}
 	}
 	if len(spec.Scheduling.Platforms) > 0 {
-		result.Scheduling = cluster.CheckScheduling(ctx, spec.Scheduling)
+		scheduling := cluster.CheckScheduling(ctx, spec.Scheduling)
+		result.Scheduling = scheduling.Checks
+		result.Platforms = scheduling.Platforms
 		for _, check := range result.Scheduling {
 			if !check.Passed {
 				return result, fmt.Errorf("scheduling check %q failed: %s", check.Name, check.Details)
 			}
+		}
+		for _, support := range result.Platforms {
+			if support.Configured && !support.Supported {
+				return result, fmt.Errorf("scheduling check %q failed: %s", support.Platform, support.Details)
+			}
+		}
+		if len(result.Supported()) == 0 {
+			return result, fmt.Errorf("cluster does not support any requested platform %s; configure one in host-config or select another architecture", strings.Join(spec.Scheduling.Platforms, ", "))
 		}
 	}
 	return result, nil

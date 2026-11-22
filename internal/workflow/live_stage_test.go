@@ -67,6 +67,7 @@ type fakePreflightCluster struct {
 	server       string
 	accessChecks *[]cluster.AccessCheck
 	scheduling   *cluster.SchedulingSpec
+	platforms    []cluster.PlatformSupport
 }
 
 // Server returns the configured API server.
@@ -81,11 +82,18 @@ func (f fakePreflightCluster) CheckAccess(_ context.Context, checks []cluster.Ac
 }
 
 // CheckScheduling records the requested platforms and passes every check.
-func (f fakePreflightCluster) CheckScheduling(_ context.Context, spec cluster.SchedulingSpec) []cluster.CheckResult {
+func (f fakePreflightCluster) CheckScheduling(_ context.Context, spec cluster.SchedulingSpec) cluster.SchedulingResult {
 	if f.scheduling != nil {
 		*f.scheduling = spec
 	}
-	return nil
+	if f.platforms != nil {
+		return cluster.SchedulingResult{Platforms: f.platforms}
+	}
+	support := make([]cluster.PlatformSupport, 0, len(spec.Platforms))
+	for _, name := range spec.Platforms {
+		support = append(support, cluster.PlatformSupport{Platform: name, Supported: true, Configured: true})
+	}
+	return cluster.SchedulingResult{Platforms: support}
 }
 
 // contextCheckingLister fails when the namespace listing context is already done.
@@ -430,6 +438,35 @@ var _ = Describe("LiveStage", func() {
 
 			Expect(stage.Preflight(context.Background(), &model.RunManifest{RunID: "run-1"})).Should(Succeed())
 			Expect(scheduling.Platforms).Should(Equal([]string{platform.LinuxS390X, platform.LinuxPPC64LE}))
+		})
+
+		It("narrows an undeclared platform with an informational notice", func() {
+			var scheduling cluster.SchedulingSpec
+			log := &bytes.Buffer{}
+			stage := &LiveStage{
+				Request: config.Request{
+					ClusterServer:   "https://api.example",
+					ClusterName:     "osp-p01",
+					TenantNamespace: "tenant",
+					Platforms:       []string{platform.LinuxAMD64, platform.LinuxS390X},
+				},
+				PreflightCluster: fakePreflightCluster{
+					server:     "https://api.example",
+					scheduling: &scheduling,
+					platforms: []cluster.PlatformSupport{
+						{Platform: platform.LinuxAMD64, Configured: true, Supported: true},
+						{Platform: platform.LinuxS390X, Details: "platform is not configured in host-config"},
+					},
+				},
+				Namespace: cleanup.NamespaceService{Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), NameLister: testNameLister{}},
+				Log:       log,
+			}
+
+			Expect(stage.Preflight(context.Background(), &model.RunManifest{RunID: "run-1"})).Should(Succeed())
+			Expect(scheduling.Platforms).Should(Equal([]string{platform.LinuxAMD64, platform.LinuxS390X}))
+			Expect(stage.Request.Platforms).Should(Equal([]string{platform.LinuxAMD64}))
+			Expect(log.String()).Should(ContainSubstring("cluster osp-p01 does not declare " + platform.LinuxS390X))
+			Expect(log.String()).ShouldNot(ContainSubstring("warning:"))
 		})
 	})
 
@@ -1022,20 +1059,86 @@ var _ = Describe("LiveStage", func() {
 		Expect(err).Should(MatchError(ContainSubstring("ambiguous")))
 	})
 
-	It("waits for the PipelineRun before accepting successful Buildah TaskRuns", func() {
+	It("accepts successful Buildah TaskRuns while the PipelineRun is still running", func() {
 		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
 		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "Unknown")
 		build := buildTaskRunForWorkflow("build-task", "uid-build", "True", "buildah-oci-ta")
-		_, pending, err := matchBuildTaskRuns([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{build}, []model.TriggerCommit{commit}, nil)
+		identities, pending, err := matchBuildTaskRuns([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{build}, []model.TriggerCommit{commit}, nil)
 		Expect(err).ShouldNot(HaveOccurred())
-		Expect(pending).Should(BeTrue())
+		Expect(pending).Should(BeFalse())
+		Expect(identities).Should(HaveLen(1))
+		Expect(identities[0].Name).Should(Equal("run-build"))
 	})
 
-	It("fails a failed PipelineRun even when its Buildah TaskRuns succeeded", func() {
+	It("waits for every distinct matrix platform before accepting a component", func() {
+		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
+		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "Unknown")
+		amd64 := buildTaskRunForWorkflow("build-task-amd64", "uid-build", "True", "buildah-oci-ta")
+		duplicateAMD64 := buildTaskRunForWorkflow("build-task-amd64-2", "uid-build", "True", "buildah-oci-ta")
+		arm64 := buildTaskRunForWorkflowOnPlatform("build-task-arm64", "uid-build", "True", "buildah-oci-ta", platform.LinuxARM64)
+		expected := []string{platform.LinuxAMD64, platform.LinuxARM64}
+
+		identities, pending, err := matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64}, []model.TriggerCommit{commit}, expected, nil)
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeTrue())
+		Expect(identities).Should(BeEmpty())
+
+		identities, pending, err = matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64, duplicateAMD64}, []model.TriggerCommit{commit}, expected, nil)
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeTrue())
+		Expect(identities).Should(BeEmpty())
+
+		identities, pending, err = matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64, arm64}, []model.TriggerCommit{commit}, expected, nil)
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeFalse())
+		Expect(identities).Should(HaveLen(1))
+	})
+
+	It("waits for a running Buildah TaskRun to publish its platform", func() {
+		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
+		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "Unknown")
+		running := buildTaskRunForWorkflow("build-task", "uid-build", "Unknown", "buildah-oci-ta")
+		unstructured.RemoveNestedField(running.Object, "status", "results")
+		succeeded := buildTaskRunForWorkflowOnPlatform("build-task", "uid-build", "True", "buildah-oci-ta", platform.LinuxAMD64)
+		expected := []string{platform.LinuxAMD64}
+
+		identities, pending, err := matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{running}, []model.TriggerCommit{commit}, expected, nil)
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeTrue())
+		Expect(identities).Should(BeEmpty())
+
+		identities, pending, err = matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{succeeded}, []model.TriggerCommit{commit}, expected, nil)
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeFalse())
+		Expect(identities).Should(HaveLen(1))
+	})
+
+	It("rejects a succeeded PipelineRun that is missing a matrix platform", func() {
+		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
+		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "True")
+		amd64 := buildTaskRunForWorkflow("build-task-amd64", "uid-build", "True", "buildah-oci-ta")
+
+		_, _, err := matchBuildTaskRunsWithExpected([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{amd64}, []model.TriggerCommit{commit}, []string{platform.LinuxAMD64, platform.LinuxARM64}, nil)
+		Expect(err).Should(MatchError(ContainSubstring("missing Buildah TaskRuns for " + platform.LinuxARM64)))
+	})
+
+	It("accepts a post-build PipelineRun failure when its Buildah TaskRuns succeeded", func() {
 		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
 		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "False")
 		build := buildTaskRunForWorkflow("build-task", "uid-build", "True", "buildah-oci-ta")
-		_, pending, err := matchBuildTaskRuns([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{build}, []model.TriggerCommit{commit}, nil)
+		identities, pending, err := matchBuildTaskRuns([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{build}, []model.TriggerCommit{commit}, nil)
+		Expect(err).ShouldNot(HaveOccurred())
+		Expect(pending).Should(BeFalse())
+		Expect(identities).Should(HaveLen(1))
+		Expect(identities[0].Succeeded).Should(BeTrue())
+	})
+
+	It("fails a failed PipelineRun when only some Buildah TaskRuns succeeded", func() {
+		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "observed-sha", CreatedAt: time.Now().UTC()}
+		pipeline := pipelineRun("run-build", "mathwizz-web-server", "observed-sha", "uid-build", "False")
+		build := buildTaskRunForWorkflow("build-task", "uid-build", "True", "buildah-oci-ta")
+		unfinished := buildTaskRunForWorkflow("build-task-2", "uid-build", "Unknown", "buildah-oci-ta")
+		_, pending, err := matchBuildTaskRuns([]unstructured.Unstructured{pipeline}, []unstructured.Unstructured{build, unfinished}, []model.TriggerCommit{commit}, nil)
 		var failure *PipelineRunFailedError
 		Expect(errors.As(err, &failure)).Should(BeTrue())
 		Expect(pending).Should(BeFalse())
@@ -1093,6 +1196,88 @@ var _ = Describe("LiveStage", func() {
 		Expect(manifest.FailedBuildLogs[0].LogPath).Should(Equal(filepath.Join("failed-builds", "build-task_step-build.log")))
 		_, err = os.Stat(filepath.Join(stateDir, manifest.ArtifactDirectory, manifest.FailedBuildLogs[0].LogPath))
 		Expect(err).ShouldNot(HaveOccurred())
+	})
+
+	It("accepts successful Buildah TaskRuns while the PipelineRun is still running", func() {
+		pipeline := pipelineRun("run-1", "mathwizz-web-server", "sha-1", "uid-1", "Unknown")
+		build := buildTaskRunForWorkflow("build-task", "uid-1", "True", "buildah-oci-ta")
+		dynamic := namespaceDynamicClient(&pipeline, &build)
+		stage := &LiveStage{
+			Request: config.Request{
+				StateDir:  GinkgoT().TempDir(),
+				Platforms: []string{platform.LinuxAMD64},
+				Timeouts:  config.Timeouts{Trigger: time.Second, Build: time.Second},
+			},
+			Clients: &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+		}
+		manifest := &model.RunManifest{
+			ArtifactDirectory: "run-1",
+			Fixture:           model.FixtureIdentity{TenantNamespace: "mathwizz-test"},
+			TriggerCommits:    []model.TriggerCommit{{Component: "mathwizz-web-server", SHA: "sha-1"}},
+		}
+
+		Expect(stage.VerifyBuilds(context.Background(), manifest)).Should(Succeed())
+		Expect(manifest.PipelineRuns).Should(HaveLen(1))
+		Expect(manifest.BuildOutputs).Should(HaveLen(1))
+	})
+
+	It("accepts a post-build PipelineRun failure when Buildah succeeded", func() {
+		pipeline := pipelineRun("run-1", "mathwizz-web-server", "sha-1", "uid-1", "False")
+		build := buildTaskRunForWorkflow("build-task", "uid-1", "True", "buildah-oci-ta")
+		dynamic := namespaceDynamicClient(&pipeline, &build)
+		stage := &LiveStage{
+			Request: config.Request{
+				StateDir:  GinkgoT().TempDir(),
+				Platforms: []string{platform.LinuxAMD64},
+				Timeouts:  config.Timeouts{Trigger: time.Second, Build: time.Second},
+			},
+			Clients: &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+		}
+		manifest := &model.RunManifest{
+			ArtifactDirectory: "run-1",
+			Fixture:           model.FixtureIdentity{TenantNamespace: "mathwizz-test"},
+			TriggerCommits:    []model.TriggerCommit{{Component: "mathwizz-web-server", SHA: "sha-1"}},
+		}
+
+		Expect(stage.VerifyBuilds(context.Background(), manifest)).Should(Succeed())
+		Expect(manifest.PipelineRuns).Should(HaveLen(1))
+		Expect(manifest.BuildOutputs).Should(HaveLen(1))
+		Expect(manifest.FailedBuildLogs).Should(BeEmpty())
+	})
+
+	It("keeps completed component identities in a deferred manifest", func() {
+		previousThreshold := admissionPendingThreshold
+		admissionPendingThreshold = time.Millisecond
+		DeferCleanup(func() { admissionPendingThreshold = previousThreshold })
+		previousPoll := buildPollInterval
+		buildPollInterval = time.Millisecond
+		DeferCleanup(func() { buildPollInterval = previousPoll })
+
+		doneCommit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "sha-web"}
+		pendingCommit := model.TriggerCommit{Component: "mathwizz-history-worker", SHA: "sha-worker"}
+		doneRun := pipelineRun("run-web", "mathwizz-web-server", "sha-web", "uid-web", "Unknown")
+		doneTask := buildTaskRunForWorkflow("task-web", "uid-web", "True", "buildah-oci-ta")
+		pendingRun := pendingPipelineRun("run-worker", "mathwizz-history-worker", "sha-worker", "uid-worker", time.Now().Add(-time.Hour), pipelineRunPendingStatus, pipelineRunPendingStatus, "")
+		stage := &LiveStage{
+			Request: config.Request{
+				Platforms: []string{platform.LinuxAMD64},
+				Timeouts:  config.Timeouts{Trigger: time.Second, Build: time.Second},
+			},
+			Clients: &cluster.ClientSet{Dynamic: namespaceDynamicClient(&doneRun, &doneTask, &pendingRun), Kubernetes: kubernetesfake.NewSimpleClientset()},
+		}
+		manifest := &model.RunManifest{
+			Fixture:        model.FixtureIdentity{TenantNamespace: "mathwizz-test"},
+			TriggerCommits: []model.TriggerCommit{doneCommit, pendingCommit},
+		}
+
+		err := stage.VerifyBuilds(context.Background(), manifest)
+
+		var admission *AdmissionPendingError
+		Expect(errors.As(err, &admission)).Should(BeTrue())
+		Expect(manifest.BuildOutputs).Should(HaveLen(1))
+		Expect(manifest.BuildOutputs[0].Component).Should(Equal("mathwizz-web-server"))
+		Expect(manifest.PipelineRuns).Should(HaveLen(1))
+		Expect(manifest.PipelineRuns[0].Name).Should(Equal("run-web"))
 	})
 
 	It("rejects PipelineRun overshoot for an exact trigger SHA", func() {
@@ -1243,6 +1428,31 @@ var _ = Describe("LiveStage", func() {
 				Expect(missing.Component).Should(Equal("mathwizz-web-server"))
 				Expect(missing.Secret).Should(Equal("git-auth-secret"))
 				Expect(missing.Pending).Should(BeNumerically(">", cluster.PacAuthSecretGracePeriod))
+			})
+
+			It("should defer an admission-pending build before failing its missing Secret", func() {
+				previousThreshold := admissionPendingThreshold
+				admissionPendingThreshold = time.Millisecond
+				DeferCleanup(func() { admissionPendingThreshold = previousThreshold })
+				previousPoll := buildPollInterval
+				buildPollInterval = time.Millisecond
+				DeferCleanup(func() { buildPollInterval = previousPoll })
+
+				pipeline := pendingPipelineRun("run-pending", "mathwizz-web-server", "sha-1", "uid-pending", time.Now().Add(-time.Hour), pipelineRunPendingStatus, pipelineRunPendingStatus, "")
+				pipeline.SetAnnotations(map[string]string{cluster.PacGitAuthSecretAnnotation: "git-auth-secret"})
+				stage := &LiveStage{
+					Request: config.Request{Platforms: []string{platform.LinuxAMD64}, Timeouts: config.Timeouts{Trigger: time.Second, Build: time.Second}},
+					Clients: &cluster.ClientSet{Dynamic: namespaceDynamicClient(&pipeline), Kubernetes: kubernetesfake.NewSimpleClientset()},
+					Out:     &bytes.Buffer{},
+				}
+				manifest := &model.RunManifest{Fixture: model.FixtureIdentity{TenantNamespace: "mathwizz-test"}, TriggerCommits: []model.TriggerCommit{{Component: "mathwizz-web-server", SHA: "sha-1"}}}
+
+				err := stage.VerifyBuilds(context.Background(), manifest)
+
+				var admission *AdmissionPendingError
+				Expect(errors.As(err, &admission)).Should(BeTrue())
+				var missing *cluster.MissingPacAuthSecretError
+				Expect(errors.As(err, &missing)).Should(BeFalse())
 			})
 
 			It("should report a matched failed PipelineRun before a missing Secret", func() {
@@ -1440,10 +1650,9 @@ var _ = Describe("build evidence capture", func() {
 		Expect(identities[1].Name).Should(Equal("run-b"))
 	})
 
-	It("captures only after the PipelineRun succeeds", func() {
+	It("captures evidence on the first poll that observes Buildah success", func() {
 		commit := model.TriggerCommit{Component: "component-a", SHA: "sha-a"}
-		pending := pipelineRun("run-a", "component-a", "sha-a", "uid-a", "Unknown")
-		succeeded := pipelineRun("run-a", "component-a", "sha-a", "uid-a", "True")
+		running := pipelineRun("run-a", "component-a", "sha-a", "uid-a", "Unknown")
 		build := buildTaskRunForWorkflow("task-a", "uid-a", "True", "buildah-oci-ta")
 
 		var polls, captureCalls, capturedAt atomic.Int32
@@ -1456,15 +1665,12 @@ var _ = Describe("build evidence capture", func() {
 		}
 		_, err := waitForBuildTaskRuns(context.Background(), time.Second, time.Second, time.Millisecond, "mathwizz-test", []model.TriggerCommit{commit}, func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error) {
 			polls.Add(1)
-			if polls.Load() == 1 {
-				return []unstructured.Unstructured{pending}, []unstructured.Unstructured{build}, nil
-			}
-			return []unstructured.Unstructured{succeeded}, []unstructured.Unstructured{build}, nil
+			return []unstructured.Unstructured{running}, []unstructured.Unstructured{build}, nil
 		}, nil, nil, evidence)
 
 		Expect(err).ShouldNot(HaveOccurred())
 		Expect(captureCalls.Load()).Should(Equal(int32(1)))
-		Expect(capturedAt.Load()).Should(Equal(int32(2)))
+		Expect(capturedAt.Load()).Should(Equal(int32(1)))
 	})
 
 	It("replaces stale evidence and drops duplicates", func() {
@@ -1703,6 +1909,25 @@ func buildTaskRunForWorkflow(name, ownerUID, status, task string) unstructured.U
 	}}
 }
 
+// buildTaskRunForWorkflowOnPlatform creates a Buildah TaskRun whose PLATFORM
+// result names the requested platform.
+func buildTaskRunForWorkflowOnPlatform(name, ownerUID, status, task, taskPlatform string) unstructured.Unstructured {
+	taskRun := buildTaskRunForWorkflow(name, ownerUID, status, task)
+	results, found, err := unstructured.NestedSlice(taskRun.Object, "status", "results")
+	if err != nil || !found {
+		return taskRun
+	}
+	for index := range results {
+		result, ok := results[index].(map[string]any)
+		if !ok || result["name"] != "PLATFORM" {
+			continue
+		}
+		result["value"] = taskPlatform
+	}
+	_ = unstructured.SetNestedSlice(taskRun.Object, results, "status", "results")
+	return taskRun
+}
+
 // componentWithPaCStatus creates a component fixture with the requested PaC state.
 func componentWithPaCStatus(name, state string) unstructured.Unstructured {
 	return unstructured.Unstructured{Object: map[string]any{
@@ -1740,6 +1965,7 @@ func namespaceDynamicClient(objects ...runtime.Object) *dynamicfake.FakeDynamicC
 		{Group: "appstudio.redhat.com", Version: "v1alpha1", Resource: "releases"}:          "ReleaseList",
 		{Group: "tekton.dev", Version: "v1", Resource: "pipelineruns"}:                      "PipelineRunList",
 		{Group: "tekton.dev", Version: "v1", Resource: "taskruns"}:                          "TaskRunList",
+		cluster.KueueWorkloadGVR: "WorkloadList",
 	}, objects...)
 }
 

@@ -15,12 +15,12 @@ func RenderMarkdown(document Document) string {
 	fmt.Fprintf(builder, "- Started: %s\n", document.StartedAtText())
 	fmt.Fprintf(builder, "- Ended: %s\n", document.EndedAtText())
 	fmt.Fprintf(builder, "- Clusters file: `%s`\n", document.ClustersFile)
-	fmt.Fprintf(builder, "- Architectures: %s\n", document.ArchitecturesText())
+	fmt.Fprintf(builder, "- Requested architectures: %s\n", document.ArchitecturesText())
 	fmt.Fprintf(builder, "- Result: **%s**\n\n", document.Result())
-	builder.WriteString("| Cluster | Provider | Result | Stage | Error | Artifacts |\n")
-	builder.WriteString("| --- | --- | --- | --- | --- | --- |\n")
+	builder.WriteString("| Cluster | Provider | Result | Stage | Note | Error | Artifacts |\n")
+	builder.WriteString("| --- | --- | --- | --- | --- | --- | --- |\n")
 	for _, row := range document.Rows {
-		fmt.Fprintf(builder, "| %s | %s | %s | %s | %s | %s |\n", cell(row.Cluster), cell(row.Provider), row.Result(), cell(row.Stage), cell(row.Error), markdownLinks(row.Links))
+		fmt.Fprintf(builder, "| %s | %s | %s | %s | %s | %s | %s |\n", cell(row.Cluster), cell(row.Provider), row.Result(), cell(row.Stage), cell(row.Note), cell(row.Error), markdownLinks(row.Links))
 	}
 	return builder.String()
 }

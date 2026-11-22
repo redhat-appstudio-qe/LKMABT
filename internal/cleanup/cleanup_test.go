@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -399,6 +400,71 @@ var _ = Describe("WaitDeleted finalizer re-strip", func() {
 		got, err := client.Resource(finalizerGVRs[4]).Namespace("tenant").Get(context.Background(), "run-1", metav1.GetOptions{})
 		Expect(err).ShouldNot(HaveOccurred())
 		Expect(got.GetFinalizers()).Should(BeEmpty())
+	})
+})
+
+var _ = Describe("NamespaceService.DeleteVerified", func() {
+	When("the namespace is unchanged", func() {
+		It("should send delete preconditions before any finalizer stripping", func() {
+			object := namespace("tenant-del", "run-1", false)
+			object.SetUID("uid-1")
+			object.SetResourceVersion("7")
+			client := cleanupClient(object)
+			client.PrependReactor("list", "applications", func(testing.Action) (bool, runtime.Object, error) {
+				return true, nil, errors.New("finalizer stripping must not run before delete")
+			})
+			service := NamespaceService{Dynamic: client}
+			snapshot, err := service.Inspect(context.Background(), "tenant-del")
+			Expect(err).ShouldNot(HaveOccurred())
+
+			uid, err := service.DeleteVerified(context.Background(), snapshot)
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(string(uid)).Should(Equal("uid-1"))
+
+			var deleted testing.DeleteAction
+			for _, action := range client.Actions() {
+				if listAction, ok := action.(testing.ListAction); ok && listAction.GetResource().Resource == "applications" {
+					Fail("finalizer stripping ran before the namespace delete")
+				}
+				if deleteAction, ok := action.(testing.DeleteAction); ok && deleteAction.GetResource().Resource == "namespaces" {
+					deleted = deleteAction
+				}
+			}
+			Expect(deleted).ShouldNot(BeNil())
+			Expect(deleted.GetDeleteOptions().Preconditions).ShouldNot(BeNil())
+			Expect(string(*deleted.GetDeleteOptions().Preconditions.UID)).Should(Equal("uid-1"))
+			Expect(*deleted.GetDeleteOptions().Preconditions.ResourceVersion).Should(Equal("7"))
+		})
+	})
+
+	When("the namespace is replaced after inspection", func() {
+		It("should refuse without stripping or deleting", func() {
+			original := namespace("tenant-replaced", "run-1", false)
+			original.SetUID("uid-1")
+			original.SetResourceVersion("7")
+			replacement := namespace("tenant-replaced", "run-2", false)
+			replacement.SetUID("uid-2")
+			replacement.SetResourceVersion("8")
+			client := cleanupClient(original)
+			var gets atomic.Int32
+			client.PrependReactor("get", "namespaces", func(testing.Action) (bool, runtime.Object, error) {
+				if gets.Add(1) == 1 {
+					return false, nil, nil
+				}
+				return true, replacement, nil
+			})
+			service := NamespaceService{Dynamic: client}
+			snapshot, err := service.Inspect(context.Background(), "tenant-replaced")
+			Expect(err).ShouldNot(HaveOccurred())
+
+			_, err = service.DeleteVerified(context.Background(), snapshot)
+			Expect(err).Should(MatchError(ContainSubstring("changed after verification")))
+			for _, action := range client.Actions() {
+				if deleteAction, ok := action.(testing.DeleteAction); ok && deleteAction.GetResource().Resource == "namespaces" {
+					Fail("delete sent for a replaced namespace")
+				}
+			}
+		})
 	})
 })
 

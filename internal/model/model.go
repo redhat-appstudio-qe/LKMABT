@@ -93,7 +93,9 @@ type PipelineRunIdentity struct {
 	SourceSHA   string    `json:"sourceSHA"`
 	StartedAt   time.Time `json:"startedAt"`
 	CompletedAt time.Time `json:"completedAt"`
-	Succeeded   bool      `json:"succeeded"`
+	// Succeeded reports that the PipelineRun's build stage succeeded. LKMABT
+	// does not wait for later image-index or scan tasks.
+	Succeeded bool `json:"succeeded"`
 }
 
 // TriggerCommit records the fixture-branch commit pushed to trigger one
@@ -145,6 +147,18 @@ type Failure struct {
 	Message string `json:"message"`
 }
 
+// Deferral records a non-terminal attempt that stopped because the cluster
+// could not admit its builds, not because a build failed. Phase is the phase
+// whose step returned the deferral; the manifest keeps its last completed
+// phase so the attempt can be retried as a fresh run without pretending it
+// failed.
+type Deferral struct {
+	Phase      Phase     `json:"phase"`
+	Reason     string    `json:"reason"`
+	Message    string    `json:"message"`
+	DeferredAt time.Time `json:"deferredAt"`
+}
+
 // FailureArtifactReport records which failure artifacts were collected and
 // which required artifacts could not be saved.
 type FailureArtifactReport struct {
@@ -173,5 +187,6 @@ type RunManifest struct {
 	BuildOutputs        []BuildOutputEvidence  `json:"buildOutputs,omitempty"`
 	FailedBuildLogs     []FailedBuildLog       `json:"failedBuildLogs,omitempty"`
 	Failure             *Failure               `json:"failure,omitempty"`
+	Deferred            *Deferral              `json:"deferred,omitempty"`
 	FailureArtifacts    *FailureArtifactReport `json:"failureArtifacts,omitempty"`
 }

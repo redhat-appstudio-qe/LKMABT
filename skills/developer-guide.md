@@ -45,7 +45,7 @@ platform: `linux/amd64`, `linux/arm64`, `linux/s390x`, and `linux/ppc64le`.
 
 1. Triggers builds against fixed test repositories (GitHub and GitLab)
 2. Waits for successful PipelineRuns
-3. Verifies pre-publication build outputs for every selected architecture
+3. Verifies pre-publication build outputs for every architecture each cluster runs
 4. Collects runtime evidence and artifacts
 
 The harness never creates, forks, or deletes repositories. It reuses fixed
@@ -95,7 +95,8 @@ and appends harmless comments to trigger PipelineRuns.
 
 **`internal/cluster/`** — Kubernetes interactions
 - `RealCluster` wraps k8s client-go operations
-- Preflight checks validate cluster prerequisites (multi-platform-controller deployment, host-config entries)
+- Preflight checks validate cluster prerequisites (multi-platform-controller deployment, host-config entries). `CheckScheduling` classifies each requested platform; `RunPreflight` treats an undeclared platform as informational and a declared but incomplete platform as a failure, and the workflow narrows `Request.Platforms` to the supported subset
+- `AdmissionInspector.QuotaMessage` reads the Kueue `QuotaReserved=False` condition for the Workload owned by a pending PipelineRun
 - GitHub preflight reads the cluster's app slug from `konflux-info/konflux-public-info` and confirms that app is installed for the fixture organization; interactive runs open the installation page and wait until the installation appears
 - Build output verification confirms node evidence (Buildah outputs) match expected architectures
 
@@ -153,10 +154,10 @@ definitions via import when the same GVR is needed across packages.
 
 ## Workflow Execution Flow
 
-1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries (a static `host.<name>.platform` entry must also have `address`, `user`, and `secret`), and the cluster's GitHub App installation (GitHub runs; interactive runs wait for and can extend a missing installation wait)
+1. **Preflight** — Validate cluster connectivity, multi-platform-controller deployment, host-config entries (a static `host.<name>.platform` entry must also have `address`, `user`, and `secret`), and the cluster's GitHub App installation (GitHub runs; interactive runs wait for and can extend a missing installation wait). Each requested platform is classified against the live host-config: an undeclared platform is informational and the selection is narrowed to the supported subset for this cluster; a declared but incomplete platform fails, as does a cluster that supports none of the requested platforms. The GitHub App check is independent of architecture support
 2. **Fixture Ready** — Validate test repositories are accessible, read current Dockerfile SHAs
 3. **Triggered** — Set each fixture PipelineRun's `build-platforms` parameter to the selected architectures, append trigger comments to Dockerfiles, commit changes. Configuration commits use the `lkmabt configure [skip ci]` subject so PaC creates no throwaway PipelineRun for them
-4. **Builds Verified** — Wait for PipelineRuns to succeed (timeout configurable); capture each component's build-output evidence on the poll that observes its success, while its PipelineRun and TaskRuns still exist
+4. **Builds Verified** — Wait for each component's Buildah TaskRuns to succeed (timeout configurable); capture each component's build-output evidence on the poll that observes its build success, while its PipelineRun and TaskRuns still exist. The PipelineRun's post-build tasks are not a completion gate
 5. **Build Outputs Verified** — Confirm the captured evidence provides one successful output per selected architecture, fetching only components that were not captured
 6. **Completed** — Prompt for namespace cleanup
 
@@ -179,12 +180,13 @@ reconciled by the PaC watcher, and a reconciled run with
 `secret-created=false` has not finished Secret creation. An unreconciled run
 causes one automatic component retrigger and a second build wait; a second
 unreconciled run fails with the same diagnosis. A Secret read that fails for any
-other reason warns once and keeps waiting. A matched
-PipelineRun with a `Succeeded=False` condition, or a failed Buildah TaskRun
-under a still-pending PipelineRun, fails the wait immediately instead of waiting
-for more TaskRuns. Successful Buildah TaskRuns do not finish the wait while the
-PipelineRun is still pending; the pipeline must report `Succeeded=True`, so
-image-index or later tasks cannot fail after LKMABT calls the run passed.
+other reason warns once and keeps waiting. A failed Buildah TaskRun, or a
+PipelineRun that fails before all of its Buildah TaskRuns complete, fails the
+wait immediately instead of waiting for more TaskRuns. Successful Buildah
+TaskRuns finish the component as soon as they are observed; LKMABT does not wait
+for image-index, scans, tagging, or other post-build tasks, and a PipelineRun
+that reports failure only after every Buildah TaskRun succeeded is not a build
+failure.
 
 Build-output evidence is captured on the same poll that observes a component
 succeed, from the PipelineRun and TaskRun objects already listed, so PaC
@@ -353,6 +355,18 @@ Clusters run one at a time in clusters-file order so run-scoped credentials are
 reused and only one cluster is mutated at a time. `both` still runs GitHub and
 GitLab concurrently inside a cluster.
 
+### Admission Deferral
+- `workflow.ErrDeferred` is the sentinel; `workflow.IsDeferred` uses `errors.Is`. `AdmissionPendingError` (`internal/workflow/admission.go`) unwraps to it and carries the namespace plus each pending `PipelineRun`. Detection requires `PipelineRunPending` in `spec.status` or the `Succeeded` condition reason, no `startTime`, and no child TaskRuns for longer than `admissionPendingThreshold` (10 minutes).
+- `workflow.Runner.Run` (`internal/workflow/run.go`) persists `model.Deferral` as the manifest's `deferred` field and in `status.json` (`internal/evidence/manifest.go`), instead of writing `Failure`; the manifest keeps its last completed phase.
+- `LiveRunner.Run` (`internal/cli/local.go`) calls `finalizeDeferredRun`, which deletes only the deferred attempt's owned tenant namespace without prompting and skips failure-artifact collection.
+- `scheduleClusters` (`internal/cli/multi.go`) retries a deferred cluster once after the first pass with fresh run IDs and trigger commits. `clusterRun.FirstAttempt`, `retryNote`, and `resultLinks` preserve first-attempt results and artifact links; a second deferral becomes `cluster remained admission-pending after one retry: <reason>`. Console output uses `Step.EndDeferred` and `deferredLine` (`internal/cli/status.go`).
+
+### Per-Cluster Platform Support
+- `cluster.CheckScheduling` (`internal/cluster/client.go`) returns `SchedulingResult{Checks, Platforms}`; `PlatformSupport{Platform,Supported,Configured,Details}` distinguishes an undeclared platform (`Configured=false,Supported=false`) from a declared but incomplete one (`Configured=true,Supported=false`).
+- `RunPreflight` (`internal/cluster/preflight.go`) fails for a declared-but-incomplete platform and when none of the requested platforms is supported; an undeclared platform does not fail preflight. `PreflightResult.Supported()` and `Unsupported()` expose the split.
+- `LiveStage.Preflight` (`internal/workflow/live_stage.go`) calls `limitToSupportedPlatforms`, emits an informational notice, and mutates `Request.Platforms` to the supported subset so triggering and verification use it.
+- Kueue diagnostics use `cluster.KueueWorkloadGVR` and `AdmissionInspector.QuotaMessage` (`internal/cluster/admission.go`), which reads `QuotaReserved=False.message` from the Workload owned by the PipelineRun. Missing Workloads and errors fall back to the PipelineRun condition and never fail the wait.
+
 ## Design Decisions
 
 ### Fixed Fixtures Pattern
@@ -421,8 +435,9 @@ cleanup:
 - **Required for cleanup**: namespace deletion is blocked if TaskRun YAML collection fails
 
 ### Failed Build Log Collection
-When a PipelineRun fails, container logs are collected from failed TaskRun step
-containers:
+When the build stage fails — a failed Buildah TaskRun or a PipelineRun failure
+before its Buildah TaskRuns complete — container logs are collected from failed
+TaskRun step containers:
 - Last 80 lines per container (configurable via `FailedBuildCollector.TailLines`)
 - Logs written to `failed-builds/<taskrun>_<container>.log`
 - Critical for diagnosing pod admission failures and step container errors
@@ -443,8 +458,8 @@ harness:
 - Captures evidence as each component succeeds and reuses it during `Build Outputs Verified`; a PipelineRun pruned after capture does not invalidate the result, while an observed run pruned before capture fails fast
 
 If verification fails, check that:
-1. The multi-platform-controller is running and its `host-config` declares every selected platform
-2. The PipelineRuns completed successfully (builds-verified phase passed)
+1. The multi-platform-controller is running and its `host-config` declares every platform the cluster is expected to run (an undeclared platform narrows the selection instead of failing preflight)
+2. The Buildah TaskRuns completed successfully (builds-verified phase passed); the PipelineRun's post-build tasks are not required
 3. The fixture PipelineRun `build-platforms` parameter and `build-images` matrix use the selected platforms
 
 ### Provider API Rate Limits

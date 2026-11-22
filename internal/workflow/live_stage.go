@@ -46,6 +46,14 @@ var buildPollInterval = 10 * time.Second
 type buildEvidenceCache struct {
 	Captured func(component string) (model.PipelineRunIdentity, bool)
 	Capture  func(model.PipelineRunIdentity, *unstructured.Unstructured, []unstructured.Unstructured) error
+	// ExpectedPlatforms is the set of platforms one component's matrix must
+	// cover before the component can be accepted. Empty disables the coverage
+	// check for callers that do not know the platform selection.
+	ExpectedPlatforms []string
+	// AdmissionReason resolves the scheduler reason for an admission-pending
+	// PipelineRun. It is optional and diagnostic; the PipelineRun condition is
+	// the fallback.
+	AdmissionReason func(*unstructured.Unstructured) string
 }
 
 // captured returns the evidence identity for a component when already captured.
@@ -68,6 +76,14 @@ func (c buildEvidenceCache) capture(identity model.PipelineRunIdentity, pipeline
 		return nil
 	}
 	return c.Capture(identity, pipelineRun, taskRuns)
+}
+
+// admissionReason resolves an optional scheduler reason for a pending run.
+func (c buildEvidenceCache) admissionReason(pipelineRun *unstructured.Unstructured) string {
+	if c.AdmissionReason == nil {
+		return ""
+	}
+	return c.AdmissionReason(pipelineRun)
 }
 
 // PipelineRunDisappearedError reports a PipelineRun observed earlier in a wait
@@ -158,10 +174,11 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 	if preflightCluster == nil {
 		preflightCluster = s.RealCluster
 	}
-	_, err := cluster.RunPreflight(ctx, preflightCluster, spec)
+	result, err := cluster.RunPreflight(ctx, preflightCluster, spec)
 	if err != nil {
 		return err
 	}
+	s.limitToSupportedPlatforms(result)
 	if s.Request.Provider == config.ProviderGitHub {
 		verification, err := s.verifyGitHubApp(ctx)
 		if err != nil {
@@ -189,6 +206,28 @@ func (s *LiveStage) platforms() []string {
 		return platform.All()
 	}
 	return s.Request.Platforms
+}
+
+// Platforms returns the effective selection after preflight narrowing.
+func (s *LiveStage) Platforms() []string {
+	return s.platforms()
+}
+
+// limitToSupportedPlatforms narrows this cluster's selection to the
+// architectures its live host-config can schedule. An undeclared architecture is
+// information, not a warning or failure: the run continues with the rest.
+func (s *LiveStage) limitToSupportedPlatforms(result cluster.PreflightResult) {
+	unsupported := result.Unsupported()
+	if len(unsupported) == 0 {
+		return
+	}
+	supported := result.Supported()
+	s.Request.Platforms = supported
+	label := "cluster"
+	if name := strings.TrimSpace(s.Request.ClusterName); name != "" {
+		label += " " + name
+	}
+	s.notice("%s does not declare %s in host-config; continuing with %s", label, strings.Join(unsupported, ", "), strings.Join(supported, ", "))
 }
 
 // accessChecks lists the API versions preflight must verify.
@@ -652,10 +691,12 @@ func fixtureFromManifest(identity model.FixtureIdentity) providers.FixtureReposi
 const maxPacRetriggersPerComponent = 1
 
 // VerifyBuilds waits for successful Buildah TaskRuns and records their PipelineRun identities.
-// Build evidence is captured from the same polls that prove each build succeeded. A PipelineRun
-// PaC never reconciled is retriggered once per component, restarting the wait with fresh trigger
-// and build timeouts; any other failure collects failed build logs and returns. Successful
-// identities are merged into manifest.PipelineRuns.
+// Build evidence is captured from the same polls that prove each build succeeded. LKMABT stops
+// at the build stage: a PipelineRun's image-index, scans, and other post-build tasks are not a
+// completion gate. A failed Buildah TaskRun, or a PipelineRun failure before every Buildah
+// TaskRun completes, still fails the wait and collects failed build logs. A PipelineRun PaC never
+// reconciled is retriggered once per component, restarting the wait with fresh trigger and build
+// timeouts. Successful identities are merged into manifest.PipelineRuns.
 func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifest) error {
 	namespace := manifest.Fixture.TenantNamespace
 	if namespace == "" {
@@ -669,6 +710,8 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 			identity, ok := captured[component]
 			return identity, ok
 		},
+		ExpectedPlatforms: s.platforms(),
+		AdmissionReason:   s.admissionDiagnostic(ctx, namespace),
 		Capture: func(identity model.PipelineRunIdentity, pipelineRun *unstructured.Unstructured, taskRuns []unstructured.Unstructured) error {
 			output, err := inspector.VerifyListed(identity, pipelineRun, taskRuns)
 			if err != nil {
@@ -685,6 +728,11 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 		identities, err = s.waitForBuilds(ctx, manifest, namespace, pacInspector, evidence)
 		if err == nil {
 			break
+		}
+		if IsDeferred(err) {
+			// A deferral returns before the normal identity merge. Keep the
+			// already captured successful builds in the durable manifest.
+			manifest.PipelineRuns = mergePipelineRunIdentities(manifest.PipelineRuns, buildOutputIdentities(manifest.BuildOutputs))
 		}
 		missing, retry := unreconciledPacRun(err)
 		if !retry || s.Provider == nil || retriggerCount(manifest, missing.Component) >= maxPacRetriggersPerComponent {
@@ -706,13 +754,14 @@ func (s *LiveStage) VerifyBuilds(ctx context.Context, manifest *model.RunManifes
 // waitForBuilds waits for one attempt at successful Buildah TaskRuns.
 // The check runs after each poll has matched and captured evidence, so a
 // component onboarding failure or a missing PaC git auth Secret is reported
-// only once another component's completed build is safely recorded. A matched
-// failed PipelineRun is returned by the poll itself, ahead of any Secret
-// diagnosis, so failed-build log collection still runs.
+// only once another component's completed build is safely recorded. A failed
+// Buildah TaskRun or a PipelineRun failure before its builds complete is
+// returned by the match, ahead of any Secret diagnosis, so failed-build log
+// collection still runs.
 func (s *LiveStage) waitForBuilds(ctx context.Context, manifest *model.RunManifest, namespace string, inspector cluster.PacAuthInspector, evidence buildEvidenceCache) ([]model.PipelineRunIdentity, error) {
 	inspectionWarned := false
 	var componentErr error
-	check := func(checkCtx context.Context, pipelineRuns []unstructured.Unstructured) error {
+	check := func(checkCtx context.Context, pipelineRuns, taskRuns []unstructured.Unstructured) error {
 		// Report a component onboarding failure only after completed builds are
 		// captured, so another component's evidence is never lost to it.
 		if componentErr != nil {
@@ -720,7 +769,17 @@ func (s *LiveStage) waitForBuilds(ctx context.Context, manifest *model.RunManife
 		}
 		// Inspect the PaC Secret only after completed builds are captured, so a
 		// pending run's missing Secret cannot preempt another component's evidence.
-		missing, inspectErr := inspector.Missing(checkCtx, namespace, candidatePipelineRunsForCommits(pipelineRuns, manifest.TriggerCommits, evidence.isCaptured))
+		// Admission-pending runs are left to the deferral threshold: while Kueue
+		// holds the run, a missing Secret is not a reliable PaC diagnosis.
+		candidates := candidatePipelineRunsForCommits(pipelineRuns, manifest.TriggerCommits, evidence.isCaptured)
+		inspectable := make([]unstructured.Unstructured, 0, len(candidates))
+		for index := range candidates {
+			if admissionPending(&candidates[index], taskRuns) {
+				continue
+			}
+			inspectable = append(inspectable, candidates[index])
+		}
+		missing, inspectErr := inspector.Missing(checkCtx, namespace, inspectable)
 		if inspectErr != nil {
 			if !inspectionWarned {
 				inspectionWarned = true
@@ -748,11 +807,6 @@ func (s *LiveStage) waitForBuilds(ctx context.Context, manifest *model.RunManife
 		pipelineRuns, err := s.Clients.Dynamic.Resource(PipelineRunGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, nil, err
-		}
-		// A matched failed PipelineRun wins over a missing PaC Secret so the
-		// failed-build log collection still runs.
-		if failed := matchedFailedPipelineRun(pipelineRuns.Items, manifest.TriggerCommits); failed != nil {
-			return nil, nil, failed
 		}
 		taskRuns, err := s.Clients.Dynamic.Resource(cluster.TaskRunGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
@@ -868,11 +922,13 @@ func componentSpec(name, repository, branch, componentPath string) cluster.Compo
 
 // waitForBuildTaskRuns polls for matching PipelineRuns and successful Buildah TaskRuns.
 // It first waits up to triggerTimeout for every uncaptured commit to get a PipelineRun,
-// then up to buildTimeout for the runs to succeed. Each poll matches, records observed
-// runs, captures newly completed evidence, and only then runs check, so check errors never
-// discard evidence from the same poll; a matched failure returns before that capture step.
-// It returns only when every commit has evidence, either captured earlier or proven here.
-func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, interval time.Duration, namespace string, commits []model.TriggerCommit, list func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error), notice func(string, ...any), check func(context.Context, []unstructured.Unstructured) error, evidence buildEvidenceCache) ([]model.PipelineRunIdentity, error) {
+// then up to buildTimeout for each component's Buildah TaskRuns to succeed. Each poll
+// matches, records observed runs, captures newly completed evidence, and only then runs
+// check, so check errors never discard evidence from the same poll; a matched build
+// failure returns before that capture step. A PipelineRun's post-build tasks are not a
+// completion gate. It returns only when every commit has evidence, either captured
+// earlier or proven here.
+func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, interval time.Duration, namespace string, commits []model.TriggerCommit, list func(context.Context) ([]unstructured.Unstructured, []unstructured.Unstructured, error), notice func(string, ...any), check func(context.Context, []unstructured.Unstructured, []unstructured.Unstructured) error, evidence buildEvidenceCache) ([]model.PipelineRunIdentity, error) {
 	if triggerTimeout <= 0 {
 		return nil, fmt.Errorf("trigger timeout must be positive")
 	}
@@ -884,6 +940,7 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 	}
 	notify(notice, "waiting for PipelineRuns for %d triggered components", len(commits))
 	observed := make(map[string]model.PipelineRunIdentity, len(commits))
+	admission := newAdmissionTracker(admissionPendingThreshold, evidence.admissionReason)
 
 	triggerCtx, cancelTrigger := context.WithTimeout(ctx, triggerTimeout)
 	defer cancelTrigger()
@@ -894,7 +951,7 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 		if err != nil {
 			return nil, err
 		}
-		identities, pending, err := matchBuildTaskRuns(pipelineRuns, taskRuns, commits, evidence.isCaptured)
+		identities, pending, err := matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns, commits, evidence.ExpectedPlatforms, evidence.isCaptured)
 		if err != nil {
 			return nil, err
 		}
@@ -905,9 +962,12 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 			return nil, err
 		}
 		if check != nil {
-			if err := check(triggerCtx, pipelineRuns); err != nil {
+			if err := check(triggerCtx, pipelineRuns, taskRuns); err != nil {
 				return nil, err
 			}
+		}
+		if deferred := admission.deferred(namespace, time.Now(), commits, pipelineRuns, taskRuns, evidence.isCaptured); deferred != nil {
+			return nil, deferred
 		}
 		if !pending {
 			return assembleBuildIdentities(commits, identities, evidence)
@@ -916,7 +976,7 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 			break
 		}
 		if !awaitPoll(triggerCtx, interval, triggerHeartbeat, func() {
-			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now(), evidence.isCaptured))
+			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now(), evidence.isCaptured, evidence.admissionReason, evidence.ExpectedPlatforms))
 		}) {
 			return nil, noPipelineRunError(namespace, commits, pipelineRuns, evidence.isCaptured)
 		}
@@ -932,7 +992,7 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 		if err != nil {
 			return nil, err
 		}
-		identities, pending, err := matchBuildTaskRuns(pipelineRuns, taskRuns, commits, evidence.isCaptured)
+		identities, pending, err := matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns, commits, evidence.ExpectedPlatforms, evidence.isCaptured)
 		if err != nil {
 			return nil, err
 		}
@@ -943,15 +1003,18 @@ func waitForBuildTaskRuns(ctx context.Context, triggerTimeout, buildTimeout, int
 			return nil, err
 		}
 		if check != nil {
-			if err := check(buildCtx, pipelineRuns); err != nil {
+			if err := check(buildCtx, pipelineRuns, taskRuns); err != nil {
 				return nil, err
 			}
+		}
+		if deferred := admission.deferred(namespace, time.Now(), commits, pipelineRuns, taskRuns, evidence.isCaptured); deferred != nil {
+			return nil, deferred
 		}
 		if !pending {
 			return assembleBuildIdentities(commits, identities, evidence)
 		}
 		if !awaitPoll(buildCtx, interval, buildHeartbeat, func() {
-			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now(), evidence.isCaptured))
+			notify(notice, "%s", buildWaitStatus(commits, pipelineRuns, taskRuns, time.Now(), evidence.isCaptured, evidence.admissionReason, evidence.ExpectedPlatforms))
 		}) {
 			return nil, fmt.Errorf("timed out waiting for Buildah TaskRuns after trigger: %w", buildCtx.Err())
 		}
@@ -1037,32 +1100,25 @@ func assembleBuildIdentities(commits []model.TriggerCommit, completed []model.Pi
 	return identities, nil
 }
 
-// matchedFailedPipelineRun returns the first matched PipelineRun reporting
-// failure, even when another run for the same commit is still pending, so
-// callers can fail before other checks hide it.
-func matchedFailedPipelineRun(pipelineRuns []unstructured.Unstructured, commits []model.TriggerCommit) *PipelineRunFailedError {
-	for _, commit := range commits {
-		for _, candidate := range matchingPipelineRuns(pipelineRuns, commit) {
-			if pipelineRunConditionStatus(candidate) == "False" {
-				return &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
-			}
-		}
-	}
-	return nil
-}
-
 // matchBuildTaskRuns matches every commit to one PipelineRun and its
 // successful Buildah TaskRuns. Captured components count as satisfied; any
-// other commit without a successful run is pending. It returns the components
-// proven in this poll and whether another poll is still needed.
+// other commit without a successful build is pending. A component is proven
+// when every Buildah TaskRun for its PipelineRun succeeds; the PipelineRun's
+// post-build tasks are outside LKMABT's scope and are not a completion gate.
+// It returns the components proven in this poll and whether another poll is
+// still needed.
 func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, commits []model.TriggerCommit, captured func(string) bool) ([]model.PipelineRunIdentity, bool, error) {
+	return matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns, commits, nil, captured)
+}
+
+// matchBuildTaskRunsWithExpected is matchBuildTaskRuns with a required matrix
+// platform set. A multi-platform matrix can create one TaskRun before the
+// others, or a duplicate TaskRun for one platform; accepting that poll would
+// capture evidence before every requested platform has an output and turn a
+// normal startup race into a verification failure. Nil disables the coverage
+// check.
+func matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns []unstructured.Unstructured, commits []model.TriggerCommit, expectedPlatforms []string, captured func(string) bool) ([]model.PipelineRunIdentity, bool, error) {
 	identities := make([]model.PipelineRunIdentity, 0, len(commits))
-	// Fail on any matched failed PipelineRun before reporting another component as
-	// pending; otherwise a later component's failure can hide behind an earlier
-	// component that never produces a PipelineRun.
-	if failed := matchedFailedPipelineRun(pipelineRuns, commits); failed != nil {
-		return nil, false, failed
-	}
 	pending := false
 	for _, commit := range commits {
 		candidates := matchingPipelineRuns(pipelineRuns, commit)
@@ -1095,37 +1151,80 @@ func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, comm
 			continue
 		}
 		candidate := candidates[0]
-		if pipelineRunConditionStatus(candidate) == "False" {
-			return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
-		}
+		pipelineStatus := pipelineRunConditionStatus(candidate)
 		buildTasks := buildTaskRunsForPipelineRun(taskRuns, candidate)
+		if len(buildTasks) == 0 {
+			if pipelineStatus == "False" {
+				return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
+			}
+			if pipelineStatus == "True" {
+				return nil, false, fmt.Errorf("PipelineRun %s/%s succeeded without Buildah TaskRuns for component %s", candidate.GetNamespace(), candidate.GetName(), commit.Component)
+			}
+			pending = true
+			continue
+		}
 		failed := false
+		allSucceeded := true
 		for _, taskRun := range buildTasks {
-			if pipelineRunConditionStatus(taskRun) == "False" {
+			switch pipelineRunConditionStatus(taskRun) {
+			case "False":
 				failed = true
-				break
+			case "True":
+			default:
+				allSucceeded = false
 			}
 		}
 		if failed {
 			return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
 		}
-		// Successful Buildah TaskRuns are only evidence after the PipelineRun
-		// itself succeeds; later tasks can still be running or fail.
-		if pipelineRunConditionStatus(candidate) != "True" || len(buildTasks) == 0 {
-			pending = true
-			continue
-		}
-		allSucceeded := true
-		for _, taskRun := range buildTasks {
-			if pipelineRunConditionStatus(taskRun) != "True" {
-				allSucceeded = false
-				break
+		if len(expectedPlatforms) > 0 {
+			observed := make(map[string]bool, len(buildTasks))
+			platformPending := false
+			for _, taskRun := range buildTasks {
+				taskPlatform := cluster.BuildTaskRunPlatform(taskRun)
+				if taskPlatform == "" {
+					if pipelineRunConditionStatus(taskRun) == "True" {
+						return nil, false, fmt.Errorf("build TaskRun %s/%s has no platform label — pipeline misconfiguration", taskRun.GetNamespace(), taskRun.GetName())
+					}
+					// A running TaskRun may still publish its platform in its
+					// PLATFORM result; do not reject it until it succeeds.
+					platformPending = true
+					continue
+				}
+				observed[taskPlatform] = true
+			}
+			missing := make([]string, 0, len(expectedPlatforms))
+			for _, expected := range expectedPlatforms {
+				if !observed[expected] {
+					missing = append(missing, expected)
+				}
+			}
+			if len(missing) > 0 || platformPending {
+				if pipelineStatus == "False" {
+					return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
+				}
+				if pipelineStatus == "True" {
+					if len(missing) > 0 {
+						return nil, false, fmt.Errorf("PipelineRun %s/%s is missing Buildah TaskRuns for %s", candidate.GetNamespace(), candidate.GetName(), strings.Join(missing, ", "))
+					}
+					return nil, false, fmt.Errorf("PipelineRun %s/%s has a Buildah TaskRun without platform metadata", candidate.GetNamespace(), candidate.GetName())
+				}
+				pending = true
+				continue
 			}
 		}
 		if !allSucceeded {
+			// A failure before every Buildah TaskRun completes is an early
+			// pipeline failure; a post-build failure leaves all builds done.
+			if pipelineStatus == "False" {
+				return nil, false, &PipelineRunFailedError{Namespace: candidate.GetNamespace(), Name: candidate.GetName(), Component: commit.Component}
+			}
 			pending = true
 			continue
 		}
+		// Every Buildah TaskRun succeeded. Do not wait for image-index, scans, or
+		// other post-build tasks; LKMABT verifies the build outputs, not the full
+		// PipelineRun lifecycle.
 		identity := identityFromObject(candidate, commit.Component, pipelineRunSHA(candidate))
 		identity.Succeeded = true
 		identities = append(identities, identity)
@@ -1133,8 +1232,8 @@ func matchBuildTaskRuns(pipelineRuns, taskRuns []unstructured.Unstructured, comm
 	return identities, pending, nil
 }
 
-// buildTaskRunsForPipelineRun selects Buildah TaskRuns owned by or labeled for a PipelineRun.
-func buildTaskRunsForPipelineRun(taskRuns []unstructured.Unstructured, pipelineRun *unstructured.Unstructured) []*unstructured.Unstructured {
+// taskRunsForPipelineRun selects TaskRuns owned by or labeled for a PipelineRun.
+func taskRunsForPipelineRun(taskRuns []unstructured.Unstructured, pipelineRun *unstructured.Unstructured) []*unstructured.Unstructured {
 	result := make([]*unstructured.Unstructured, 0)
 	for index := range taskRuns {
 		taskRun := &taskRuns[index]
@@ -1142,10 +1241,21 @@ func buildTaskRunsForPipelineRun(taskRuns []unstructured.Unstructured, pipelineR
 		if !owned && taskRun.GetLabels()["tekton.dev/pipelineRun"] == pipelineRun.GetName() {
 			owned = true
 		}
-		if !cluster.IsBuildTaskRun(taskRun) || !owned {
-			continue
+		if owned {
+			result = append(result, taskRun)
 		}
-		result = append(result, taskRun)
+	}
+	return result
+}
+
+// buildTaskRunsForPipelineRun selects Buildah TaskRuns owned by or labeled for a PipelineRun.
+func buildTaskRunsForPipelineRun(taskRuns []unstructured.Unstructured, pipelineRun *unstructured.Unstructured) []*unstructured.Unstructured {
+	all := taskRunsForPipelineRun(taskRuns, pipelineRun)
+	result := make([]*unstructured.Unstructured, 0, len(all))
+	for _, taskRun := range all {
+		if cluster.IsBuildTaskRun(taskRun) {
+			result = append(result, taskRun)
+		}
 	}
 	return result
 }
@@ -1234,16 +1344,11 @@ func noPipelineRunError(namespace string, commits []model.TriggerCommit, objects
 // It also returns an empty string when the condition exists without a string status; callers
 // treat anything other than True or False as non-terminal.
 func pipelineRunConditionStatus(object *unstructured.Unstructured) string {
-	conditions, _, _ := unstructured.NestedSlice(object.Object, "status", "conditions")
-	for _, item := range conditions {
-		condition, ok := item.(map[string]any)
-		if !ok || condition["type"] != "Succeeded" {
-			continue
-		}
-		status, _ := condition["status"].(string)
-		return status
+	status, _, _ := pipelineRunSucceededCondition(object)
+	if status == "" {
+		return "Unknown"
 	}
-	return "Unknown"
+	return status
 }
 
 // PipelineRunFailedError reports a trigger's PipelineRun or one of its Buildah
@@ -1334,6 +1439,16 @@ func removeBuildOutputEvidence(evidence []model.BuildOutputEvidence, component s
 		kept = append(kept, output)
 	}
 	return kept
+}
+
+// buildOutputIdentities returns the PipelineRun identity recorded in each
+// captured build evidence entry.
+func buildOutputIdentities(outputs []model.BuildOutputEvidence) []model.PipelineRunIdentity {
+	identities := make([]model.PipelineRunIdentity, 0, len(outputs))
+	for _, output := range outputs {
+		identities = append(identities, output.PipelineRun)
+	}
+	return identities
 }
 
 // mergePipelineRunIdentities merges identities, deduplicating by the build evidence key

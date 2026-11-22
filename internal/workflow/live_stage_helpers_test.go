@@ -7,6 +7,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/platform"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -47,7 +48,7 @@ var _ = Describe("build wait progress", func() {
 			buildTaskRunForWorkflow("task-succeeded", "uid-succeeded", "True", "buildah-oci-ta"),
 		}
 
-		Expect(buildWaitStatus(commits, pipelineRuns, taskRuns, now, nil)).Should(Equal("builds: " +
+		Expect(buildWaitStatus(commits, pipelineRuns, taskRuns, now, nil, nil, nil)).Should(Equal("builds: " +
 			"running: running for 1m30s (PipelineRun run-running, buildah 0/1 succeeded); " +
 			"pending: pending for 3m0s (PipelineRun run-pending, no Buildah TaskRun); " +
 			"failed: failed (PipelineRun run-failed); " +
@@ -62,18 +63,46 @@ var _ = Describe("build wait progress", func() {
 			pipelineRunAt("run-web", "web", "sha-web", "uid-web", "True", now.Add(-time.Minute)),
 		}
 
-		Expect(buildWaitStatus(commits, pipelineRuns, nil, now, nil)).Should(Equal("builds: web: PipelineRun run-web succeeded; waiting for Buildah TaskRuns"))
+		Expect(buildWaitStatus(commits, pipelineRuns, nil, now, nil, nil, nil)).Should(Equal("builds: web: PipelineRun run-web succeeded; no Buildah TaskRuns"))
 
 		taskRuns := []unstructured.Unstructured{
 			buildTaskRunForWorkflow("task-web", "uid-web", "Unknown", "buildah-oci-ta"),
 		}
-		Expect(buildWaitStatus(commits, pipelineRuns, taskRuns, now, nil)).Should(Equal("builds: web: PipelineRun run-web succeeded; buildah 0/1 succeeded"))
+		Expect(buildWaitStatus(commits, pipelineRuns, taskRuns, now, nil, nil, nil)).Should(Equal("builds: web: PipelineRun run-web succeeded; buildah 0/1 succeeded"))
+	})
+
+	It("reports Buildah success even when a post-build task failed", func() {
+		now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+		commits := []model.TriggerCommit{{Component: "web", SHA: "sha-web"}}
+		pipelineRuns := []unstructured.Unstructured{
+			pipelineRunAt("run-web", "web", "sha-web", "uid-web", "False", now.Add(-time.Minute)),
+		}
+		taskRuns := []unstructured.Unstructured{
+			buildTaskRunForWorkflow("task-web", "uid-web", "True", "buildah-oci-ta"),
+		}
+
+		Expect(buildWaitStatus(commits, pipelineRuns, taskRuns, now, nil, nil, nil)).Should(Equal("builds: web: succeeded (PipelineRun run-web, buildah 1/1)"))
+	})
+
+	It("does not report success before every expected platform TaskRun exists", func() {
+		now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+		commits := []model.TriggerCommit{{Component: "web", SHA: "sha-web"}}
+		pipelineRuns := []unstructured.Unstructured{
+			pipelineRunAt("run-web", "web", "sha-web", "uid-web", "Unknown", now.Add(-time.Minute)),
+		}
+		taskRuns := []unstructured.Unstructured{
+			buildTaskRunForWorkflow("task-amd64", "uid-web", "True", "buildah-oci-ta"),
+		}
+
+		status := buildWaitStatus(commits, pipelineRuns, taskRuns, now, nil, nil, []string{platform.LinuxAMD64, platform.LinuxARM64})
+		Expect(status).Should(ContainSubstring("waiting for platform results"))
+		Expect(status).ShouldNot(ContainSubstring("succeeded (PipelineRun"))
 	})
 
 	It("renders captured evidence when a completed PipelineRun was pruned", func() {
 		commit := model.TriggerCommit{Component: "web", SHA: "sha-web"}
 
-		status := buildComponentStatus(commit, nil, nil, time.Now(), func(component string) bool { return component == "web" })
+		status := buildComponentStatus(commit, nil, nil, time.Now(), func(component string) bool { return component == "web" }, nil, nil)
 
 		Expect(status).Should(Equal("succeeded (outputs captured)"))
 	})

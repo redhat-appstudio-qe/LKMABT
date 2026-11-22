@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/workflow"
 )
 
 var _ = Describe("Console steps", func() {
@@ -255,6 +256,20 @@ var _ = Describe("Console steps", func() {
 		})
 	})
 
+	When("a step ends deferred", func() {
+		It("should use the pause marker instead of the failure marker", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out}
+
+			step := console.StartStep("Verify builds (github) 🏗️")
+			step.EndDeferred("admission pending")
+
+			Expect(out.String()).Should(ContainSubstring(" ⏸ Verify builds (github) 🏗️ - deferred (admission pending)\n"))
+			Expect(out.String()).ShouldNot(ContainSubstring("✗"))
+			Expect(out.String()).ShouldNot(ContainSubstring("\x1b["))
+		})
+	})
+
 	When("a prompt is open", func() {
 		It("should buffer plain step lines until the prompt completes", func() {
 			prompt := &countingPrompt{approved: true, entered: make(chan struct{}), release: make(chan struct{})}
@@ -404,5 +419,16 @@ var _ = Describe("newPhaseObserver", func() {
 
 	It("should be a no-op for other writers", func() {
 		Expect(newPhaseObserver(io.Discard, "github")).Should(BeNil())
+	})
+
+	It("should end a deferred phase with the pause marker", func() {
+		out := &bytes.Buffer{}
+		observer := newPhaseObserver(&Console{Out: out}, "github")
+
+		observer.start(model.PhaseBuildsVerified)
+		observer.end(model.PhaseBuildsVerified, &workflow.AdmissionPendingError{Namespace: "tenant"})
+
+		Expect(out.String()).Should(ContainSubstring(" ⏸ Verify builds (github) 🏗️ - deferred (admission pending)\n"))
+		Expect(out.String()).ShouldNot(ContainSubstring("✗"))
 	})
 })

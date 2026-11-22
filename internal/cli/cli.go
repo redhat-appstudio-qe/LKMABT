@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
+	"github.com/redhat-appstudio/lkmabt/internal/workflow"
 )
 
 // RunOutcome identifies one finished provider run. ArtifactDirectory is
@@ -24,6 +25,15 @@ type RunOutcome struct {
 	RunID             string
 	ArtifactDirectory string
 	Stage             model.Phase
+	// Deferred reports that the attempt stopped in scheduler admission and may
+	// be retried as a fresh run; DeferredReason carries the scheduler detail.
+	Deferred       bool
+	DeferredReason string
+	// Platforms is the effective selection for this cluster after preflight
+	// narrowed undeclared architectures.
+	Platforms []string
+	// CleanupErr records a deferred attempt's failed namespace cleanup.
+	CleanupErr error
 }
 
 // Runner executes provider workflows for Execute; LiveRunner is the production
@@ -44,6 +54,12 @@ type ProviderResult struct {
 	ArtifactDirectory string
 	Stage             model.Phase
 	Err               error
+	// Deferred marks a first-attempt scheduler deferral that the scheduler may
+	// retry. A result that exhausts its retry is converted back to Err.
+	Deferred       bool
+	DeferredReason string
+	Platforms      []string
+	CleanupErr     error
 }
 
 // CleanupRunner is the optional Runner capability behind the cleanup command.
@@ -94,11 +110,15 @@ func providerNames(provider string) []string {
 }
 
 // runProviders runs every selected provider concurrently, in providerNames
-// order, and returns one result per provider in that order. Each provider gets
-// its own buffered RunLog, attached by the runner once the provider's run
-// directory exists.
+// order, and returns one result per provider in that order.
 func runProviders(ctx context.Context, request config.Request, runner Runner) []ProviderResult {
-	names := providerNames(request.Provider)
+	return runProvidersFor(ctx, request, runner, providerNames(request.Provider))
+}
+
+// runProvidersFor runs the named providers concurrently and returns one result
+// per name in the supplied order. A subset retry uses this so a passing or
+// failing sibling is not re-run and its first-attempt result is preserved.
+func runProvidersFor(ctx context.Context, request config.Request, runner Runner, names []string) []ProviderResult {
 	results := make([]ProviderResult, len(names))
 	var waitGroup sync.WaitGroup
 	for index, name := range names {
@@ -121,7 +141,12 @@ func providerResult(provider string, outcome RunOutcome, err error) ProviderResu
 	if stage == "" {
 		stage = model.PhasePreflight
 	}
-	return ProviderResult{Provider: provider, RunID: outcome.RunID, ArtifactDirectory: outcome.ArtifactDirectory, Stage: stage, Err: err}
+	deferred := outcome.Deferred || workflow.IsDeferred(err)
+	reason := outcome.DeferredReason
+	if deferred && reason == "" && err != nil {
+		reason = err.Error()
+	}
+	return ProviderResult{Provider: provider, RunID: outcome.RunID, ArtifactDirectory: outcome.ArtifactDirectory, Stage: stage, Err: err, Deferred: deferred, DeferredReason: reason, Platforms: append([]string(nil), outcome.Platforms...), CleanupErr: outcome.CleanupErr}
 }
 
 // requestForProvider creates a run request with a fresh run ID, the fixture
