@@ -125,7 +125,7 @@ and appends harmless comments to trigger PipelineRuns.
 
 **`internal/cleanup/`** — Namespace lifecycle management
 - Creates namespaces labeled with `app.konflux-ci.org/managed-by=lkmabt`
-- Prompts before deletion (retains namespace on user decline or failure-artifact collection errors)
+- Prompts before deletion (retains the namespace on user decline, failure-artifact collection errors, or an unavailable prompt during finalization); `cleanup` fails with an explicit error when the prompt is unavailable
 - Strips finalizers from known deadlock-prone resources before namespace deletion and re-strips them while waiting for deletion
 
 **`skills/`** — Deep-dive reference files for agents.
