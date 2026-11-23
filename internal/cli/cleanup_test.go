@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -55,6 +57,19 @@ var _ = Describe("cleanupRun", func() {
 
 		err := cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, nil, io.Discard)
 		Expect(err).Should(MatchError(ContainSubstring("explicit confirmation")))
+		_, err = client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-run-1", metav1.GetOptions{})
+		Expect(err).ShouldNot(HaveOccurred())
+	})
+
+	It("reports an unavailable confirmation prompt without deleting", func() {
+		store := cleanupTestStore()
+		client := cleanupTestClient("run-1", cleanup.ManagedByValue)
+		prompt := NewConfirmationPrompt(strings.NewReader(""), io.Discard, true)
+
+		err := cleanupRun(context.Background(), cleanupTestRequest("run-1", store.Root), store, cleanup.NamespaceService{Dynamic: client}, prompt, io.Discard)
+
+		Expect(err).Should(MatchError(ContainSubstring("cleanup requires an interactive confirmation")))
+		Expect(errors.Is(err, ErrPromptUnavailable)).To(BeTrue())
 		_, err = client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-run-1", metav1.GetOptions{})
 		Expect(err).ShouldNot(HaveOccurred())
 	})
