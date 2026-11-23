@@ -51,6 +51,7 @@ broken build fails later and leaves its receipt in `.lkmabt-runs/`.
 - [Cleaning up a namespace](#cleaning-up-a-namespace)
 - [Run logs and artifact retention](#run-logs-and-artifact-retention)
 
+---
 ## Prerequisites
 
 The *tachles*: a Go toolchain, cluster credentials, provider accounts with push
@@ -177,6 +178,7 @@ access to:
   that host replaces `gitlab.com`;
 - `gitlab.cee.redhat.com` when LKMABT has to clone and build kflux.
 
+---
 ## Setup
 
 ### 1. Install LKMABT
@@ -279,6 +281,7 @@ browser-login token is first exercised during that cluster's preflight or
 fixture setup. Checking now avoids a failed run; five minutes here saves a
 *schlep* through failure artifacts later.
 
+---
 ## Authentication methods
 
 LKMABT needs a GitHub token for GitHub runs and a GitLab token for GitLab runs.
@@ -352,7 +355,7 @@ the token to the default endpoint.
 | `GITLAB_BOT_TOKEN` | Personal access token with `api` and `write_repository`. Leave empty for the token-page prompt on `gitlab.com`. LKMABT never revokes it. |
 | `GITLAB_API_URL` | Defaults to `https://gitlab.com/api/v4`. |
 
-**`GITHUB_TOKEN`.** In a terminal, LKMABT checks before the first cluster that
+**`GITHUB_TOKEN`** In a terminal, LKMABT checks before the first cluster that
 the token can list App installations for `redhat-appstudio-qe`, push to the
 fixture, and list repositories for selected-repository App installations. A
 token GitHub rejects is replaced by an existing `gh` login when that login
@@ -364,13 +367,14 @@ lists installation repositories for Apps installed for selected repositories;
 when the token cannot list them, preflight logs a warning and continues, and
 the trigger-stage PaC wait remains the backstop.
 
-**`GITLAB_BOT_TOKEN`.** The token is used as-is and is never revoked. PaC
+**`GITLAB_BOT_TOKEN`** The token is used as-is and is never revoked. PaC
 reuses an existing usable GitLab SCM Secret (labeled
 `appstudio.redhat.com/credentials=scm` and
 `appstudio.redhat.com/scm.host=gitlab.com`, and annotated for the fixture
 repository) when one exists; otherwise LKMABT creates `gitlab-build-secret`
 and keeps it for later runs.
 
+---
 ## Running LKMABT
 
 Run from the checkout root, or pass absolute paths. `--clusters-file` defaults
@@ -467,7 +471,8 @@ fixture; assuming nobody will notice takes a certain *chutzpah*. One selection
 applies to all three components—no per-component exceptions, because that way
 lies *mishigas*.
 
-### LKMABT under the hood
+---
+## LKMABT under the hood
 
 - Clusters run one at a time in clusters-file order—no parallel heroics. Each
   cluster finishes or fails before the next one starts. `both` runs the two
@@ -505,10 +510,7 @@ lies *mishigas*.
 
 ### Admission deferral
 
-Kueue or another admission controller can hold a triggered PipelineRun before
-it starts. LKMABT treats that as a scheduler deferral, not a failure, when all
-three are true for more than 10 minutes: the PipelineRun is `PipelineRunPending`
-(in `spec.status` or as the `Succeeded` condition reason), it has no
+Kueue can hold a triggered PipelineRun before it starts. LKMABT treats that as a scheduler deferral, not a failure, when all three are true for more than 10 minutes: the PipelineRun is `PipelineRunPending` (in `spec.status` or as the `Succeeded` condition reason), it has no
 `startTime`, and it has no child TaskRuns.
 
 While the wait continues, the once-per-minute build heartbeat names
@@ -640,6 +642,7 @@ selection. This applies to configured tokens and browser logins.
   `--tenant-namespace`; otherwise wait for that run. The lock has the patience
   of my nephew Doron from Israel: none, but it tells you exactly why.
 
+---
 ## Cleaning up a namespace
 
 ```bash
@@ -679,6 +682,7 @@ not accept `--env-file`.
   controller's remaining resources or finalizers.
 - `cleanup` needs no provider credentials.
 
+---
 ## Run logs and artifact retention
 
 Runtime evidence is stored under `.lkmabt-runs/` by default; `--state-dir`
