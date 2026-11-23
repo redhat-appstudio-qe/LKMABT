@@ -272,6 +272,10 @@ into `~/.local/bin/kflux`. A batch login that hits one unknown catalog is
 retried per cluster so valid clusters still refresh. `oc login` runs only when
 the entry has a server or a readable kubeconfig; a missing kubeconfig with no
 server fails with guidance instead of using the ambient kubeconfig's context.
+An interactive run whose OAuth login page offers a FAS identity provider uses
+`oc login --web` so the browser can complete the FAS login; a non-interactive
+run needs a kubeconfig. The probe sends no credentials and refuses issuer or
+redirect destinations that resolve to internal or reserved addresses.
 
 All available fields are documented in `.lkmabt-clusters.yaml.example`.
 
@@ -625,8 +629,9 @@ selection. This applies to configured tokens and browser logins.
   retains the namespace. Required snapshots retry transient network timeouts and
   API 408/429/5xx responses twice with backoff before collection is declared
   incomplete; optional pod logs continue past individual container errors. A
-  non-interactive run never prompts, so both the success and failure paths
-  retain the namespace.
+  run whose prompt cannot read input (for example, non-interactive stdin)
+  retains the namespace and records the reason in the console and `run.log`;
+  it never treats an unreadable prompt as a decline.
 - Deletion waits after approval, in finalization and `cleanup`, are bounded to
   five minutes and re-strip deadlock-prone finalizers that controllers re-add. A
   namespace that still cannot be deleted fails with its name and the namespace
@@ -688,8 +693,8 @@ not accept `--env-file`.
 - It holds the tenant namespace lock and prompts
   `Delete tenant namespace <name> owned by run <id> [y/N]:`; deletion happens
   only on an explicit yes.
-- A non-interactive run cannot approve the prompt, so it retains the namespace
-  and exits successfully.
+- A cleanup whose prompt cannot read input (for example, non-interactive
+  stdin) fails with an explicit confirmation error and never deletes silently.
 - Deletion waits at most five minutes; on timeout it reports the namespace
   controller's remaining resources or finalizers.
 - `cleanup` needs no provider credentials.

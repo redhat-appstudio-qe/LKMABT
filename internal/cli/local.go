@@ -224,7 +224,7 @@ func (runner LiveRunner) Cleanup(ctx context.Context, request config.Request) er
 	}
 	authStep := stepFor(runner.Out, fmt.Sprintf("Authenticate cluster %s 🔐", entry.Name))
 	resume := suspendOutput(runner.Out)
-	resolved, failures := (clusterauth.Ladder{Runner: clusterauth.ExecRunner{Log: os.Stdout}}).Authenticate(ctx, []clusterfile.Entry{entry})
+	resolved, failures := (clusterauth.Ladder{Runner: clusterauth.ExecRunner{Log: os.Stdout}, Interactive: runner.Interactive}).Authenticate(ctx, []clusterfile.Entry{entry})
 	failure := failures[entry.Name]
 	if failure == nil && len(resolved) > 0 {
 		entry = resolved[0]
@@ -334,8 +334,8 @@ func locateRunStateRootSkipping(stateDir, clusterName, runID, skip string) (stri
 // cleanupRun deletes one run's tenant namespace after refusing unsafe requests:
 // it requires an exact run ID, a manifest whose server matches the request, and
 // verified saved artifacts, then confirms the namespace labels and run ID before
-// locking it and prompting. A nil prompt is an error; a declined prompt writes a
-// retention notice to out and returns nil.
+// locking it and prompting. A nil prompt is an error; an unavailable prompt is
+// an error; a declined prompt writes a retention notice to out and returns nil.
 func cleanupRun(ctx context.Context, request config.Request, store evidence.ManifestStore, namespaceService cleanup.NamespaceService, prompt workflow.Confirmation, out io.Writer) error {
 	if out == nil {
 		out = io.Discard
@@ -386,6 +386,9 @@ func cleanupRun(ctx context.Context, request config.Request, store evidence.Mani
 		return fmt.Errorf("cleanup requires explicit confirmation")
 	}
 	approved, err := prompt.Confirm(ctx, fmt.Sprintf("Delete tenant namespace %s owned by run %s", namespace, request.RunID))
+	if errors.Is(err, ErrPromptUnavailable) {
+		return fmt.Errorf("cleanup requires an interactive confirmation for tenant namespace %s: %w", namespace, err)
+	}
 	if err != nil {
 		return err
 	}
@@ -426,7 +429,9 @@ type Lifecycle struct {
 	Prompt workflow.Confirmation
 	// Sources overrides the collector sources otherwise derived from Namespace.Dynamic.
 	Sources []collector.Source
-	// Log receives retention notices; nil discards them.
+	// Out receives retention notices for humans; nil discards them.
+	Out io.Writer
+	// Log receives retention notices in the run log; nil discards them.
 	Log io.Writer
 }
 
@@ -468,8 +473,10 @@ func waitForNamespaceDeletion(ctx context.Context, service cleanup.NamespaceServ
 // A namespace whose ownership cannot be confirmed is an error, except when the
 // run already failed and the manifest phase is failed; that case returns without
 // deleting the namespace or the Secret. A nil Prompt never deletes the
-// namespace. On a successful run with a non-nil Prompt, Collector.StateDir must
-// be set because cleanup requires verified artifacts.
+// namespace. A prompt that cannot read input returns ErrPromptUnavailable: the
+// namespace is retained and the reason is written to Out and Log; it is not
+// treated as a declined answer. On a successful run with a non-nil Prompt,
+// Collector.StateDir must be set because cleanup requires verified artifacts.
 func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, runErr error) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
 	defer cancel()
@@ -524,11 +531,15 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 		return secretErr
 	}
 	approved, err := l.Prompt.Confirm(ctx, fmt.Sprintf("Delete owned tenant namespace %s from run %s", namespace, manifest.RunID))
+	if errors.Is(err, ErrPromptUnavailable) {
+		l.notice("retained tenant namespace %s: cleanup prompt unavailable (%v)", namespace, err)
+		return secretErr
+	}
 	if err != nil {
 		return errors.Join(secretErr, err)
 	}
 	if !approved {
-		fmt.Fprintf(l.logWriter(), "retained tenant namespace %s\n", namespace)
+		l.notice("retained tenant namespace %s", namespace)
 		return secretErr
 	}
 	uid, err := l.Namespace.Delete(ctx, namespace, manifest.RunID)
@@ -569,12 +580,15 @@ func deleteGitLabCredentialSecret(ctx context.Context, client dynamic.Interface,
 	return nil
 }
 
-// logWriter returns the lifecycle log, or a discard writer when none is configured.
-func (l Lifecycle) logWriter() io.Writer {
-	if l.Log == nil {
-		return io.Discard
+// notice writes one retention decision to the operator and the run log.
+func (l Lifecycle) notice(format string, args ...any) {
+	line := fmt.Sprintf(format, args...)
+	if l.Out != nil {
+		fmt.Fprintln(l.Out, line)
 	}
-	return l.Log
+	if l.Log != nil {
+		fmt.Fprintln(l.Log, line)
+	}
 }
 
 // outcomeFromManifest reports the run identity and the stage the run ended on.
@@ -660,7 +674,7 @@ func (runner LiveRunner) finalizeDeferredRun(ctx context.Context, stage *workflo
 func (runner LiveRunner) finalizeRun(ctx context.Context, request config.Request, clients *cluster.ClientSet, stage *workflow.LiveStage, store evidence.ManifestStore, manifest model.RunManifest, runErr error, log io.Writer) error {
 	sources := collector.KubernetesSources(clients.Dynamic, manifest.Fixture.TenantNamespace)
 	sources = append(sources, collector.KubernetesPodLogSources(clients.Kubernetes, manifest.Fixture.TenantNamespace, manifest.CreatedAt)...)
-	lifecycle := Lifecycle{Store: store, Namespace: stage.Namespace, Collector: collector.Collector{StateDir: request.StateDir}, Prompt: stage.Prompt, Sources: sources, Log: log}
+	lifecycle := Lifecycle{Store: store, Namespace: stage.Namespace, Collector: collector.Collector{StateDir: request.StateDir}, Prompt: stage.Prompt, Sources: sources, Out: stage.Out, Log: log}
 	return lifecycle.Finalize(ctx, manifest, runErr)
 }
 

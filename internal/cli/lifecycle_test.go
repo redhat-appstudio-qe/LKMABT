@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -253,6 +254,27 @@ var _ = Describe("Lifecycle", func() {
 			lifecycle := Lifecycle{Store: store, Namespace: cleanup.NamespaceService{Dynamic: client}, Collector: collector.Collector{StateDir: stateDir}, Prompt: prompt, Sources: lifecycleTestSources(), Log: log}
 			Expect(lifecycle.Finalize(context.Background(), manifest, nil)).Should(Succeed())
 			Expect(log.String()).Should(ContainSubstring("retained tenant namespace tenant\n"))
+			_, err := lifecycle.Namespace.Inspect(context.Background(), "tenant")
+			Expect(err).ShouldNot(HaveOccurred())
+		})
+	})
+
+	When("the confirmation prompt is unavailable", func() {
+		It("should retain the namespace and report the reason to the console and log", func() {
+			stateDir := GinkgoT().TempDir()
+			client := fake.NewSimpleDynamicClient(runtime.NewScheme(), namespaceObject("tenant", "run-1"))
+			var promptOut, out, log bytes.Buffer
+			prompt := NewConfirmationPrompt(strings.NewReader(""), &promptOut, true)
+			manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseCompleted, Fixture: model.FixtureIdentity{TenantNamespace: "tenant"}}
+			store := evidence.NewManifestStore(stateDir)
+			Expect(store.Create(&manifest)).Should(Succeed())
+			lifecycle := Lifecycle{Store: store, Namespace: cleanup.NamespaceService{Dynamic: client}, Collector: collector.Collector{StateDir: stateDir}, Prompt: prompt, Sources: lifecycleTestSources(), Out: &out, Log: &log}
+
+			Expect(lifecycle.Finalize(context.Background(), manifest, nil)).Should(Succeed())
+
+			Expect(out.String()).Should(ContainSubstring("retained tenant namespace tenant: cleanup prompt unavailable"))
+			Expect(log.String()).Should(ContainSubstring("retained tenant namespace tenant: cleanup prompt unavailable"))
+			Expect(promptOut.String()).Should(HaveSuffix("\n"))
 			_, err := lifecycle.Namespace.Inspect(context.Background(), "tenant")
 			Expect(err).ShouldNot(HaveOccurred())
 		})
