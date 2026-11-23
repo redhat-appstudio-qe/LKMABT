@@ -498,6 +498,18 @@ kubeconfig is missing. A batch kflux login failure is retried per cluster so an
 unknown name cannot block the valid ones. `type: roks` entries never call
 kflux; the catalog name only names the default kubeconfig path.
 
+### FAS Identity Providers
+A cluster whose OAuth login page advertises a Fedora Account System identity
+provider (for example `FAS-OpenID`) cannot be refreshed by kflux, which supports
+Kerberos and Red Hat SSO only. In an interactive run, the authentication ladder
+reads the API server's OAuth metadata and login page and uses
+`oc login --web --server=<api>`, letting the browser complete the FAS login. The
+probe sends no credentials and refuses issuer or redirect destinations that
+resolve to private, loopback, link-local, multicast, CGNAT, or reserved
+addresses; the configured API server itself is allowed. The probe is skipped
+when the run is non-interactive; those runs need a kubeconfig that already holds
+a usable token.
+
 ### ROKS First-Time Login
 `type: roks` authenticates with `ibmcloud login --sso` and
 `ibmcloud ks cluster config`, then verifies with `oc whoami`. When the API

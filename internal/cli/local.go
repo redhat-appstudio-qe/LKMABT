@@ -224,7 +224,7 @@ func (runner LiveRunner) Cleanup(ctx context.Context, request config.Request) er
 	}
 	authStep := stepFor(runner.Out, fmt.Sprintf("Authenticate cluster %s 🔐", entry.Name))
 	resume := suspendOutput(runner.Out)
-	resolved, failures := (clusterauth.Ladder{Runner: clusterauth.ExecRunner{Log: os.Stdout}}).Authenticate(ctx, []clusterfile.Entry{entry})
+	resolved, failures := (clusterauth.Ladder{Runner: clusterauth.ExecRunner{Log: os.Stdout}, Interactive: runner.Interactive}).Authenticate(ctx, []clusterfile.Entry{entry})
 	failure := failures[entry.Name]
 	if failure == nil && len(resolved) > 0 {
 		entry = resolved[0]

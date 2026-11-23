@@ -268,6 +268,10 @@ into `~/.local/bin/kflux`. A batch login that hits one unknown catalog is
 retried per cluster so valid clusters still refresh. `oc login` runs only when
 the entry has a server or a readable kubeconfig; a missing kubeconfig with no
 server fails with guidance instead of using the ambient kubeconfig's context.
+An interactive run whose OAuth login page offers a FAS identity provider uses
+`oc login --web` so the browser can complete the FAS login; a non-interactive
+run needs a kubeconfig. The probe sends no credentials and refuses issuer or
+redirect destinations that resolve to internal or reserved addresses.
 
 All available fields are documented in `.lkmabt-clusters.yaml.example`.
 
