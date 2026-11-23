@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -43,23 +44,60 @@ const (
 	DefaultBranch = "main"
 	// DefaultEnvFile is the dotenv file Parse reads when --env-file is not given.
 	DefaultEnvFile = ".lkmabt.env"
+	// SmokeComponentName is the only component a --smoke run builds.
+	SmokeComponentName = "mathwizz-history-worker"
 )
 
-// DefaultComponentPaths lists the fixture component Dockerfiles whose images
-// the run builds. Defaults copies the slice.
-var DefaultComponentPaths = []string{
-	"web-server/Dockerfile",
-	"history-worker/Dockerfile",
-	"frontend/Dockerfile",
+// componentProfile is one fixture component: the Konflux Component name, the
+// Dockerfile a trigger commit appends to, and the PaC PipelineRun whose
+// build-platforms parameter the run rewrites.
+type componentProfile struct {
+	Name       string
+	Dockerfile string
+	TektonPath string
 }
 
-// DefaultTektonPaths lists the fixture PipelineRuns whose build-platforms
-// parameter is set to the selected architectures. Entries align with
-// DefaultComponentPaths.
-var DefaultTektonPaths = []string{
-	".tekton/konflux-test-mathwizz-web-server-push.yaml",
-	".tekton/konflux-test-mathwizz-history-worker-push.yaml",
-	".tekton/konflux-test-mathwizz-frontend-push.yaml",
+// fullProfile is the complete MathWizz fixture selection in fixture order.
+// It is the single definition of the component set; every other list is
+// derived from it.
+var fullProfile = []componentProfile{
+	{Name: "mathwizz-web-server", Dockerfile: "web-server/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-web-server-push.yaml"},
+	{Name: "mathwizz-history-worker", Dockerfile: "history-worker/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-history-worker-push.yaml"},
+	{Name: "mathwizz-frontend", Dockerfile: "frontend/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-frontend-push.yaml"},
+}
+
+// selection splits profiles into aligned name, Dockerfile, and PipelineRun
+// slices, freshly allocated so no caller shares package storage.
+func selection(profiles []componentProfile) (names, dockerfiles, tektonPaths []string) {
+	names = make([]string, 0, len(profiles))
+	dockerfiles = make([]string, 0, len(profiles))
+	tektonPaths = make([]string, 0, len(profiles))
+	// Collect each profile's fields in fixture order so the three slices stay
+	// aligned by index.
+	for _, profile := range profiles {
+		names = append(names, profile.Name)
+		dockerfiles = append(dockerfiles, profile.Dockerfile)
+		tektonPaths = append(tektonPaths, profile.TektonPath)
+	}
+	return names, dockerfiles, tektonPaths
+}
+
+// FullComponents returns the complete fixture selection: component names,
+// their Dockerfiles, and their PipelineRun manifests, aligned by index and
+// freshly allocated for the caller.
+func FullComponents() (names, dockerfiles, tektonPaths []string) {
+	return selection(fullProfile)
+}
+
+// SmokeComponents returns the single-component smoke selection in the same
+// aligned form, reusing the full profile entry so the two cannot drift.
+func SmokeComponents() (names, dockerfiles, tektonPaths []string) {
+	for _, profile := range fullProfile {
+		if profile.Name == SmokeComponentName {
+			return selection([]componentProfile{profile})
+		}
+	}
+	return nil, nil, nil
 }
 
 // Credentials holds the provider tokens resolved for one request. The zero
@@ -109,8 +147,13 @@ type Request struct {
 	ApplicationName  string
 	SourceRepository string
 	SourceBranch     string
-	ComponentPaths   []string
-	TektonPaths      []string
+	// Smoke limits the run to SmokeComponentName.
+	Smoke bool
+	// ComponentNames holds the Konflux Component names this run creates and
+	// verifies, aligned with ComponentPaths and TektonPaths.
+	ComponentNames []string
+	ComponentPaths []string
+	TektonPaths    []string
 	// Platforms holds canonical platform names; Parse expands architecture
 	// aliases before storing them here.
 	Platforms   []string
@@ -122,6 +165,7 @@ type Request struct {
 // Slice fields are fresh copies safe for the caller to modify; Parse applies
 // flags and environment values on top of these defaults.
 func Defaults() Request {
+	names, dockerfiles, tektonPaths := FullComponents()
 	return Request{
 		ClustersFile:     clusterfile.DefaultPath,
 		StateDir:         DefaultStateDir,
@@ -129,8 +173,9 @@ func Defaults() Request {
 		SourceBranch:     DefaultBranch,
 		TenantNamespace:  DefaultGitHubTenantNamespace,
 		ApplicationName:  "mathwizz",
-		ComponentPaths:   append([]string(nil), DefaultComponentPaths...),
-		TektonPaths:      append([]string(nil), DefaultTektonPaths...),
+		ComponentNames:   names,
+		ComponentPaths:   dockerfiles,
+		TektonPaths:      tektonPaths,
 		Platforms:        platform.All(),
 		Timeouts: Timeouts{
 			Preflight: 10 * time.Minute,
@@ -140,11 +185,22 @@ func Defaults() Request {
 	}
 }
 
+// ExpectedComponents returns how many fixture components this run must
+// create and verify: one in smoke mode, the whole fixture otherwise. The
+// count is the contract, not a measurement of the request's slices.
+func (r Request) ExpectedComponents() int {
+	if r.Smoke {
+		return 1
+	}
+	return len(fullProfile)
+}
+
 // Parse builds and validates a request from command-line arguments and environment values.
 // The first argument selects the fixture (github, gitlab, or both) or cleanup.
 // Cleanup defines only --run-id, --cluster, --clusters-file, and --state-dir.
 // For a fixture command, optional architecture arguments follow the command and
 // must precede flags; without them every supported platform is selected.
+// --smoke is a run-only flag that narrows the fixture to SmokeComponentName; cleanup rejects it as an unknown flag.
 // Process environment values take precedence over env-file values, except that a
 // GitLab token and API URL must come from the same source. The default env file
 // is optional, but an explicitly named one must be readable and well formed;
@@ -202,6 +258,7 @@ func Parse(args []string) (Request, error) {
 		flags.StringVar(&req.ApplicationName, "application", req.ApplicationName, "persistent Application name")
 		flags.StringVar(&req.SourceRepository, "source-repository", req.SourceRepository, "source repository")
 		flags.StringVar(&req.SourceBranch, "branch", req.SourceBranch, "source branch")
+		flags.BoolVar(&req.Smoke, "smoke", false, "build only the mathwizz-history-worker component")
 		flags.DurationVar(&req.Timeouts.Preflight, "preflight-timeout", req.Timeouts.Preflight, "preflight timeout")
 		flags.DurationVar(&req.Timeouts.Trigger, "trigger-timeout", req.Timeouts.Trigger, "trigger timeout")
 		flags.DurationVar(&req.Timeouts.Build, "build-timeout", req.Timeouts.Build, "build timeout")
@@ -214,6 +271,10 @@ func Parse(args []string) (Request, error) {
 	}
 	if flags.NArg() != 0 {
 		return Request{}, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	// --smoke is a run-only flag that narrows the fixture to SmokeComponentName; cleanup rejects it as an unknown flag.
+	if req.Smoke {
+		req.ComponentNames, req.ComponentPaths, req.TektonPaths = SmokeComponents()
 	}
 	fileValues := map[string]string{}
 	if req.Command == CommandRun {
@@ -347,9 +408,10 @@ func readEnvFile(path string) (map[string]string, error) {
 // Validate checks that the request has a supported command and a complete
 // configuration. Both commands require a clusters file and state directory; a
 // cleanup also requires a valid RunID and ClusterName. A run additionally
-// requires a supported provider, exactly the default number of component paths
-// with one Tekton path each, at least one supported platform without duplicates,
-// positive timeouts, a nonempty application and tenant namespace, the selected
+// requires a supported provider, exactly ExpectedComponents aligned component
+// names, Dockerfile paths, and Tekton pipeline paths, without duplicate names,
+// exactly the canonical SmokeComponents selection in smoke mode, positive
+// timeouts, a nonempty application and tenant namespace, the selected
 // provider's fixed fixture repository, and for both the GitHub fixture
 // repository and tenant namespace. Validate does not read the clusters file or
 // contact providers.
@@ -376,11 +438,35 @@ func (r Request) Validate() error {
 		if r.Provider != ProviderGitHub && r.Provider != ProviderGitLab && r.Provider != ProviderBoth {
 			return fmt.Errorf("unsupported provider %q", r.Provider)
 		}
-		if len(r.ComponentPaths) != len(DefaultComponentPaths) {
-			return fmt.Errorf("exactly %d component paths are required", len(DefaultComponentPaths))
+		expected := r.ExpectedComponents()
+		if len(r.ComponentNames) != expected || len(r.ComponentPaths) != expected || len(r.TektonPaths) != expected {
+			return fmt.Errorf("exactly %d component names, Dockerfile paths, and Tekton pipeline paths are required; got %d, %d, %d", expected, len(r.ComponentNames), len(r.ComponentPaths), len(r.TektonPaths))
 		}
-		if len(r.TektonPaths) != len(r.ComponentPaths) {
-			return fmt.Errorf("exactly %d Tekton pipeline paths are required", len(r.ComponentPaths))
+		if r.Smoke {
+			names, dockerfiles, tektonPaths := SmokeComponents()
+			if len(r.ComponentNames) != 1 ||
+				!slices.Equal(r.ComponentNames, names) ||
+				!slices.Equal(r.ComponentPaths, dockerfiles) ||
+				!slices.Equal(r.TektonPaths, tektonPaths) {
+				name, dockerfile, tektonPath := "", "", ""
+				if len(r.ComponentNames) > 0 {
+					name = r.ComponentNames[0]
+				}
+				if len(r.ComponentPaths) > 0 {
+					dockerfile = r.ComponentPaths[0]
+				}
+				if len(r.TektonPaths) > 0 {
+					tektonPath = r.TektonPaths[0]
+				}
+				return fmt.Errorf("smoke runs require the %s selection; got component %q, Dockerfile %q, and Tekton pipeline %q", SmokeComponentName, name, dockerfile, tektonPath)
+			}
+		}
+		seenComponents := make(map[string]struct{}, len(r.ComponentNames))
+		for _, name := range r.ComponentNames {
+			if _, duplicate := seenComponents[name]; duplicate {
+				return fmt.Errorf("duplicate component name %q", name)
+			}
+			seenComponents[name] = struct{}{}
 		}
 		if len(r.Platforms) == 0 {
 			return errors.New("at least one build platform is required")

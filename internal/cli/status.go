@@ -251,6 +251,18 @@ func deferredLine(color bool, description string) string {
 	return " " + symbol + " " + description
 }
 
+// alertBlock renders a durable alert. Amber marks the marker and the title;
+// detail lines stay uncolored so long platform lists remain readable. The
+// layout is workflow.AlertLines' and is identical with and without color.
+func alertBlock(color bool, title string, lines []string) []string {
+	marker, heading := "!", title
+	if color {
+		marker = "\x1b[33m" + marker + "\x1b[0m"
+		heading = "\x1b[33m" + heading + "\x1b[0m"
+	}
+	return workflow.AlertLines(marker, heading, lines...)
+}
+
 // smartTerminal reports whether w can animate in place. Non-files, redirected
 // output, and dumb terminals get the plain line-oriented log instead.
 func smartTerminal(w io.Writer) bool {

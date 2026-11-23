@@ -174,6 +174,56 @@ var _ = Describe("Parse", func() {
 			err = req.Validate()
 			Expect(err).Should(MatchError(ContainSubstring("trigger timeout")))
 		})
+
+		It("should select only the smoke component", func() {
+			GinkgoT().Setenv("GITHUB_TOKEN", "token")
+			got, err := Parse([]string{"github", "--smoke"})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(got.Smoke).Should(BeTrue())
+			Expect(got.ExpectedComponents()).Should(Equal(1))
+			Expect(got.ComponentNames).Should(Equal([]string{"mathwizz-history-worker"}))
+			Expect(got.ComponentPaths).Should(Equal([]string{"history-worker/Dockerfile"}))
+			Expect(got.TektonPaths).Should(Equal([]string{".tekton/konflux-test-mathwizz-history-worker-push.yaml"}))
+		})
+
+		DescribeTable("applying the smoke selection alongside other run settings",
+			func(args []string, wantProvider string, wantRepository string, wantTenant string, wantBranch string, wantApplication string, wantPlatforms []string) {
+				GinkgoT().Setenv("GITHUB_TOKEN", "token")
+				GinkgoT().Setenv("GITLAB_BOT_TOKEN", "token")
+				got, err := Parse(args)
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(got.Provider).Should(Equal(wantProvider))
+				Expect(got.SourceRepository).Should(Equal(wantRepository))
+				Expect(got.TenantNamespace).Should(Equal(wantTenant))
+				Expect(got.SourceBranch).Should(Equal(wantBranch))
+				Expect(got.ApplicationName).Should(Equal(wantApplication))
+				Expect(got.Platforms).Should(Equal(wantPlatforms))
+				Expect(got.Smoke).Should(BeTrue())
+				Expect(got.ExpectedComponents()).Should(Equal(1))
+				Expect(got.ComponentNames).Should(Equal([]string{"mathwizz-history-worker"}))
+				Expect(got.ComponentPaths).Should(Equal([]string{"history-worker/Dockerfile"}))
+				Expect(got.TektonPaths).Should(Equal([]string{".tekton/konflux-test-mathwizz-history-worker-push.yaml"}))
+			},
+			Entry("github with amd64", []string{"github", "amd64", "--smoke"}, ProviderGitHub, "https://github.com/redhat-appstudio-qe/dr_test_mathwizz", "mathwizz-test-github", "main", "mathwizz", []string{platform.LinuxAMD64}),
+			Entry("gitlab", []string{"gitlab", "--smoke"}, ProviderGitLab, "https://gitlab.com/konflux-qe/dr_test_mathwizz_gl", "mathwizz-test-gitlab", "main", "mathwizz", []string{platform.LinuxAMD64, platform.LinuxARM64, platform.LinuxS390X, platform.LinuxPPC64LE}),
+			Entry("both", []string{"both", "--smoke"}, ProviderBoth, "https://github.com/redhat-appstudio-qe/dr_test_mathwizz", "mathwizz-test-github", "main", "mathwizz", []string{platform.LinuxAMD64, platform.LinuxARM64, platform.LinuxS390X, platform.LinuxPPC64LE}),
+			Entry("github with flags", []string{"github", "s390x", "--smoke", "--branch", "release-1", "--tenant-namespace", "custom-tenant", "--application", "custom-app"}, ProviderGitHub, "https://github.com/redhat-appstudio-qe/dr_test_mathwizz", "custom-tenant", "release-1", "custom-app", []string{platform.LinuxS390X}),
+		)
+
+		DescribeTable("keeping the full selection when smoke is absent or disabled",
+			func(args []string) {
+				GinkgoT().Setenv("GITHUB_TOKEN", "token")
+				got, err := Parse(args)
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(got.Smoke).Should(BeFalse())
+				Expect(got.ExpectedComponents()).Should(Equal(3))
+				Expect(got.ComponentNames).Should(Equal([]string{"mathwizz-web-server", "mathwizz-history-worker", "mathwizz-frontend"}))
+				Expect(got.ComponentPaths).Should(Equal([]string{"web-server/Dockerfile", "history-worker/Dockerfile", "frontend/Dockerfile"}))
+				Expect(got.TektonPaths).Should(Equal([]string{".tekton/konflux-test-mathwizz-web-server-push.yaml", ".tekton/konflux-test-mathwizz-history-worker-push.yaml", ".tekton/konflux-test-mathwizz-frontend-push.yaml"}))
+			},
+			Entry("without the flag", []string{"github"}),
+			Entry("with an explicit false", []string{"github", "--smoke=false"}),
+		)
 	})
 
 	When("the cleanup command is used", func() {
@@ -204,8 +254,12 @@ var _ = Describe("Parse", func() {
 			_, err := Parse([]string{"cleanup", "--run-id", "run-123", "--cluster", "c1", "--env-file", "other.env"})
 			Expect(err).Should(MatchError(ContainSubstring("flag provided but not defined: -env-file")))
 		})
-	})
+		It("should reject the run-only smoke flag", func() {
+			_, err := Parse([]string{"cleanup", "--run-id", "run-123", "--cluster", "c1", "--smoke"})
+			Expect(err).Should(MatchError(ContainSubstring("flag provided but not defined: -smoke")))
+		})
 
+	})
 	When("credentials are loaded", func() {
 		It("defers both provider credentials to run time", func() {
 			GinkgoT().Setenv("GITHUB_TOKEN", "")
@@ -334,5 +388,107 @@ var _ = Describe("Parse", func() {
 			Entry("removed cluster-server flag", []string{"github", "--cluster-server", "https://api.example"}, "flag provided but not defined: -cluster-server"),
 			Entry("run rejects the cleanup cluster flag", []string{"github", "--cluster", "c1"}, "flag provided but not defined: -cluster"),
 		)
+	})
+})
+
+var _ = Describe("Request.ExpectedComponents", func() {
+	DescribeTable("should report one expected component in smoke mode and three otherwise",
+		func(req Request, want int) {
+			Expect(req.ExpectedComponents()).Should(Equal(want))
+		},
+		Entry("default request", Request{}, 3),
+		Entry("smoke request", Request{Smoke: true}, 1),
+		Entry("smoke request with a full component path list", Request{Smoke: true, ComponentPaths: []string{"a", "b", "c"}}, 1),
+	)
+})
+
+var _ = Describe("Request component selection validation", func() {
+	It("should return the three aligned fixture entries as fresh slices", func() {
+		got := Defaults()
+		Expect(got.ComponentNames).Should(Equal([]string{"mathwizz-web-server", "mathwizz-history-worker", "mathwizz-frontend"}))
+		Expect(got.ComponentPaths).Should(Equal([]string{"web-server/Dockerfile", "history-worker/Dockerfile", "frontend/Dockerfile"}))
+		Expect(got.TektonPaths).Should(Equal([]string{".tekton/konflux-test-mathwizz-web-server-push.yaml", ".tekton/konflux-test-mathwizz-history-worker-push.yaml", ".tekton/konflux-test-mathwizz-frontend-push.yaml"}))
+
+		got.ComponentNames[0] = "mutated"
+		got.ComponentPaths[0] = "mutated"
+		fresh := Defaults()
+		Expect(fresh.ComponentNames).Should(Equal([]string{"mathwizz-web-server", "mathwizz-history-worker", "mathwizz-frontend"}))
+		Expect(fresh.ComponentPaths).Should(Equal([]string{"web-server/Dockerfile", "history-worker/Dockerfile", "frontend/Dockerfile"}))
+	})
+
+	It("should accept the smoke selection", func() {
+		req := Defaults()
+		req.Command = CommandRun
+		req.Provider = ProviderGitHub
+		req.Smoke = true
+		req.ComponentNames, req.ComponentPaths, req.TektonPaths = SmokeComponents()
+		Expect(req.Validate()).Should(Succeed())
+	})
+
+	DescribeTable("rejecting a component selection that does not match ExpectedComponents",
+		func(smoke bool, names, paths, tektonPaths []string, wantSubstring string) {
+			req := Defaults()
+			req.Command = CommandRun
+			req.Provider = ProviderGitHub
+			req.Smoke = smoke
+			req.ComponentNames = names
+			req.ComponentPaths = paths
+			req.TektonPaths = tektonPaths
+			err := req.Validate()
+			Expect(err).Should(MatchError(ContainSubstring(wantSubstring)))
+		},
+		Entry("normal with no selection", false, nil, nil, nil, "exactly 3 component names, Dockerfile paths, and Tekton pipeline paths are required; got 0, 0, 0"),
+		Entry("normal with two names", false, []string{"mathwizz-web-server", "mathwizz-history-worker"}, []string{"web-server/Dockerfile", "history-worker/Dockerfile", "frontend/Dockerfile"}, []string{".tekton/konflux-test-mathwizz-web-server-push.yaml", ".tekton/konflux-test-mathwizz-history-worker-push.yaml", ".tekton/konflux-test-mathwizz-frontend-push.yaml"}, "exactly 3 component names, Dockerfile paths, and Tekton pipeline paths are required; got 2, 3, 3"),
+		Entry("normal with two Tekton paths", false, []string{"mathwizz-web-server", "mathwizz-history-worker", "mathwizz-frontend"}, []string{"web-server/Dockerfile", "history-worker/Dockerfile", "frontend/Dockerfile"}, []string{".tekton/konflux-test-mathwizz-web-server-push.yaml", ".tekton/konflux-test-mathwizz-history-worker-push.yaml"}, "exactly 3 component names, Dockerfile paths, and Tekton pipeline paths are required; got 3, 3, 2"),
+		Entry("normal with one of each", false, []string{"mathwizz-history-worker"}, []string{"history-worker/Dockerfile"}, []string{".tekton/konflux-test-mathwizz-history-worker-push.yaml"}, "exactly 3 component names, Dockerfile paths, and Tekton pipeline paths are required; got 1, 1, 1"),
+		Entry("smoke with the full selection", true, []string{"mathwizz-web-server", "mathwizz-history-worker", "mathwizz-frontend"}, []string{"web-server/Dockerfile", "history-worker/Dockerfile", "frontend/Dockerfile"}, []string{".tekton/konflux-test-mathwizz-web-server-push.yaml", ".tekton/konflux-test-mathwizz-history-worker-push.yaml", ".tekton/konflux-test-mathwizz-frontend-push.yaml"}, "exactly 1 component names, Dockerfile paths, and Tekton pipeline paths are required; got 3, 3, 3"),
+		Entry("smoke with two of each", true, []string{"mathwizz-web-server", "mathwizz-history-worker"}, []string{"web-server/Dockerfile", "history-worker/Dockerfile"}, []string{".tekton/konflux-test-mathwizz-web-server-push.yaml", ".tekton/konflux-test-mathwizz-history-worker-push.yaml"}, "exactly 1 component names, Dockerfile paths, and Tekton pipeline paths are required; got 2, 2, 2"),
+	)
+
+	DescribeTable("validating the canonical smoke selection",
+		func(names, paths, tektonPaths []string, wantErr string) {
+			req := Defaults()
+			req.Command = CommandRun
+			req.Provider = ProviderGitHub
+			req.Smoke = true
+			req.ComponentNames = names
+			req.ComponentPaths = paths
+			req.TektonPaths = tektonPaths
+			err := req.Validate()
+			if wantErr == "" {
+				Expect(err).Should(Succeed())
+				return
+			}
+			Expect(err).Should(MatchError(Equal(wantErr)))
+		},
+		Entry("canonical selection",
+			[]string{"mathwizz-history-worker"},
+			[]string{"history-worker/Dockerfile"},
+			[]string{".tekton/konflux-test-mathwizz-history-worker-push.yaml"},
+			""),
+		Entry("different component",
+			[]string{"mathwizz-web-server"},
+			[]string{"web-server/Dockerfile"},
+			[]string{".tekton/konflux-test-mathwizz-web-server-push.yaml"},
+			`smoke runs require the mathwizz-history-worker selection; got component "mathwizz-web-server", Dockerfile "web-server/Dockerfile", and Tekton pipeline ".tekton/konflux-test-mathwizz-web-server-push.yaml"`),
+		Entry("different Dockerfile for the canonical component",
+			[]string{"mathwizz-history-worker"},
+			[]string{"web-server/Dockerfile"},
+			[]string{".tekton/konflux-test-mathwizz-history-worker-push.yaml"},
+			`smoke runs require the mathwizz-history-worker selection; got component "mathwizz-history-worker", Dockerfile "web-server/Dockerfile", and Tekton pipeline ".tekton/konflux-test-mathwizz-history-worker-push.yaml"`),
+		Entry("different Tekton pipeline for the canonical component",
+			[]string{"mathwizz-history-worker"},
+			[]string{"history-worker/Dockerfile"},
+			[]string{".tekton/konflux-test-mathwizz-frontend-push.yaml"},
+			`smoke runs require the mathwizz-history-worker selection; got component "mathwizz-history-worker", Dockerfile "history-worker/Dockerfile", and Tekton pipeline ".tekton/konflux-test-mathwizz-frontend-push.yaml"`),
+	)
+
+	It("should reject duplicate component names", func() {
+		req := Defaults()
+		req.Command = CommandRun
+		req.Provider = ProviderGitHub
+		req.ComponentNames[2] = req.ComponentNames[0]
+		err := req.Validate()
+		Expect(err).Should(MatchError(Equal(`duplicate component name "mathwizz-web-server"`)))
 	})
 })

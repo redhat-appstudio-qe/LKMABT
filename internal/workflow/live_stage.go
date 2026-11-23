@@ -215,7 +215,9 @@ func (s *LiveStage) Platforms() []string {
 
 // limitToSupportedPlatforms narrows this cluster's selection to the
 // architectures its live host-config can schedule. An undeclared architecture is
-// information, not a warning or failure: the run continues with the rest.
+// information, not a warning or failure: one durable alert per cluster reports
+// the split and the run continues with the rest. Do not use a warning: or
+// error: prefix.
 func (s *LiveStage) limitToSupportedPlatforms(result cluster.PreflightResult) {
 	unsupported := result.Unsupported()
 	if len(unsupported) == 0 {
@@ -223,11 +225,16 @@ func (s *LiveStage) limitToSupportedPlatforms(result cluster.PreflightResult) {
 	}
 	supported := result.Supported()
 	s.Request.Platforms = supported
-	label := "cluster"
-	if name := strings.TrimSpace(s.Request.ClusterName); name != "" {
-		label += " " + name
+	name := strings.TrimSpace(s.Request.ClusterName)
+	if name == "" {
+		name = "cluster"
 	}
-	s.notice("%s does not declare %s in host-config; continuing with %s", label, strings.Join(unsupported, ", "), strings.Join(supported, ", "))
+	s.alert(
+		fmt.Sprintf("architecture:%s:%s->:%s", name, strings.Join(unsupported, ","), strings.Join(supported, ",")),
+		name+": architecture support narrowed",
+		"not supported: "+strings.Join(unsupported, ", "),
+		"testing: "+strings.Join(supported, ", "),
+	)
 }
 
 // accessChecks lists the API versions preflight must verify.
@@ -451,8 +458,8 @@ func OpenBrowser(rawURL string) error {
 
 // EnsureFixture validates the provider fixture and records its tenant resources in the manifest.
 // The manifest's recorded fixture wins over the stage's, so a resumed run keeps its repository.
-// It requires at least three component paths, panicking otherwise, and replaces manifest.Fixture
-// and s.Fixture.
+// It requires one Dockerfile path per selected component name and returns an error when they disagree,
+// and replaces manifest.Fixture and s.Fixture.
 func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManifest) error {
 	fixture := s.Fixture
 	if recorded := fixtureFromManifest(manifest.Fixture); recorded.Name != "" {
@@ -464,11 +471,6 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 		return err
 	}
 	s.Fixture = fixture
-	components := []cluster.ComponentSpec{
-		componentSpec("mathwizz-web-server", fixture.URL, s.Request.SourceBranch, s.Request.ComponentPaths[0]),
-		componentSpec("mathwizz-history-worker", fixture.URL, s.Request.SourceBranch, s.Request.ComponentPaths[1]),
-		componentSpec("mathwizz-frontend", fixture.URL, s.Request.SourceBranch, s.Request.ComponentPaths[2]),
-	}
 	namespace := manifest.Fixture.TenantNamespace
 	if namespace == "" {
 		namespace = s.Request.TenantNamespace
@@ -479,7 +481,16 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 	}
 	manifest.Fixture.TenantNamespace = namespace
 	manifest.Fixture.EphemeralGitLabAuth = s.Request.Credentials.GitLabTokenEphemeral
-	result, err := (cluster.FixtureService{Dynamic: s.Clients.Dynamic, Kubernetes: s.Clients.Kubernetes}).EnsureFixture(ctx, cluster.FixtureSpec{
+	fixtures := cluster.FixtureService{Dynamic: s.Clients.Dynamic, Kubernetes: s.Clients.Kubernetes}
+	names, paths := s.Request.ComponentNames, s.Request.ComponentPaths
+	if len(names) == 0 || len(names) != len(paths) {
+		return fmt.Errorf("run selects %d components but %d Dockerfile paths", len(names), len(paths))
+	}
+	components := make([]cluster.ComponentSpec, 0, len(names))
+	for index, name := range names {
+		components = append(components, componentSpec(name, fixture.URL, s.Request.SourceBranch, paths[index]))
+	}
+	result, err := fixtures.EnsureFixture(ctx, cluster.FixtureSpec{
 		Namespace:            namespace,
 		RunID:                manifest.RunID,
 		Application:          application,
@@ -488,6 +499,7 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 		GitLabTokenEphemeral: s.Request.Credentials.GitLabTokenEphemeral,
 		Repository:           fixture.URL,
 		Components:           components,
+		ExpectedComponents:   s.Request.ExpectedComponents(),
 	})
 	if err != nil {
 		return err
@@ -584,10 +596,8 @@ func (s *LiveStage) TriggerComponents(ctx context.Context, manifest *model.RunMa
 		if err != nil {
 			return nil, fmt.Errorf("list components while waiting for PaC: %w", err)
 		}
-		for index := range list.Items {
-			if err := paCStatusError(&list.Items[index]); err != nil {
-				return nil, err
-			}
+		if err := selectedPaCStatusError(list.Items, components); err != nil {
+			return nil, err
 		}
 		return list.Items, nil
 	}, s.progress); err != nil {
@@ -798,12 +808,7 @@ func (s *LiveStage) waitForBuilds(ctx context.Context, manifest *model.RunManife
 		if err != nil {
 			return nil, nil, fmt.Errorf("list components while waiting for builds: %w", err)
 		}
-		for index := range components.Items {
-			if err := paCStatusError(&components.Items[index]); err != nil {
-				componentErr = err
-				break
-			}
-		}
+		componentErr = selectedPaCStatusError(components.Items, manifest.Fixture.Components)
 		pipelineRuns, err := s.Clients.Dynamic.Resource(PipelineRunGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return nil, nil, err
@@ -866,6 +871,21 @@ func paCStatusError(object *unstructured.Unstructured) error {
 		return fmt.Errorf("component %s PaC onboarding failed with error ID %d", object.GetName(), status.PaC.ErrorID)
 	}
 	return fmt.Errorf("component %s PaC onboarding failed: %s", object.GetName(), status.PaC.ErrorMessage)
+}
+
+// selectedPaCStatusError returns the PaC onboarding failure of a component
+// this run selected. The persistent tenant also holds components other runs
+// own; their status is not this run's result.
+func selectedPaCStatusError(items []unstructured.Unstructured, selected []string) error {
+	for index := range items {
+		if !slices.Contains(selected, items[index].GetName()) {
+			continue
+		}
+		if err := paCStatusError(&items[index]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // waitForPaCEnabled polls components until each named component reports enabled PaC status.
@@ -1139,10 +1159,10 @@ func matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns []unstructured.Unstru
 					}
 				}
 				if succeeded > 1 {
-					return nil, false, fmt.Errorf("PipelineRun overshoot for component %s: %d succeeded for commit %s, expected exactly 1", commit.Component, succeeded, commit.SHA)
+					return nil, false, fmt.Errorf("PipelineRun overshoot for component %s: %d succeeded for commit %s, expected exactly 1; candidates: %s", commit.Component, succeeded, commit.SHA, pipelineRunCandidates(candidates))
 				}
 			}
-			return nil, false, fmt.Errorf("ambiguous PipelineRuns for component %s after trigger %s", commit.Component, commit.SHA)
+			return nil, false, fmt.Errorf("ambiguous PipelineRuns for component %s after trigger %s; candidates: %s", commit.Component, commit.SHA, pipelineRunCandidates(candidates))
 		}
 		// A captured component is satisfied even if its PipelineRun was pruned.
 		// Duplicate exact runs are rejected above; several successes are the
@@ -1230,6 +1250,20 @@ func matchBuildTaskRunsWithExpected(pipelineRuns, taskRuns []unstructured.Unstru
 		identities = append(identities, identity)
 	}
 	return identities, pending, nil
+}
+
+// pipelineRunCandidates renders each candidate PipelineRun and its source
+// SHA so an ambiguity names the runs a maintainer must inspect.
+func pipelineRunCandidates(candidates []*unstructured.Unstructured) string {
+	parts := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		sha := pipelineRunSHA(candidate)
+		if sha == "" {
+			sha = "unknown"
+		}
+		parts = append(parts, fmt.Sprintf("%s/%s (sha %s)", candidate.GetNamespace(), candidate.GetName(), sha))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // taskRunsForPipelineRun selects TaskRuns owned by or labeled for a PipelineRun.

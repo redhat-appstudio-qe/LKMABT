@@ -131,7 +131,7 @@ Provider credentials are described in
 ### Cluster requirements
 
 These are not suggestions. The run checks platforms, access, and the GitHub App
-at preflight, before triggering three components that cannot build.
+at preflight, before triggering up to three components that cannot build.
 
 - The `multi-platform-controller` deployment is ready in namespace
   `multi-platform-controller`, and its `host-config` ConfigMap carries the
@@ -142,8 +142,10 @@ at preflight, before triggering three components that cannot build.
   selection. Dynamic provisioning is sufficient; physical architecture nodes
   are not required.
   - An architecture the cluster does not declare is informational, not a
-    preflight failure. LKMABT prints a notice and continues on that cluster with
-    the selected architectures the cluster does declare.
+    preflight failure. LKMABT prints an alert naming the architectures it will
+    not test and the ones it will (`not supported:` / `testing:`), then
+    continues on that cluster with the selected architectures the cluster does
+    declare.
   - A declared architecture must be schedulable. A static
     `host.<name>.platform` entry needs `address`, `user`, and `secret`; a
     dynamic entry needs a provider type. A declared but incomplete or
@@ -153,7 +155,7 @@ at preflight, before triggering three components that cannot build.
   - GitHub App onboarding is a separate preflight check. A cluster that cannot
     install the fixture's GitHub App still fails preflight even when its
     architecture support is sufficient.
-- PaC onboarding is complete for all three components, with current `.tekton`
+- PaC onboarding is complete for the selected components, with current `.tekton`
   configuration on the fixture branch. Each push PipelineRun must declare a
   `build-platforms` parameter; LKMABT rewrites it and fails when it is absent.
   LKMABT waits for PaC readiness and does not merge onboarding changes.
@@ -415,9 +417,19 @@ Run-only flags:
 | `--tenant-namespace` | `mathwizz-test-github` or `mathwizz-test-gitlab` | Single-provider runs select the namespace; `both` fixes it per provider and rejects any other value. |
 | `--application` | `mathwizz` | Application name created or reused in the tenant namespace. |
 | `--branch` | `main` | Fixture branch for configuration and trigger commits. |
+| `--smoke` | off | Build only `mathwizz-history-worker`; a normal run builds all three fixture components. Rejected by `cleanup`. |
 | `--preflight-timeout` | `10m` | Bounds preflight and fixture setup. |
 | `--trigger-timeout` | `5m` | Bounds only the wait for a triggered PipelineRun to appear. |
 | `--build-timeout` | `60m` | Bounds each of triggering, the build wait, and build-output verification. |
+
+Smoke runs build the single `mathwizz-history-worker` component; architecture
+selection is unchanged.
+
+```bash
+lkmabt github --smoke
+lkmabt github amd64 --smoke
+lkmabt both --smoke
+```
 
 The fixture repository is fixed: `--source-repository` must equal the selected
 provider's fixture URL (the GitHub fixture for `both`). `cleanup` requires
@@ -462,14 +474,14 @@ LKMABT applies the selection to every component:
    incomplete or unschedulable platform fails preflight, and a cluster that
    declares none of the selection fails preflight outright. Build verification
    requires one successful Buildah output per platform the cluster runs. The
-   final result line lists the requested architectures; the per-cluster notice
+   final result line lists the requested architectures; the per-cluster alert
    and the row's `tested:` note name the subset that cluster actually builds.
 
 The fixtures are shared; the configuration and Dockerfile commits are visible
 to other users. Your trigger commit is a postcard to everyone else at the
 fixture; assuming nobody will notice takes a certain *chutzpah*. One selection
-applies to all three components—no per-component exceptions, because that way
-lies *mishigas*.
+applies to every component the run builds—no per-component architecture
+exceptions, because that way lies *mishigas*.
 
 ---
 ## LKMABT under the hood
