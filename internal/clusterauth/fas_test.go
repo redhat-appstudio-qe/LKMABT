@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -245,6 +246,47 @@ var _ = Describe("probeFASIdentityProvider", func() {
 			Expect(err).Should(MatchError(ContainSubstring("HTTPS to HTTP")))
 		})
 	})
+
+	When("the OAuth issuer resolves to an internal address", func() {
+		It("should refuse the destination", func() {
+			var issuer string
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = fmt.Fprintf(w, `{"issuer":%q}`, issuer)
+			}))
+			defer server.Close()
+			issuer = "https://127.0.0.1:1"
+			kubeconfig := filepath.Join(GinkgoT().TempDir(), "config")
+			writeKubeconfigWithCA(kubeconfig, server.URL, server.Certificate())
+
+			_, err := probeFASIdentityProvider(context.Background(), server.URL, kubeconfig)
+
+			Expect(err).Should(MatchError(ContainSubstring("refusing probe destination")))
+		})
+	})
+
+	When("the login page redirects to an internal address", func() {
+		It("should refuse the destination", func() {
+			var issuer string
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/.well-known/oauth-authorization-server":
+					_, _ = fmt.Fprintf(w, `{"issuer":%q}`, issuer)
+				case "/oauth/token/request":
+					http.Redirect(w, r, "https://127.0.0.1:1/", http.StatusFound)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			issuer = server.URL
+			kubeconfig := filepath.Join(GinkgoT().TempDir(), "config")
+			writeKubeconfigWithCA(kubeconfig, server.URL, server.Certificate())
+
+			_, err := probeFASIdentityProvider(context.Background(), server.URL, kubeconfig)
+
+			Expect(err).Should(MatchError(ContainSubstring("refusing probe destination")))
+		})
+	})
 })
 
 var _ = Describe("FAS provider links", func() {
@@ -266,6 +308,26 @@ var _ = Describe("FAS provider links", func() {
 	It("should ignore data-href attributes", func() {
 		Expect(anchorHrefs(`<a data-href="/oauth/authorize?idp=FAS-OpenID">Log In</a>`)).Should(BeEmpty())
 	})
+})
+
+var _ = Describe("publicProbeIP", func() {
+	DescribeTable("address classes",
+		func(addr string, want bool) {
+			Expect(publicProbeIP(net.ParseIP(addr))).Should(Equal(want))
+		},
+		Entry("public IPv4", "1.1.1.1", true),
+		Entry("public IPv6", "2606:4700:4700::1111", true),
+		Entry("loopback IPv4", "127.0.0.1", false),
+		Entry("loopback IPv6", "::1", false),
+		Entry("private class A", "10.0.0.1", false),
+		Entry("private class B", "172.16.0.1", false),
+		Entry("private class C", "192.168.1.1", false),
+		Entry("link-local metadata", "169.254.169.254", false),
+		Entry("carrier-grade NAT", "100.64.0.1", false),
+		Entry("unspecified", "0.0.0.0", false),
+		Entry("multicast", "224.0.0.1", false),
+		Entry("reserved", "240.0.0.1", false),
+	)
 })
 
 var _ = Describe("isFedoraHost", func() {

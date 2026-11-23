@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -76,7 +77,7 @@ func (l Ladder) fasWebLoginTarget(ctx context.Context, entry clusterfile.Entry) 
 func probeFASIdentityProvider(ctx context.Context, server, kubeconfig string) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, fasProbeTimeout)
 	defer cancel()
-	client := probeHTTPClient(kubeconfig)
+	client := probeHTTPClient(kubeconfig, server)
 
 	issuer, err := oauthIssuer(ctx, client, server)
 	if err != nil {
@@ -103,15 +104,121 @@ func probeFASIdentityProvider(ctx context.Context, server, kubeconfig string) (b
 
 // probeHTTPClient trusts the kubeconfig's CA in addition to the system roots, so
 // a cluster with a private CA can still be probed. It carries no authentication,
-// rejects non-HTTP(S) redirects, and refuses a TLS downgrade.
-func probeHTTPClient(kubeconfig string) *http.Client {
+// rejects non-HTTP(S) redirects, refuses a TLS downgrade, and lets only the
+// operator-configured API server and public issuer destinations through.
+func probeHTTPClient(kubeconfig, server string) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = probeTLSConfig(kubeconfig)
+	transport.DialContext = probeDialContext(probeHostPort(server))
 	client := &http.Client{Transport: transport, CheckRedirect: secureOAuthRedirect}
 	if jar, err := cookiejar.New(nil); err == nil {
 		client.Jar = jar
 	}
 	return client
+}
+
+// probeHostPort returns the normalized host:port of the operator-configured
+// server, or an empty string when the URL has no usable host.
+func probeHostPort(server string) string {
+	parsed, err := url.Parse(server)
+	if err != nil || parsed.Hostname() == "" {
+		return ""
+	}
+	port := parsed.Port()
+	if port == "" {
+		switch parsed.Scheme {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		default:
+			return ""
+		}
+	}
+	return net.JoinHostPort(strings.ToLower(parsed.Hostname()), port)
+}
+
+// probeDialContext checks every destination at dial time. The configured API
+// server is allowed as-is; an issuer or redirect must resolve to public
+// addresses, which blocks cluster-controlled requests to loopback, private,
+// link-local, and reserved services.
+func probeDialContext(allowed string) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		if allowed != "" && strings.EqualFold(address, allowed) {
+			return dialer.DialContext(ctx, network, address)
+		}
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, fmt.Errorf("probe destination %q: %w", address, err)
+		}
+		ips, err := allowedProbeIPs(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		for _, ip := range ips {
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		return nil, lastErr
+	}
+}
+
+// allowedProbeIPs resolves host and returns its addresses only when every one is
+// public; an IP literal is checked directly.
+func allowedProbeIPs(ctx context.Context, host string) ([]net.IP, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		if !publicProbeIP(ip) {
+			return nil, fmt.Errorf("refusing probe destination %s", host)
+		}
+		return []net.IP{ip}, nil
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve probe destination %s: %w", host, err)
+	}
+	ips := make([]net.IP, 0, len(addrs))
+	for _, addr := range addrs {
+		if !publicProbeIP(addr.IP) {
+			return nil, fmt.Errorf("refusing probe destination %s (%s)", host, addr.IP)
+		}
+		ips = append(ips, addr.IP)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("probe destination %s has no addresses", host)
+	}
+	return ips, nil
+}
+
+// cgnatBlock covers carrier-grade NAT space, which net.IP does not classify as
+// private.
+var cgnatBlock = func() *net.IPNet {
+	_, block, _ := net.ParseCIDR("100.64.0.0/10")
+	return block
+}()
+
+// publicProbeIP reports whether ip is globally routable. It rejects loopback,
+// private, link-local (including cloud metadata), unspecified, multicast, CGNAT,
+// and reserved 0/8 and 240/4 space.
+func publicProbeIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return true
+	}
+	if ip4[0] == 0 || ip4[0] >= 240 {
+		return false
+	}
+	return !cgnatBlock.Contains(ip4)
 }
 
 // probeTLSConfig returns a TLS configuration that adds the kubeconfig's CA to
