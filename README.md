@@ -526,7 +526,10 @@ exceptions, because that way lies *mishigas*.
 
 ### Admission deferral
 
-Kueue can hold a triggered PipelineRun before it starts. LKMABT treats that as a scheduler deferral, not a failure, when all three are true for more than 10 minutes: the PipelineRun is `PipelineRunPending` (in `spec.status` or as the `Succeeded` condition reason), it has no
+Kueue or another admission controller can hold a triggered PipelineRun before
+it starts. LKMABT treats that as a scheduler deferral, not a failure, when all
+three are true for more than 10 minutes: the PipelineRun is `PipelineRunPending`
+(in `spec.status` or as the `Succeeded` condition reason), it has no
 `startTime`, and it has no child TaskRuns.
 
 While the wait continues, the once-per-minute build heartbeat names
