@@ -45,6 +45,9 @@ type Ladder struct {
 	Home string
 	// Log receives progress lines; nil disables progress output.
 	Log io.Writer
+	// Interactive permits browser-based oc login for identity providers such as
+	// FAS that cannot be completed non-interactively.
+	Interactive bool
 }
 
 // home returns the configured home directory or the process home directory.
@@ -232,7 +235,11 @@ func (l Ladder) authenticateLegacy(ctx context.Context, entries []clusterfile.En
 			failures[entry.Name] = fmt.Errorf("authentication failed: cluster %s: no readable kubeconfig at %s and no server; set server or kubeconfig, or use a kflux catalog name that resolves to this cluster", entry.Name, entry.Kubeconfig)
 			continue
 		}
-		l.runOCLogin(ctx, entry)
+		if server, fas := l.fasWebLoginTarget(ctx, entry); fas {
+			l.runOCLoginWeb(ctx, entry, server)
+		} else {
+			l.runOCLogin(ctx, entry)
+		}
 		output, rejected, err := l.verifyLegacyCluster(ctx, entry)
 		switch {
 		case err == nil:
@@ -494,5 +501,22 @@ func (l Ladder) runOCLogin(ctx context.Context, entry clusterfile.Entry) {
 	l.logf("running oc %s for cluster %s with KUBECONFIG=%s", strings.Join(args, " "), entry.Name, entry.Kubeconfig)
 	if err := l.Runner.Run(ctx, CommandSpec{Name: "oc", Args: args, Env: []string{"KUBECONFIG=" + entry.Kubeconfig}}); err != nil {
 		l.logf("oc login for cluster %s failed: %v", entry.Name, err)
+	}
+}
+
+// runOCLoginWeb performs the browser-based oc login used when an identity
+// provider such as FAS cannot be completed by kflux or with a password prompt.
+// It always names the server read from the entry or its kubeconfig, so the login
+// cannot fall back to the ambient kubeconfig's current context. Failures are
+// logged, not returned.
+func (l Ladder) runOCLoginWeb(ctx context.Context, entry clusterfile.Entry, server string) {
+	if err := os.MkdirAll(filepath.Dir(entry.Kubeconfig), 0o700); err != nil {
+		l.logf("create kubeconfig directory for cluster %s: %v", entry.Name, err)
+		return
+	}
+	args := []string{"login", "--web", "--server=" + server}
+	l.logf("running oc %s for cluster %s with KUBECONFIG=%s", strings.Join(args, " "), entry.Name, entry.Kubeconfig)
+	if err := l.Runner.Run(ctx, CommandSpec{Name: "oc", Args: args, Env: []string{"KUBECONFIG=" + entry.Kubeconfig}}); err != nil {
+		l.logf("oc login --web for cluster %s failed: %v", entry.Name, err)
 	}
 }

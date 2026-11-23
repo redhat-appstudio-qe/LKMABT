@@ -287,6 +287,121 @@ var _ = Describe("Authenticate", func() {
 		})
 	})
 
+	When("an interactive cluster uses a FAS identity provider", func() {
+		It("should log in through the browser with oc login --web", func() {
+			home := GinkgoT().TempDir()
+			oauth := oauthLoginServer("FAS-OpenID")
+			defer oauth.Close()
+			entry := clusterfile.Entry{Name: "kflux-fedora-01", Server: oauth.URL, Kubeconfig: filepath.Join(home, "config-fedora-01")}
+			log := &bytes.Buffer{}
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onRun = func(spec CommandSpec) error {
+				Expect(spec.Name).Should(Equal("oc"))
+				Expect(spec.Args).Should(Equal([]string{"login", "--web", "--server=" + oauth.URL}))
+				writeFile(entry.Kubeconfig)
+				return nil
+			}
+			fake.onOutput = func(CommandSpec) (string, error) { return "mrath\n", nil }
+
+			_, failures := (Ladder{Runner: fake, Home: home, Interactive: true, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+
+			Expect(failures).Should(BeEmpty())
+			Expect(fake.runs).Should(HaveLen(1))
+			Expect(log.String()).Should(ContainSubstring("FAS identity provider detected"))
+			Expect(log.String()).Should(ContainSubstring("running oc login --web --server=" + oauth.URL))
+		})
+
+		It("should read the server from a rejected kubeconfig", func() {
+			home := GinkgoT().TempDir()
+			oauth := oauthLoginServer("FAS-OpenID")
+			defer oauth.Close()
+			entry := clusterfile.Entry{Name: "kflux-fedora-01", Kubeconfig: filepath.Join(home, "config-fedora-01")}
+			writeKubeconfig(entry.Kubeconfig, oauth.URL)
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onRun = func(spec CommandSpec) error {
+				Expect(spec.Args).Should(Equal([]string{"login", "--web", "--server=" + oauth.URL}))
+				return nil
+			}
+			fake.onOutput = func(CommandSpec) (string, error) {
+				if len(fake.outputs) < 2 {
+					return "error: You must be logged in to the server (Unauthorized)", errors.New("exit status 1")
+				}
+				return "mrath\n", nil
+			}
+
+			_, failures := (Ladder{Runner: fake, Home: home, Interactive: true, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+
+			Expect(failures).Should(BeEmpty())
+			Expect(fake.runs).Should(HaveLen(1))
+			Expect(fake.runs[0].Args).Should(Equal([]string{"login", "--web", "--server=" + oauth.URL}))
+		})
+	})
+
+	When("an interactive cluster uses another identity provider", func() {
+		It("should keep the password-based oc login", func() {
+			home := GinkgoT().TempDir()
+			oauth := oauthLoginServer("redhat-sso")
+			defer oauth.Close()
+			entry := clusterfile.Entry{Name: "kflux-ocp-p01", Server: oauth.URL, Kubeconfig: filepath.Join(home, "config-ocp-p01")}
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onRun = func(spec CommandSpec) error {
+				Expect(spec.Args).Should(Equal([]string{"login", "--server=" + oauth.URL}))
+				writeFile(entry.Kubeconfig)
+				return nil
+			}
+			fake.onOutput = func(CommandSpec) (string, error) { return "mrath\n", nil }
+
+			_, failures := (Ladder{Runner: fake, Home: home, Interactive: true, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+
+			Expect(failures).Should(BeEmpty())
+			Expect(fake.runs).Should(HaveLen(1))
+		})
+	})
+
+	When("the OAuth identity-provider probe fails", func() {
+		It("should keep the password-based oc login", func() {
+			home := GinkgoT().TempDir()
+			oauth := oauthErrorServer()
+			defer oauth.Close()
+			entry := clusterfile.Entry{Name: "kflux-ocp-p01", Server: oauth.URL, Kubeconfig: filepath.Join(home, "config-ocp-p01")}
+			log := &bytes.Buffer{}
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onRun = func(spec CommandSpec) error {
+				Expect(spec.Args).Should(Equal([]string{"login", "--server=" + oauth.URL}))
+				writeFile(entry.Kubeconfig)
+				return nil
+			}
+			fake.onOutput = func(CommandSpec) (string, error) { return "mrath\n", nil }
+
+			_, failures := (Ladder{Runner: fake, Home: home, Interactive: true, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+
+			Expect(failures).Should(BeEmpty())
+			Expect(fake.runs).Should(HaveLen(1))
+			Expect(log.String()).Should(ContainSubstring("inspect OAuth identity providers"))
+		})
+	})
+
+	When("a FAS cluster is not interactive", func() {
+		It("should not use the browser login", func() {
+			home := GinkgoT().TempDir()
+			oauth := oauthLoginServer("FAS-OpenID")
+			defer oauth.Close()
+			entry := clusterfile.Entry{Name: "kflux-fedora-01", Server: oauth.URL, Kubeconfig: filepath.Join(home, "config-fedora-01")}
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onRun = func(spec CommandSpec) error {
+				Expect(spec.Args).Should(Equal([]string{"login", "--server=" + oauth.URL}))
+				writeFile(entry.Kubeconfig)
+				return nil
+			}
+			fake.onOutput = func(CommandSpec) (string, error) { return "mrath\n", nil }
+
+			_, failures := (Ladder{Runner: fake, Home: home, Log: &bytes.Buffer{}}).Authenticate(context.Background(), []clusterfile.Entry{entry})
+
+			Expect(failures).Should(BeEmpty())
+			Expect(fake.runs).Should(HaveLen(1))
+		})
+	})
+
 	When("the kflux batch login fails", func() {
 		It("should retry valid catalog clusters individually", func() {
 			home := GinkgoT().TempDir()
