@@ -91,6 +91,14 @@ func reachableEgressProbe(context.Context, string, string) (cluster.EgressResult
 	return cluster.EgressResult{Reachable: true}, nil
 }
 
+// allowEgressProbeAccess makes SelfSubjectAccessReview allow the probe pod
+// lifecycle checks in tests that run EnsureFixture with egress requirements.
+func allowEgressProbeAccess(client *kubernetesfake.Clientset) {
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(kubetesting.Action) (bool, runtime.Object, error) {
+		return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true}}, nil
+	})
+}
+
 // fakePreflightCluster satisfies cluster.Cluster for Preflight tests.
 type fakePreflightCluster struct {
 	server       string
@@ -602,7 +610,7 @@ var _ = Describe("LiveStage", func() {
 		})
 
 		When("the provider cannot verify selected repositories", func() {
-			It("should warn and continue", func() {
+			It("should warn and continue for an unexpected cause", func() {
 				provider := &githubAppProviderStub{err: fmt.Errorf("%w: selected repositories", providers.ErrUnverifiable)}
 				log := &bytes.Buffer{}
 				stage := &LiveStage{
@@ -614,7 +622,22 @@ var _ = Describe("LiveStage", func() {
 				_, err := stage.verifyGitHubApp(context.Background())
 				Expect(err).ShouldNot(HaveOccurred())
 				Expect(log.String()).Should(ContainSubstring("warning:"))
-				Expect(log.String()).Should(ContainSubstring("selected repositories"))
+				Expect(log.String()).Should(ContainSubstring("cannot be verified"))
+			})
+
+			It("should stay silent for the gh OAuth token limitation", func() {
+				provider := &githubAppProviderStub{err: fmt.Errorf("%w: %w: selected repositories", providers.ErrUnverifiable, providers.ErrTokenCannotListInstallationRepositories)}
+				log := &bytes.Buffer{}
+				stage := &LiveStage{
+					Provider: provider,
+					Clients:  &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/konflux-kflux-ocp-p01"))},
+					Log:      log,
+				}
+
+				_, err := stage.verifyGitHubApp(context.Background())
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(log.String()).ShouldNot(ContainSubstring("warning:"))
+				Expect(log.String()).ShouldNot(ContainSubstring("cannot list them"))
 			})
 		})
 
@@ -974,6 +997,39 @@ var _ = Describe("LiveStage", func() {
 				Expect(err).ShouldNot(HaveOccurred())
 				Expect(verification.Verified).Should(BeFalse())
 				Expect(out.String()).Should(ContainSubstring("warning:"))
+				Expect(out.String()).Should(ContainSubstring("cannot be verified"))
+				Expect(out.String()).ShouldNot(ContainSubstring("installation verified"))
+			})
+
+			It("should stay silent for the gh OAuth token limitation", func() {
+				required := appInstallationRequired()
+				provider := &githubAppProviderStub{verify: func(call int) error {
+					if call == 1 {
+						return required
+					}
+					return fmt.Errorf("%w: %w: selected repositories", providers.ErrUnverifiable, providers.ErrTokenCannotListInstallationRepositories)
+				}}
+				out := &bytes.Buffer{}
+				stage := &LiveStage{
+					Provider:      provider,
+					Clients:       &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
+					Interactive:   true,
+					ParentContext: context.Background(),
+					Out:           out,
+					OpenURL:       func(string) error { return nil },
+					Log:           &bytes.Buffer{},
+				}
+				previous := githubAppPollInterval
+				githubAppPollInterval = time.Millisecond
+				defer func() { githubAppPollInterval = previous }()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
+				verification, err := stage.verifyGitHubApp(ctx)
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(verification.Verified).Should(BeFalse())
+				Expect(out.String()).ShouldNot(ContainSubstring("warning:"))
+				Expect(out.String()).ShouldNot(ContainSubstring("cannot list them"))
 				Expect(out.String()).ShouldNot(ContainSubstring("installation verified"))
 			})
 		})
@@ -1087,6 +1143,8 @@ var _ = Describe("LiveStage", func() {
 		It("should create the single component a smoke run selects", func() {
 			fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
 			dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+			kubernetes := kubernetesfake.NewSimpleClientset()
+			allowEgressProbeAccess(kubernetes)
 			stage := &LiveStage{
 				Request: config.Request{
 					Provider:        config.ProviderGitHub,
@@ -1098,7 +1156,7 @@ var _ = Describe("LiveStage", func() {
 					ComponentPaths:  []string{"history-worker/Dockerfile"},
 					TektonPaths:     []string{".tekton/konflux-test-mathwizz-history-worker-push.yaml"},
 				},
-				Clients:     &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+				Clients:     &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetes},
 				ProbeEgress: reachableEgressProbe,
 				Provider:    &githubAppProviderStub{fixture: fixture},
 				Fixture:     fixture,
@@ -1131,6 +1189,8 @@ var _ = Describe("LiveStage", func() {
 		It("should create all three components in request order", func() {
 			fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
 			dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+			kubernetes := kubernetesfake.NewSimpleClientset()
+			allowEgressProbeAccess(kubernetes)
 			stage := &LiveStage{
 				Request: config.Request{
 					Provider:        config.ProviderGitHub,
@@ -1145,7 +1205,7 @@ var _ = Describe("LiveStage", func() {
 						".tekton/konflux-test-mathwizz-frontend-push.yaml",
 					},
 				},
-				Clients:     &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+				Clients:     &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetes},
 				ProbeEgress: reachableEgressProbe,
 				Provider:    &githubAppProviderStub{fixture: fixture},
 				Fixture:     fixture,

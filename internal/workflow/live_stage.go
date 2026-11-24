@@ -164,9 +164,10 @@ func NewLiveStage(request config.Request, clients *cluster.ClientSet, provider p
 
 // Preflight validates the cluster, required APIs, platform scheduling, and tenant namespace.
 // For GitHub it also verifies that the published App can onboard the fixture repository,
-// waiting when an interactive run approves a pending installation. It records the target
-// cluster in manifest and deletes stale tenant namespaces, so a partially executed
-// preflight can already have removed cluster resources.
+// waiting when an interactive run approves a pending installation. For selections with
+// public build dependencies it creates the tenant namespace and authorizes the probe pod
+// lifecycle. It records the target cluster in manifest and deletes stale tenant namespaces,
+// so a partially executed preflight can already have removed or created cluster resources.
 func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) error {
 	spec := cluster.PreflightSpec{ExpectedServer: s.Request.ClusterServer, AccessChecks: s.accessChecks(), Scheduling: cluster.SchedulingSpec{
 		Namespace:  cluster.MultiPlatformControllerNamespace,
@@ -198,6 +199,25 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 	}
 	if err := s.ensureTenantNamespaceAvailable(ctx, manifest); err != nil {
 		return err
+	}
+	if len(s.Request.EgressRequirements()) > 0 {
+		if s.Clients == nil {
+			return fmt.Errorf("cluster clients are not initialized")
+		}
+		namespace := manifest.Fixture.TenantNamespace
+		if namespace == "" {
+			namespace = s.Request.TenantNamespace
+		}
+		// Record the namespace before creating it so finalization can clean up
+		// even when the probe authorization fails here.
+		manifest.Fixture.TenantNamespace = namespace
+		fixtures := cluster.FixtureService{Dynamic: s.Clients.Dynamic, Kubernetes: s.Clients.Kubernetes}
+		if err := fixtures.EnsureNamespace(ctx, namespace, manifest.RunID); err != nil {
+			return err
+		}
+		if err := s.checkEgressProbeAccess(ctx, namespace); err != nil {
+			return err
+		}
 	}
 	manifest.TargetClusterServer = s.Request.ClusterServer
 	return nil
@@ -298,6 +318,31 @@ func (s *LiveStage) limitToInternetFreeComponents(ctx context.Context, namespace
 	return nil
 }
 
+// egressProbeAccessCheck authorizes one short-lived probe pod lifecycle.
+func egressProbeAccessCheck(namespace string) cluster.AccessCheck {
+	return cluster.AccessCheck{
+		Name:      "egress probe pods",
+		Resource:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+		Namespace: namespace,
+		Verbs:     []string{"create", "get", "delete"},
+		Guidance:  "grant create, get, and delete on pods in the tenant namespace so LKMABT can verify cluster internet access before building components that download from public registries",
+	}
+}
+
+// checkEgressProbeAccess verifies the run can create, read, and delete the
+// probe pod. It runs after EnsureNamespace so a ProjectRequest-created project
+// has already bound its requester as project admin.
+func (s *LiveStage) checkEgressProbeAccess(ctx context.Context, namespace string) error {
+	if s.Clients == nil || s.Clients.Kubernetes == nil {
+		return fmt.Errorf("kubernetes client is required for the egress probe")
+	}
+	check := egressProbeAccessCheck(namespace)
+	if details := cluster.AuthorizeVerbs(ctx, s.Clients.Kubernetes, check); details != "" {
+		return fmt.Errorf("egress probe access check failed: %s", details)
+	}
+	return nil
+}
+
 // probeEgress runs the configured egress probe; a test may replace it, while a
 // live run uses the cluster client.
 func (s *LiveStage) probeEgress(ctx context.Context, namespace, target string) (cluster.EgressResult, error) {
@@ -329,26 +374,14 @@ func egressReason(target, detail string) string {
 	return reason
 }
 
-// accessChecks lists the API versions preflight must verify. A selection whose
-// builds need public internet also authorizes the probe pod lifecycle, so a
-// missing permission fails preflight with guidance instead of mid-fixture.
+// accessChecks lists the API versions preflight must verify.
 func (s *LiveStage) accessChecks() []cluster.AccessCheck {
-	checks := []cluster.AccessCheck{
+	return []cluster.AccessCheck{
 		{Name: "pipelineruns", Resource: PipelineRunGVR, Namespace: s.Request.TenantNamespace},
 		{Name: "taskruns", Resource: cluster.TaskRunGVR, Namespace: s.Request.TenantNamespace},
 		{Name: "applications", Resource: cluster.ApplicationGVR, Namespace: s.Request.TenantNamespace},
 		{Name: "components", Resource: cluster.ComponentGVR, Namespace: s.Request.TenantNamespace},
 	}
-	if len(s.Request.EgressRequirements()) > 0 {
-		checks = append(checks, cluster.AccessCheck{
-			Name:      "egress probe pods",
-			Resource:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
-			Namespace: s.Request.TenantNamespace,
-			Verbs:     []string{"create", "get", "delete"},
-			Guidance:  "grant create, get, and delete on pods in the tenant namespace so LKMABT can verify cluster internet access before building components that download from public registries",
-		})
-	}
-	return checks
 }
 
 // githubAppVerification reports the context remaining valid for preflight and
@@ -361,8 +394,10 @@ type githubAppVerification struct {
 
 // verifyGitHubApp rejects clusters whose published GitHub App cannot onboard the fixture repository.
 // An interactive run opens the installation page and waits for an organization administrator to approve it.
-// ErrUnverifiable downgrades to a warning with Verified false; the returned Context is the caller's
-// context unless an approved installation wait outlived it and continued on ParentContext.
+// ErrUnverifiable leaves the App unverified with Verified false; the expected
+// gh OAuth token limitation is silent, while any other cause is recorded as a
+// warning. The returned Context is the caller's context unless an approved
+// installation wait outlived it and continued on ParentContext.
 func (s *LiveStage) verifyGitHubApp(ctx context.Context) (githubAppVerification, error) {
 	result := githubAppVerification{Context: ctx}
 	if s.Clients == nil {
@@ -387,7 +422,12 @@ func (s *LiveStage) verifyGitHubApp(ctx context.Context) (githubAppVerification,
 		wait.Slug = required.AppSlug
 		return wait, nil
 	case errors.Is(err, providers.ErrUnverifiable):
-		s.notice("warning: %v", err)
+		// A gh OAuth user token cannot list installation repositories; that
+		// expected limitation stays silent. Any other unverifiable check is a
+		// real observability gap, so record why fixture access was not verified.
+		if !errors.Is(err, providers.ErrTokenCannotListInstallationRepositories) {
+			s.notice("warning: %v", err)
+		}
 		return result, nil
 	default:
 		return result, err
@@ -500,7 +540,9 @@ func (s *LiveStage) pollGitHubAppInstallation(ctx context.Context, checker clust
 				return true, nil
 			}
 			if errors.Is(err, providers.ErrUnverifiable) {
-				s.notice("warning: %v", err)
+				if !errors.Is(err, providers.ErrTokenCannotListInstallationRepositories) {
+					s.notice("warning: %v", err)
+				}
 				return false, nil
 			}
 			var selection *providers.AppRepositorySelectionError

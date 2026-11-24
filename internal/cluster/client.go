@@ -202,11 +202,18 @@ func (c *RealCluster) CheckAccess(ctx context.Context, checks []AccessCheck) []C
 			results = append(results, result)
 			continue
 		}
-		result.Details = authorizeVerbs(ctx, c.Clients.Kubernetes, check)
+		result.Details = AuthorizeVerbs(ctx, c.Clients.Kubernetes, check)
 		result.Passed = result.Details == ""
 		results = append(results, result)
 	}
 	return results
+}
+
+// AuthorizeVerbs returns failure details when the current user may not perform
+// every verb in check; it returns an empty string when all verbs are allowed.
+// It verifies authorization only, not that the resource is served.
+func AuthorizeVerbs(ctx context.Context, kubernetesClient kubernetes.Interface, check AccessCheck) string {
+	return authorizeVerbs(ctx, kubernetesClient, check)
 }
 
 // authorizeVerbs returns failure details from one SelfSubjectAccessReview per verb,

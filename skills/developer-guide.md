@@ -72,7 +72,7 @@ PipelineRuns.
 - Resolves kubeconfig paths (`~` expansion, relative-to-file); the default is `~/.kube/config-<catalog>`, kflux's own per-cluster path
 
 **`internal/clusterauth/`** — Authentication ladder
-- Every non-ROKS kubeconfig is verified with `oc whoami` on every run: an expired token leaves the file readable, so readability proves nothing. A rejected default-path kubeconfig is refreshed through `kflux cluster login`; before login, `kflux cluster list --output json` resolves real host labels such as `stone-stage-p01` to catalog aliases such as `stg-p01`, and the alias names the default kubeconfig. If a batch kflux login fails, each cluster is retried individually so an unknown catalog cannot block valid ones. A custom-path kubeconfig or an unresolved cluster falls back to `oc login` only when the entry has a server or a readable kubeconfig; a missing kubeconfig with no server fails with guidance rather than using the ambient context. `type: roks` entries are verified and refreshed through the IBM Cloud CLI
+- Every non-ROKS kubeconfig is verified with `oc whoami` on every run: an expired token leaves the file readable, so readability proves nothing. A rejected default-path kubeconfig is refreshed through `kflux cluster login`; before login, `kflux cluster list --output json` resolves real host labels such as `stone-stage-p01` to catalog aliases such as `stg-p01`, and the alias names the default kubeconfig. Names absent from the listing are excluded from the batch login, and a failed batch is retried individually so one bad cluster cannot block valid ones. A custom-path kubeconfig or an unresolved cluster falls back to `oc login` only when the entry has a server or a readable kubeconfig; a missing kubeconfig with no server fails with guidance rather than using the ambient context. `type: roks` entries are verified and refreshed through the IBM Cloud CLI
 - ROKS: `ibmcloud target` probes for an active session, `ibmcloud login --sso` runs when absent, `ibmcloud ks cluster config --cluster <ibmcloud> --endpoint <ibmcloud-endpoint>` writes the entry's kubeconfig through `KUBECONFIG`, and a second `oc whoami` verifies the result
 - Non-interactive checks are bounded (`oc whoami` 60s, `ibmcloud target`/`ks cluster config` 2m) so one stalled credential plugin fails that cluster instead of blocking the run; only `ibmcloud login --sso` stays interactive
 
@@ -98,7 +98,7 @@ PipelineRuns.
 - `RealCluster` wraps k8s client-go operations
 - Preflight checks validate cluster prerequisites (multi-platform-controller deployment, host-config entries). `CheckScheduling` classifies each requested platform; `RunPreflight` treats an undeclared platform as informational and a declared but incomplete platform as a failure, and the workflow narrows `Request.Platforms` to the supported subset
 - `EgressProbe` (`egress.go`) runs one short-lived pod in the tenant namespace and reports whether it reached an external URL; component profiles declare their build's public endpoints (`EgressTargets`), so every selected component whose endpoint is unreachable is dropped before `EnsureFixture` creates it, and `LiveStage.limitToInternetFreeComponents` prints the component selection alert. Only the probe script's failure exit code counts as unreachable; eviction, OOM, deadline termination, an unschedulable pod, and an unpullable probe image are unknown-outcome errors, not drops
-- `FixtureService.EnsureNamespace` creates or adopts the tenant namespace without fixture resources, so the egress probes can run before any component exists
+- `FixtureService.EnsureNamespace` creates or adopts the tenant namespace without fixture resources; for internet-dependent selections, preflight replaces stale namespaces, calls `EnsureNamespace`, and authorizes the probe pod lifecycle after that call, when a `ProjectRequest`-created namespace has bound the requester as project admin. The egress probes then run before any component exists
 - `AdmissionInspector.QuotaMessage` reads the Kueue `QuotaReserved=False` condition for the Workload owned by a pending PipelineRun
 - GitHub preflight reads the cluster's app slug from `info.json` in the `konflux-info/konflux-public-info` ConfigMap and confirms that the app is installed for the fixture organization; interactive runs open the installation page and wait until the installation appears
 - Build output verification confirms that node evidence (Buildah outputs) matches the expected architectures
@@ -128,7 +128,7 @@ PipelineRuns.
 
 **`internal/cleanup/`** — Namespace lifecycle management
 - Creates namespaces labeled with `app.konflux-ci.org/managed-by=lkmabt`
-- Prompts before deletion (retains the namespace on user decline, failure-artifact collection errors, or an unavailable prompt during finalization); `cleanup` fails with an explicit error when the prompt is unavailable
+- Prompts before deletion (retains the namespace on user decline, failure-artifact collection errors, or an unavailable prompt during finalization); an aggregate run records each run-owned namespace and asks once after the last cluster, and `cleanup` fails with an explicit error when the prompt is unavailable
 - Strips finalizers from known deadlock-prone resources before namespace deletion and re-strips them while waiting for deletion
 
 **`skills/`** — Deep-dive reference files for agents.
@@ -162,7 +162,7 @@ definitions via import when the same GVR is needed across packages.
 3. **Triggered** — Set each fixture PipelineRun's `build-platforms` parameter to the selected architectures, append trigger comments to Dockerfiles, commit changes. Configuration commits use the `lkmabt configure [skip ci]` subject so PaC creates no throwaway PipelineRun for them
 4. **Builds Verified** — Wait for each component's Buildah TaskRuns to succeed (timeout configurable); capture each component's build-output evidence on the poll that observes its build success, while its PipelineRun and TaskRuns still exist. The PipelineRun's post-build tasks are not a completion gate
 5. **Build Outputs Verified** — Confirm the captured evidence provides one successful output per selected architecture, fetching only components that were not captured
-6. **Completed** — Prompt for namespace cleanup
+6. **Completed** — Record namespace ownership for the aggregate cleanup prompt
 
 On failure, transition to **Failed** phase and collect artifacts. Clusters run
 sequentially in clusters-file order; each completes or fails before the next
@@ -275,8 +275,8 @@ context until the installation appears or the run is canceled.
 Declining, or a non-interactive run, fails with the installation URL.
 Installations limited to selected repositories must include the fixture;
 a confirmed selection that omits it fails the wait immediately with the
-installation settings URL, while selections the token cannot list log a
-warning and continue. After an approved wait that outlives the preflight
+installation settings URL, while selections the token cannot list are skipped
+without user-facing output. After an approved wait that outlives the preflight
 deadline, the remaining preflight steps continue on the run context.
 
 ### Provider Credential Lifecycle
@@ -295,10 +295,11 @@ verifies the cluster App against the fixture. A classic or OAuth token may need
 the `read:user` scope to list selected-installation repositories; add it with
 `gh auth refresh -h github.com -s read:user`. GitHub rejects a `gh` OAuth user
 token (`gho_`) for that endpoint even with the scope, so the acquisition check
-skips it and preflight keeps the warning path. The acquisition check does not
-require the fixture in every installation because the cluster app slug is
-unknown there; a listing that remains unverifiable after the browser login still
-only produces the preflight warning. When `GITLAB_BOT_TOKEN` is empty, GitLab opens the prefilled PAT page (1-day
+skips it and preflight skips the listing without user-facing output. Other
+unverifiable causes, such as a rate limit or missing scope, are recorded as a
+warning. The acquisition check does not require the fixture in every installation because
+the cluster app slug is unknown there; a listing that remains unverifiable
+after the browser login does not block the run. When `GITLAB_BOT_TOKEN` is empty, GitLab opens the prefilled PAT page (1-day
 expiration, `api` and `write_repository`) and prompts for the token without
 echo; the token is used directly and is never written to the credential store.
 The ephemeral GitLab token is also written to the tenant SCM Secret for PaC;

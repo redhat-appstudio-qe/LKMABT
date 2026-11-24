@@ -8,13 +8,17 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/redhat-appstudio/lkmabt/internal/cleanup"
 	"github.com/redhat-appstudio/lkmabt/internal/cluster"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
+	kubetesting "k8s.io/client-go/testing"
 )
 
 const (
@@ -179,9 +183,11 @@ var _ = Describe("LiveStage internet preflight", func() {
 		request.Provider = config.ProviderGitHub
 		request.ApplicationName = "app"
 		request.SourceBranch = "main"
+		kubernetes := kubernetesfake.NewSimpleClientset()
+		allowEgressProbeAccess(kubernetes)
 		stage := &LiveStage{
 			Request:     request,
-			Clients:     &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+			Clients:     &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetes},
 			ProbeEgress: probe.probe,
 			Provider:    &githubAppProviderStub{fixture: fixture},
 			Fixture:     fixture,
@@ -198,17 +204,32 @@ var _ = Describe("LiveStage internet preflight", func() {
 		Expect(log.String()).Should(ContainSubstring("not built: mathwizz-frontend"))
 	})
 
-	It("should authorize the probe pod lifecycle only when a component declares an endpoint", func() {
-		stage := &LiveStage{Request: fullSelectionRequest()}
-		checks := stage.accessChecks()
+	It("should check probe pod access during preflight", func() {
+		fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
+		dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+		kubernetes := kubernetesfake.NewSimpleClientset()
+		kubernetes.PrependReactor("create", "selfsubjectaccessreviews", func(kubetesting.Action) (bool, runtime.Object, error) {
+			return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Reason: "rbac denied"}}, nil
+		})
+		request := fullSelectionRequest()
+		request.Provider = config.ProviderGitLab
+		request.ClusterServer = "https://api.example"
+		stage := &LiveStage{
+			Request:          request,
+			Clients:          &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetes},
+			PreflightCluster: fakePreflightCluster{server: request.ClusterServer},
+			Namespace:        cleanup.NamespaceService{Dynamic: dynamic, NameLister: testNameLister{}},
+			Provider:         &githubAppProviderStub{fixture: fixture},
+			Fixture:          fixture,
+		}
+		manifest := &model.RunManifest{RunID: "run-1"}
 
-		Expect(checks).Should(HaveLen(5))
-		Expect(checks[4].Name).Should(Equal("egress probe pods"))
-		Expect(checks[4].Namespace).Should(Equal("tenant"))
-		Expect(checks[4].Verbs).Should(Equal([]string{"create", "get", "delete"}))
-		Expect(checks[4].Guidance).Should(ContainSubstring("internet access"))
+		err := stage.Preflight(context.Background(), manifest)
 
-		offline := &LiveStage{Request: config.Request{ComponentNames: []string{"custom"}, ComponentPaths: []string{"Dockerfile"}, TektonPaths: []string{"pipeline.yaml"}}}
-		Expect(offline.accessChecks()).Should(HaveLen(4))
+		Expect(err).Should(MatchError(ContainSubstring("egress probe access check failed")))
+		Expect(err).Should(MatchError(ContainSubstring("rbac denied")))
+		Expect(manifest.Fixture.TenantNamespace).Should(Equal("tenant"))
+		_, getErr := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+		Expect(getErr).ShouldNot(HaveOccurred())
 	})
 })

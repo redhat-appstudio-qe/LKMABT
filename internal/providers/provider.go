@@ -16,6 +16,11 @@ import (
 // the available credentials.
 var ErrUnverifiable = errors.New("cluster integration cannot be verified")
 
+// ErrTokenCannotListInstallationRepositories marks the expected limitation of
+// gh OAuth user tokens, which GitHub rejects for installation repository listing.
+// It is wrapped with ErrUnverifiable and is not a user-facing warning.
+var ErrTokenCannotListInstallationRepositories = errors.New("GitHub token cannot list installation repositories")
+
 // ErrInsufficientGitHubAccess marks a GitHub credential that GitHub rejected or
 // that lacks the fixture repository permissions LKMABT requires.
 var ErrInsufficientGitHubAccess = errors.New("GitHub credential cannot access the fixture organization or repository")

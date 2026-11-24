@@ -208,7 +208,8 @@ func (a *Adapter) CheckInstallationRepositoryAccess(ctx context.Context) error {
 	// GitHub rejects gh OAuth user tokens (gho_*) for the installation
 	// repositories endpoint even with read:user, requiring a GitHub App user
 	// token, personal access token, or basic auth. Keep the gh login usable and
-	// leave fixture-selection verification to preflight's warning path.
+	// leave fixture-selection verification to preflight, which skips an
+	// unverifiable listing without user-facing output.
 	if a.oauthToken {
 		return nil
 	}
@@ -308,7 +309,7 @@ func (a *Adapter) VerifyGitHubAppInstallation(ctx context.Context, appSlug strin
 	}
 	for _, installation := range installations {
 		if installation.GetAppSlug() == appSlug {
-			return verifyGitHubAppRepositories(ctx, a.client, installation, appSlug)
+			return verifyGitHubAppRepositories(ctx, a.client, installation, appSlug, a.oauthToken)
 		}
 	}
 	return &providers.AppInstallationRequiredError{
@@ -325,7 +326,9 @@ func installationSettingsURL(installation *gh.Installation) string {
 }
 
 // verifyGitHubAppRepositories rejects installations that cannot reach the fixture repository.
-func verifyGitHubAppRepositories(ctx context.Context, client client, installation *gh.Installation, appSlug string) error {
+// A gh OAuth user token cannot list installation repositories, so a selected-repository
+// installation is reported unverifiable without an API call that is certain to be rejected.
+func verifyGitHubAppRepositories(ctx context.Context, client client, installation *gh.Installation, appSlug string, oauthToken bool) error {
 	if installation.SuspendedAt != nil {
 		return fmt.Errorf("GitHub App %s installation in %s is suspended", appSlug, canonicalOwner)
 	}
@@ -333,6 +336,9 @@ func verifyGitHubAppRepositories(ctx context.Context, client client, installatio
 	case "all":
 		return nil
 	case "selected":
+		if oauthToken {
+			return fmt.Errorf("%w: %w: GitHub App %s is installed for selected repositories in %s and a gh OAuth user token cannot list them", providers.ErrUnverifiable, providers.ErrTokenCannotListInstallationRepositories, appSlug, canonicalOwner)
+		}
 		repositories, err := client.ListUserInstallationRepositories(ctx, installation.GetID())
 		if err != nil {
 			return fmt.Errorf("%w: GitHub App %s is installed for selected repositories in %s, so its access to %s/%s cannot be verified: %v; add the repository to the installation and use a token that can list installation repositories, or select all repositories", providers.ErrUnverifiable, appSlug, canonicalOwner, canonicalOwner, canonicalName, err)

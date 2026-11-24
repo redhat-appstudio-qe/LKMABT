@@ -359,6 +359,19 @@ var _ = Describe("VerifyGitHubAppInstallation", func() {
 			Expect(err).Should(MatchError(ContainSubstring("cannot be verified")))
 			Expect(errors.Is(err, providers.ErrUnverifiable)).Should(BeTrue())
 		})
+
+		It("should skip the listing for a gh OAuth user token", func() {
+			client := &fakeClient{
+				installations: []*gh.Installation{{ID: gh.Int64(7), AppSlug: gh.String("cluster-app"), RepositorySelection: gh.String("selected")}},
+			}
+			adapter := New(client)
+			adapter.oauthToken = true
+
+			err := adapter.VerifyGitHubAppInstallation(context.Background(), "cluster-app")
+			Expect(errors.Is(err, providers.ErrUnverifiable)).Should(BeTrue())
+			Expect(errors.Is(err, providers.ErrTokenCannotListInstallationRepositories)).Should(BeTrue())
+			Expect(client.installationRepoCalls).Should(BeEmpty())
+		})
 	})
 
 	When("the installation is suspended", func() {

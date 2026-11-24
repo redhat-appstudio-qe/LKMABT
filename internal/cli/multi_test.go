@@ -725,7 +725,7 @@ var _ = Describe("finishAggregateRun", func() {
 			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Platforms: []string{"linux/arm64"}}}}}
 			console := &Console{Out: &bytes.Buffer{}}
 
-			Expect(finishAggregateRun(aggregate, request, runs, console, nil)).Should(Succeed())
+			Expect(finishAggregateRun(aggregate, request, runs, console, nil, nil)).Should(Succeed())
 
 			markdownPath, htmlPath := aggregate.reportPaths()
 			for _, path := range []string{markdownPath, htmlPath} {
@@ -754,7 +754,7 @@ var _ = Describe("finishAggregateRun", func() {
 			request := config.Request{Provider: config.ProviderGitHub, Smoke: true, Platforms: []string{"linux/arm64"}}
 			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted}}}}
 
-			Expect(finishAggregateRun(aggregate, request, runs, &Console{Out: io.Discard}, nil)).Should(Succeed())
+			Expect(finishAggregateRun(aggregate, request, runs, &Console{Out: io.Discard}, nil, nil)).Should(Succeed())
 
 			markdownPath, _ := aggregate.reportPaths()
 			markdown := readFile(markdownPath)
@@ -771,7 +771,7 @@ var _ = Describe("finishAggregateRun", func() {
 			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Err: errors.New("build failed")}}}}
 			console := &Console{Out: &bytes.Buffer{}}
 
-			err = finishAggregateRun(aggregate, request, runs, console, nil)
+			err = finishAggregateRun(aggregate, request, runs, console, nil, nil)
 			Expect(err).Should(MatchError(ContainSubstring("cluster c1 github run: build failed")))
 			Expect(console.Out.(*bytes.Buffer).String()).Should(ContainSubstring("c1 github: failed (completed); architectures: not tested"))
 			markdownPath, _ := aggregate.reportPaths()
@@ -788,7 +788,7 @@ var _ = Describe("finishAggregateRun", func() {
 			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Err: errors.New("build failed; finalization failed: delete denied")}}}}
 			console := &Console{Out: &bytes.Buffer{}}
 
-			err = finishAggregateRun(aggregate, request, runs, console, nil)
+			err = finishAggregateRun(aggregate, request, runs, console, nil, nil)
 			Expect(err).Should(MatchError(ContainSubstring("build failed; finalization failed: delete denied")))
 			output := console.Out.(*bytes.Buffer).String()
 			Expect(output).Should(ContainSubstring("c1 github: failed (completed)"))
@@ -854,9 +854,11 @@ var _ = Describe("RunClusters", func() {
 			clustersPath := writeClustersFile(dir, entries...)
 			request := config.Request{Command: config.CommandRun, Provider: config.ProviderBoth, StateDir: stateDir, ClustersFile: clustersPath, Timeouts: config.Defaults().Timeouts, Credentials: config.Credentials{GitLabToken: "glpat-configured-token"}}
 			runner := &artifactWritingRunner{fail: map[string]error{"c2/gitlab": errors.New("gitlab failed")}}
+			console := &Console{Out: &bytes.Buffer{}}
 
-			err := RunClusters(context.Background(), request, runner, &Console{Out: io.Discard})
+			err := RunClusters(context.Background(), request, runner, console)
 			Expect(err).Should(MatchError(ContainSubstring("cluster c2 gitlab run: gitlab failed")))
+			Expect(console.Out.(*bytes.Buffer).String()).Should(ContainSubstring("  gitlab: gitlab failed"))
 
 			markdown := readFile(latestReportPath(stateDir, "md"))
 			Expect(markdown).Should(ContainSubstring("| [c1](#cluster-c1) | passed |  | not determined |"))

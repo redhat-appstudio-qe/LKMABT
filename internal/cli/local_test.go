@@ -103,6 +103,7 @@ var _ = Describe("NewLiveRunner", func() {
 
 			Expect(runner.Out).Should(BeIdenticalTo(out))
 			Expect(runner.Interactive).Should(BeTrue())
+			Expect(runner.Deletions).ShouldNot(BeNil())
 		})
 	})
 })

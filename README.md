@@ -111,9 +111,11 @@ to label it for cleanup, and permission to delete it during cleanup. Inside
 the namespace the run needs access to `pipelineruns`, `taskruns`,
 `applications`, and `components`. When the selection includes a component that
 downloads from a public endpoint, the run also needs `create`, `get`, and
-`delete` on `pods` there: LKMABT runs one short-lived probe pod per distinct
-endpoint to test the cluster's internet egress before it creates those
-components. GitLab runs also need `get`,
+`delete` on `pods` there: during preflight, after replacing stale namespaces and creating the tenant namespace, LKMABT checks
+those permissions and later runs one short-lived probe pod per distinct endpoint to
+test the cluster's internet egress before it creates those components. A
+namespace created through `ProjectRequest` grants its requester project admin,
+so the probe check passes there without a separate grant. GitLab runs also need `get`,
 `create`, and `update` on Secrets there, plus `delete` when the run acquires its
 own GitLab token. If you administer an existing namespace, grant the Secret and
 pod access with:
@@ -296,8 +298,9 @@ through to kflux or `oc login`.
 For OpenShift (`ocp`) entries with default-path kubeconfigs that are missing or
 rejected, LKMABT resolves real host labels through `kflux cluster list` and
 refreshes those kubeconfigs; if `kflux` is missing, LKMABT clones and builds it
-into `~/.local/bin/kflux`. A batch login that hits one unknown catalog is
-retried per cluster so valid clusters still refresh. `oc login` runs only when
+into `~/.local/bin/kflux`. Catalog names absent from the kflux listing are
+excluded from the batch login, and a batch login that still fails is retried per
+cluster so valid clusters still refresh. `oc login` runs only when
 the entry has a server or a readable kubeconfig; a missing kubeconfig with no
 server fails with guidance instead of using the ambient kubeconfig's context.
 An interactive run whose OAuth login page offers a FAS identity provider uses
@@ -398,8 +401,10 @@ failures, rate limits, and timeouts abort the run without replacing the token.
 Classic tokens need `read:org` and may need `read:user` for the installation
 repository listing; `gh` OAuth tokens skip that listing. Cluster preflight also
 lists installation repositories for Apps installed for selected repositories;
-when the token cannot list them, preflight logs a warning and continues, and
-the trigger-stage PaC wait remains the backstop.
+when the token cannot list them, preflight skips that check and continues
+without user-facing output for the expected `gh` OAuth limitation. Other
+unverifiable causes, such as a rate limit or missing scope, are logged as a
+warning. The trigger-stage PaC wait remains the backstop.
 
 **`GITLAB_BOT_TOKEN`.** The token is used as-is and is never revoked. PaC
 reuses an existing usable GitLab SCM Secret (labeled
@@ -587,8 +592,8 @@ exercised, including any requested architecture it skipped. A cluster whose
 first attempt deferred uses the retry result and carries
 `first attempt deferred: <reason>` under its run-logs heading; the first
 attempt's run directory and `run.log` remain available as additional links.
-When the retry completes or fails normally, its namespace cleanup follows the
-normal prompt; a retry that also defers is cleaned up without one.
+When the retry completes or fails normally, its namespace joins the aggregate
+cleanup prompts; a retry that also defers is cleaned up without one.
 
 ### When the cluster GitHub App is not installed
 
@@ -627,9 +632,10 @@ fails immediately at `preflight` with the installation settings URL. Add
 `redhat-appstudio-qe/dr_test_mathwizz` to the installation or select all
 repositories.
 
-**Token cannot list installation repositories.** Preflight logs a warning and
-continues; the PaC wait during triggering remains the backstop for a missing
-selection. This applies to configured tokens and browser logins.
+**Token cannot list installation repositories.** Preflight skips the check and
+continues without user-facing output; the PaC wait during triggering remains the
+backstop for a missing selection. This applies to configured tokens and browser
+logins.
 
 ### During the run
 
@@ -658,16 +664,17 @@ selection. This applies to configured tokens and browser logins.
   automatically and logged. Namespaces with absent or different ownership
   labels are prompted individually and re-inspected before deletion. Declining
   fails that cluster at `preflight`.
-- After success, LKMABT collects and verifies the run artifacts, then prompts
-  before deleting the current tenant namespace. Declining keeps the namespace
-  and the successful result. After failure, it saves the failure artifacts
-  first, then prompts; if collection is incomplete, it skips the prompt and
-  retains the namespace. Required snapshots retry transient network timeouts and
-  API 408/429/5xx responses twice with backoff before collection is declared
+- After success, LKMABT collects and verifies the run artifacts and records the
+  tenant namespace for cleanup; after the last cluster, it prompts once for each
+  recorded namespace. Declining keeps the namespace and the successful result.
+  After failure, it saves the failure artifacts first, then records the
+  namespace; if collection is incomplete, it skips the prompt and retains the
+  namespace. Required snapshots retry transient network timeouts and API
+  408/429/5xx responses twice with backoff before collection is declared
   incomplete; optional pod logs continue past individual container errors. A
-  run whose prompt cannot read input (for example, non-interactive stdin)
-  retains the namespace and records the reason in the console and `run.log`;
-  it never treats an unreadable prompt as a decline.
+  namespace whose prompt cannot read input (for example, non-interactive stdin)
+  is retained and the reason is recorded in the console and the aggregate
+  `run.log`; it never treats an unreadable prompt as a decline.
 - Deletion waits after approval, in finalization and `cleanup`, are bounded to
   five minutes and re-strip deadlock-prone finalizers that controllers re-add. A
   namespace that still cannot be deleted fails with its name and the namespace
