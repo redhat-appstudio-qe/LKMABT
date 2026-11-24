@@ -75,7 +75,7 @@ var _ = Describe("EgressProbe", func() {
 				pod := probePod(corev1.PodFailed)
 				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 					Name:  egressProbeContainer,
-					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Error", Message: "fetch failed"}},
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: egressProbeFailureExit, Reason: "Error", Message: "fetch failed"}},
 				}}
 				return true, pod, nil
 			})
@@ -88,6 +88,26 @@ var _ = Describe("EgressProbe", func() {
 			// The fake clientset serves a container log, which the probe prefers
 			// over the pod status; the exact text is client-go's, not ours.
 			Expect(result.Detail).ShouldNot(BeEmpty())
+		})
+	})
+
+	When("the probe pod is evicted after its container starts", func() {
+		It("should fail with an unknown outcome instead of dropping the component", func() {
+			client := egressTestClient(func(kubetesting.Action) (bool, runtime.Object, error) {
+				pod := probePod(corev1.PodFailed)
+				pod.Status.Reason = "Evicted"
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name:  egressProbeContainer,
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "Error"}},
+				}}
+				return true, pod, nil
+			})
+			probe := EgressProbe{Kubernetes: client, Timeout: time.Second, PollInterval: time.Millisecond}
+
+			_, err := probe.Probe(context.Background(), "tenant", target)
+
+			Expect(err).Should(MatchError(ContainSubstring("probe pod failed without a request result")))
+			Expect(err.Error()).Should(ContainSubstring("cluster internet access is unknown"))
 		})
 	})
 
@@ -124,7 +144,7 @@ var _ = Describe("EgressProbe", func() {
 
 			_, err := probe.Probe(context.Background(), "tenant", target)
 
-			Expect(err).Should(MatchError(ContainSubstring("probe pod failed before running")))
+			Expect(err).Should(MatchError(ContainSubstring("probe pod failed without a request result")))
 			Expect(err.Error()).Should(ContainSubstring("cluster internet access is unknown"))
 		})
 	})

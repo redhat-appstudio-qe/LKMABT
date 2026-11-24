@@ -48,6 +48,12 @@ const egressProbeRequestTimeout = 10 * time.Second
 // reason.
 const egressProbeContainer = "probe"
 
+// egressProbeFailureExit is the probe container's exit code for a failed
+// request. Kubernetes can also terminate the container after it starts
+// (eviction, OOM, deadline), so only this code proves the request ran and
+// failed; any other exit leaves the endpoint's reachability unknown.
+const egressProbeFailureExit = 42
+
 // TenantWorkloadNodeLabel and TenantWorkloadNodeValue select the nodes that run
 // Konflux tenant builds. The probe must run there: on a private cluster the
 // tenant nodes have no internet egress while general nodes do, so a probe on a
@@ -62,7 +68,7 @@ const (
 // own runtime performs the request the way the fixture build would. Failures
 // print the HTTP status or the underlying cause (DNS, TLS, reset) so the alert
 // distinguishes them.
-var egressProbeScript = fmt.Sprintf(`fetch(process.argv[1], {signal: AbortSignal.timeout(%d)}).then((response) => { if (!response.ok) { console.error('HTTP ' + response.status); process.exit(1) } process.exit(0) }).catch((error) => { console.error([error.message, error.cause && (error.cause.code || error.cause.message)].filter(Boolean).join(': ')); process.exit(1) })`, egressProbeRequestTimeout.Milliseconds())
+var egressProbeScript = fmt.Sprintf(`fetch(process.argv[1], {signal: AbortSignal.timeout(%d)}).then((response) => { if (!response.ok) { console.error('HTTP ' + response.status); process.exit(%d) } process.exit(0) }).catch((error) => { console.error([error.message, error.cause && (error.cause.code || error.cause.message)].filter(Boolean).join(': ')); process.exit(%d) })`, egressProbeRequestTimeout.Milliseconds(), egressProbeFailureExit, egressProbeFailureExit)
 
 // EgressResult reports whether a cluster pod reached the probe target. Detail
 // explains an unreachable target in one short line; it is empty on success.
@@ -196,8 +202,8 @@ func (p EgressProbe) wait(ctx, parent context.Context, pods typedcorev1.PodInter
 				return EgressResult{Reachable: true}, nil
 			case corev1.PodFailed:
 				detail := p.failureDetail(ctx, pods, pod)
-				if !containerRan(pod) {
-					return EgressResult{}, fmt.Errorf("probe pod failed before running: %s; cluster internet access is unknown", detail)
+				if !probeReportedFailure(pod) {
+					return EgressResult{}, fmt.Errorf("probe pod failed without a request result: %s; cluster internet access is unknown", detail)
 				}
 				return EgressResult{Detail: detail}, nil
 			}
@@ -258,13 +264,14 @@ func (p EgressProbe) failureDetail(ctx context.Context, pods typedcorev1.PodInte
 	return strings.TrimSpace(pod.Status.Message)
 }
 
-// containerRan reports whether the probe container terminated. A pod that
-// failed without ever starting the container (an unpullable image, for
-// example) cannot say anything about the target's reachability.
-func containerRan(pod *corev1.Pod) bool {
+// probeReportedFailure reports whether the probe container exited with the
+// script's failure code. Eviction, OOM, and deadline termination also produce a
+// terminated container, so the exit code is the only proof that the request
+// actually failed.
+func probeReportedFailure(pod *corev1.Pod) bool {
 	for _, status := range pod.Status.ContainerStatuses {
-		if status.State.Terminated != nil {
-			return true
+		if terminated := status.State.Terminated; terminated != nil {
+			return terminated.ExitCode == egressProbeFailureExit
 		}
 	}
 	return false

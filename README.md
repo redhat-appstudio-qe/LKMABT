@@ -172,11 +172,12 @@ at preflight, before triggering up to three components that cannot build.
   that needs it, and the run prints an alert naming the components it will not
   build, the reasons, and the components it will (`not built:` / `reason:` /
   `testing:`). When no selected component can build, the cluster fails fixture
-  setup with those reasons instead of running an empty fixture. A probe that
-  cannot run at all (missing pod permission, an unschedulable pod, or a probe
-  image that cannot be pulled) fails the stage with the API error instead of
-  guessing: the probe image is the frontend's, so its availability says nothing
-  about a backend endpoint.
+  setup with those reasons instead of running an empty fixture. Only the probe
+  script's own failure exit code proves an unreachable endpoint; a probe that
+  cannot report a result (missing pod permission, an unschedulable pod, an
+  image that cannot be pulled, an evicted or OOM-killed pod) fails the stage
+  with the API error instead of guessing. The probe image is the frontend's, so
+  its availability says nothing about a backend endpoint.
 - PaC onboarding is complete for the selected components, with current `.tekton`
   configuration on the fixture branch. Each push PipelineRun must declare a
   `build-platforms` parameter; LKMABT rewrites it and fails when it is absent.
