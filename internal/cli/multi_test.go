@@ -584,9 +584,9 @@ var _ = Describe("reportRows", func() {
 			Expect(row.Stage).Should(Equal("builds-verified"))
 			Expect(row.Error).Should(Equal("build failed"))
 			Expect(row.Links).Should(ContainElement(report.Link{Label: "run directory", Target: "./c1/artifacts-github/"}))
-			Expect(row.Links).Should(ContainElement(report.Link{Label: "manifest.json", Target: "./c1/artifacts-github/manifest.json"}))
+			Expect(row.Links).Should(ContainElement(report.Link{Label: "artifacts-github/manifest.json", Target: "./c1/artifacts-github/manifest.json"}))
 			for _, link := range row.Links {
-				Expect(link.Label).ShouldNot(Equal("collection-report.json"))
+				Expect(link.Target).ShouldNot(ContainSubstring("collection-report.json"))
 			}
 		})
 	})
@@ -613,7 +613,7 @@ var _ = Describe("reportRows", func() {
 			Expect(rows[0].Note).Should(Equal("first attempt deferred: admission pending"))
 			Expect(rows[0].Links).Should(ContainElement(report.Link{Label: "run directory", Target: "./c1/artifacts-github-final/"}))
 			Expect(rows[0].Links).Should(ContainElement(report.Link{Label: "first attempt run directory", Target: "./c1/artifacts-github-first/"}))
-			Expect(rows[0].Links).Should(ContainElement(report.Link{Label: "first attempt run.log", Target: "./c1/artifacts-github-first/run.log"}))
+			Expect(rows[0].Links).Should(ContainElement(report.Link{Label: "first attempt artifacts-github-first/run.log", Target: "./c1/artifacts-github-first/run.log"}))
 		})
 	})
 
@@ -622,17 +622,17 @@ var _ = Describe("reportRows", func() {
 			aggregateDirectory := GinkgoT().TempDir()
 			Expect(os.WriteFile(filepath.Join(aggregateDirectory, testAggregateLog), []byte("aggregate\n"), 0o640)).Should(Succeed())
 			runs := []clusterRun{{
-				Entry:              clusterfile.Entry{Name: "c1"},
-				RequestedPlatforms: []string{"linux/amd64", "linux/s390x"},
-				Results:            []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Platforms: []string{"linux/amd64"}}},
+				Entry:   clusterfile.Entry{Name: "c1"},
+				Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Platforms: []string{"linux/amd64"}}},
 			}}
 
 			rows := reportRows(aggregateDirectory, testAggregateLog, runs, []string{"github"})
 			Expect(rows).Should(HaveLen(1))
-			Expect(rows[0].Note).Should(Equal("tested: linux/amd64"))
+			Expect(rows[0].Platforms).Should(Equal([]string{"linux/amd64"}))
+			Expect(rows[0].Note).Should(BeEmpty())
 		})
 
-		It("should not note a default full selection", func() {
+		It("should keep a default full selection on the row", func() {
 			aggregateDirectory := GinkgoT().TempDir()
 			Expect(os.WriteFile(filepath.Join(aggregateDirectory, testAggregateLog), []byte("aggregate\n"), 0o640)).Should(Succeed())
 			runs := []clusterRun{{
@@ -642,6 +642,7 @@ var _ = Describe("reportRows", func() {
 
 			rows := reportRows(aggregateDirectory, testAggregateLog, runs, []string{"github"})
 			Expect(rows).Should(HaveLen(1))
+			Expect(rows[0].Platforms).Should(Equal(platform.All()))
 			Expect(rows[0].Note).Should(BeEmpty())
 		})
 	})
@@ -687,17 +688,6 @@ var _ = Describe("reportRows", func() {
 	})
 })
 
-var _ = Describe("allPassed", func() {
-	DescribeTable("reporting the aggregate outcome",
-		func(rows []report.Row, expected bool) {
-			Expect(allPassed(rows)).Should(Equal(expected))
-		},
-		Entry("all passed", []report.Row{{Passed: true}, {Passed: true}}, true),
-		Entry("one failed", []report.Row{{Passed: true}, {Passed: false}}, false),
-		Entry("empty", nil, true),
-	)
-})
-
 var _ = Describe("errorText", func() {
 	DescribeTable("rendering errors",
 		func(err error, expected string) {
@@ -732,7 +722,7 @@ var _ = Describe("finishAggregateRun", func() {
 			aggregate, err := newAggregateRun(stateDir)
 			Expect(err).ShouldNot(HaveOccurred())
 			request := config.Request{Provider: config.ProviderGitHub, Platforms: []string{"linux/arm64"}}
-			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted}}}}
+			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Platforms: []string{"linux/arm64"}}}}}
 			console := &Console{Out: &bytes.Buffer{}}
 
 			Expect(finishAggregateRun(aggregate, request, runs, console, nil)).Should(Succeed())
@@ -744,12 +734,31 @@ var _ = Describe("finishAggregateRun", func() {
 				Expect(info.Mode().Perm()).Should(Equal(os.FileMode(0o640)))
 			}
 			output := console.Out.(*bytes.Buffer).String()
-			Expect(output).Should(ContainSubstring("c1 github: passed (completed); requested architectures: linux/arm64"))
+			Expect(output).Should(ContainSubstring("c1 github: passed (completed); architectures: linux/arm64"))
 			Expect(output).Should(ContainSubstring("report: " + markdownPath))
 			Expect(output).Should(ContainSubstring("report: " + htmlPath))
 			markdown, readErr := os.ReadFile(markdownPath)
 			Expect(readErr).ShouldNot(HaveOccurred())
 			Expect(string(markdown)).Should(ContainSubstring("- Requested architectures: linux/arm64"))
+			Expect(string(markdown)).Should(ContainSubstring("- Mode: full"))
+			Expect(string(markdown)).Should(ContainSubstring("- Fixtures: github"))
+			Expect(string(markdown)).Should(ContainSubstring("- Run log: [aggregate run.log](<./" + aggregate.runLogName() + ">)"))
+		})
+	})
+
+	When("the request is a smoke run", func() {
+		It("should record smoke mode in the report", func() {
+			stateDir := GinkgoT().TempDir()
+			aggregate, err := newAggregateRun(stateDir)
+			Expect(err).ShouldNot(HaveOccurred())
+			request := config.Request{Provider: config.ProviderGitHub, Smoke: true, Platforms: []string{"linux/arm64"}}
+			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted}}}}
+
+			Expect(finishAggregateRun(aggregate, request, runs, &Console{Out: io.Discard}, nil)).Should(Succeed())
+
+			markdownPath, _ := aggregate.reportPaths()
+			markdown := readFile(markdownPath)
+			Expect(markdown).Should(ContainSubstring("- Mode: smoke"))
 		})
 	})
 
@@ -760,10 +769,11 @@ var _ = Describe("finishAggregateRun", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			request := config.Request{Provider: config.ProviderGitHub}
 			runs := []clusterRun{{Entry: clusterfile.Entry{Name: "c1"}, Results: []ProviderResult{{Provider: "github", Stage: model.PhaseCompleted, Err: errors.New("build failed")}}}}
-			console := &Console{Out: io.Discard}
+			console := &Console{Out: &bytes.Buffer{}}
 
 			err = finishAggregateRun(aggregate, request, runs, console, nil)
 			Expect(err).Should(MatchError(ContainSubstring("cluster c1 github run: build failed")))
+			Expect(console.Out.(*bytes.Buffer).String()).Should(ContainSubstring("c1 github: failed (completed); architectures: not tested"))
 			markdownPath, _ := aggregate.reportPaths()
 			_, statErr := os.Stat(markdownPath)
 			Expect(statErr).ShouldNot(HaveOccurred())
@@ -819,16 +829,14 @@ var _ = Describe("RunClusters", func() {
 			Expect(readFile(filepath.Join(aggregateDirectory, "c2", "run.log"))).Should(ContainSubstring("cluster c2: running both"))
 
 			markdown := readFile(filepath.Join(aggregateDirectory, runName+"-report.md"))
-			positions := make([]int, 0, 4)
-			for _, row := range []string{"| c1 | github |", "| c1 | gitlab |", "| c2 | github |", "| c2 | gitlab |"} {
-				index := strings.Index(markdown, row)
-				Expect(index).Should(BeNumerically(">=", 0), row)
-				positions = append(positions, index)
-			}
-			for index := 1; index < len(positions); index++ {
-				Expect(positions[index]).Should(BeNumerically(">", positions[index-1]))
-			}
-			Expect(markdown).Should(ContainSubstring("- Result: **passed**"))
+			Expect(markdown).Should(ContainSubstring("- Mode: full"))
+			Expect(markdown).Should(ContainSubstring("- Fixtures: both"))
+			Expect(markdown).Should(ContainSubstring("| [c1](#cluster-c1) | passed |  | not determined |"))
+			Expect(markdown).Should(ContainSubstring("| [c2](#cluster-c2) | passed |  | not determined |"))
+			Expect(strings.Index(markdown, "#cluster-c1")).Should(BeNumerically("<", strings.Index(markdown, "#cluster-c2")))
+			Expect(markdown).Should(ContainSubstring("### c1 run logs"))
+			Expect(markdown).Should(ContainSubstring("### c2 run logs"))
+			Expect(markdown).ShouldNot(ContainSubstring("- Result:"))
 		})
 	})
 
@@ -851,11 +859,8 @@ var _ = Describe("RunClusters", func() {
 			Expect(err).Should(MatchError(ContainSubstring("cluster c2 gitlab run: gitlab failed")))
 
 			markdown := readFile(latestReportPath(stateDir, "md"))
-			Expect(markdown).Should(ContainSubstring("| c1 | github | passed |"))
-			Expect(markdown).Should(ContainSubstring("| c2 | gitlab | failed |"))
-			Expect(markdown).Should(ContainSubstring("| c1 | gitlab | passed |"))
-			Expect(markdown).Should(ContainSubstring("| c2 | github | passed |"))
-			Expect(markdown).Should(ContainSubstring("- Result: **failed**"))
+			Expect(markdown).Should(ContainSubstring("| [c1](#cluster-c1) | passed |  | not determined |"))
+			Expect(markdown).Should(ContainSubstring("| [c2](#cluster-c2) | failed | gitlab: gitlab failed | not determined |"))
 		})
 	})
 
@@ -876,7 +881,7 @@ var _ = Describe("RunClusters", func() {
 
 			aggregateDirectory := singleAggregateDirectory(stateDir)
 			markdown := readFile(latestReportPath(stateDir, "md"))
-			Expect(markdown).Should(ContainSubstring("| c-missing | github | failed | authentication |"))
+			Expect(markdown).Should(ContainSubstring("| [c-missing](#cluster-c-missing) | failed | authentication failed:"))
 			_, statErr := os.Stat(filepath.Join(aggregateDirectory, "c-missing"))
 			Expect(statErr).Should(HaveOccurred())
 		})
@@ -1255,8 +1260,8 @@ var _ = Describe("RunClusters credential authentication", func() {
 			Expect(defaultGitLabRevoke.calls).Should(Equal(1))
 			Expect(runner.requests).Should(HaveLen(2))
 			markdown := readFile(latestReportPath(request.StateDir, "md"))
-			Expect(markdown).Should(ContainSubstring("- Result: **failed**"))
-			Expect(markdown).Should(ContainSubstring("revoke GitLab token: revoke denied"))
+			Expect(markdown).Should(ContainSubstring("- Warning: credential cleanup failed: revoke GitLab token: revoke denied"))
+			Expect(markdown).ShouldNot(ContainSubstring("- Result:"))
 		})
 
 		It("should prompt once, reuse the token, and revoke it", func() {
@@ -1391,8 +1396,8 @@ var _ = Describe("RunClusters credential authentication", func() {
 			Expect(err).Should(MatchError(ContainSubstring("temporary credentials are still present")))
 			Expect(runner.requests).Should(HaveLen(1))
 			markdown := readFile(latestReportPath(request.StateDir, "md"))
-			Expect(markdown).Should(ContainSubstring("| credentials | auth | failed | cleanup |  | temporary credentials are still present |"))
-			Expect(markdown).Should(ContainSubstring("- Result: **failed**"))
+			Expect(markdown).Should(ContainSubstring("- Warning: credential cleanup failed: temporary credentials are still present"))
+			Expect(markdown).ShouldNot(ContainSubstring("- Result:"))
 		})
 	})
 })

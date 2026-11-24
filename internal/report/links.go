@@ -11,28 +11,29 @@ import (
 // aggregate directory. aggregateLog is a slash-relative file name inside that
 // directory; providerDirectory is slash-relative to the cluster directory.
 // An empty cluster yields only the aggregate log, and an empty providerDirectory
-// stops after cluster-level links. Entries appear in a fixed order and only for
-// artifacts that exist when called; files found under logs/ and failed-builds/
-// are labeled with their path relative to the aggregate directory.
+// stops after the cluster run.log. Log files come before the run directory and
+// JSON evidence so the report's log list starts where an operator starts:
+// run.log. Pod logs stay inside the linked run directory instead of becoming
+// hundreds of report rows; curated failed-build logs are linked individually.
+// Entries appear in a fixed order and only for artifacts that exist when
+// called; files found under failed-builds/ are labeled with their path
+// relative to the aggregate directory.
 func Links(aggregateDirectory, aggregateLog, cluster, providerDirectory string) []Link {
-	links := make([]Link, 0, 8)
-	links = appendFile(links, aggregateDirectory, aggregateLog, "aggregate run.log")
 	if cluster == "" {
-		return links
+		return appendFile(make([]Link, 0, 1), aggregateDirectory, aggregateLog, "aggregate run.log")
 	}
-	links = appendDir(links, aggregateDirectory, cluster, "cluster directory")
-	links = appendFile(links, aggregateDirectory, path.Join(cluster, "run.log"), "cluster run.log")
+	links := make([]Link, 0, 8)
+	links = appendFile(links, aggregateDirectory, path.Join(cluster, "run.log"), "run.log")
 	if providerDirectory == "" {
 		return links
 	}
 	base := path.Join(cluster, providerDirectory)
+	links = appendFile(links, aggregateDirectory, path.Join(base, "run.log"), path.Join(providerDirectory, "run.log"))
+	links = appendTree(links, aggregateDirectory, path.Join(base, "failed-builds"), path.Join(providerDirectory, "failed-builds"))
 	links = appendDir(links, aggregateDirectory, base, "run directory")
-	links = appendFile(links, aggregateDirectory, path.Join(base, "run.log"), "run.log")
-	links = appendFile(links, aggregateDirectory, path.Join(base, "manifest.json"), "manifest.json")
-	links = appendFile(links, aggregateDirectory, path.Join(base, "status.json"), "status.json")
-	links = appendFile(links, aggregateDirectory, path.Join(base, "collection-report.json"), "collection-report.json")
-	links = appendTree(links, aggregateDirectory, path.Join(base, "logs"))
-	links = appendTree(links, aggregateDirectory, path.Join(base, "failed-builds"))
+	for _, name := range []string{"manifest.json", "status.json", "collection-report.json"} {
+		links = appendFile(links, aggregateDirectory, path.Join(base, name), path.Join(providerDirectory, name))
+	}
 	return links
 }
 
@@ -57,8 +58,9 @@ func appendDir(links []Link, root, relative, label string) []Link {
 }
 
 // appendTree adds one link per regular file found under the relative subtree,
-// labeling each with its path relative to root and skipping symlinks.
-func appendTree(links []Link, root, relative string) []Link {
+// labeling each with its path below relative prefixed by labelPrefix, so a
+// cluster section can omit the repeated cluster directory. Symlinks are skipped.
+func appendTree(links []Link, root, relative, labelPrefix string) []Link {
 	base := filepath.Join(root, filepath.FromSlash(relative))
 	info, err := os.Stat(base)
 	if err != nil || !info.IsDir() {
@@ -69,12 +71,15 @@ func appendTree(links []Link, root, relative string) []Link {
 		if walkErr != nil || entry.IsDir() || !entry.Type().IsRegular() {
 			return nil
 		}
-		rel, relErr := filepath.Rel(root, current)
+		rel, relErr := filepath.Rel(base, current)
 		if relErr != nil {
 			return nil
 		}
-		target := filepath.ToSlash(rel)
-		links = append(links, Link{Label: target, Target: "./" + target})
+		relSlash := filepath.ToSlash(rel)
+		links = append(links, Link{
+			Label:  path.Join(labelPrefix, relSlash),
+			Target: "./" + path.Join(relative, relSlash),
+		})
 		return nil
 	})
 	return links

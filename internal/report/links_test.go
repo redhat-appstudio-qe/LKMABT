@@ -35,26 +35,39 @@ func writeLinkFixture(root string) {
 
 var _ = Describe("Links", func() {
 	When("cluster and provider directory are given", func() {
-		It("should list every existing artifact in order", func() {
+		It("should list the cluster run.log first, then logs, then evidence", func() {
 			aggregate := GinkgoT().TempDir()
 			writeLinkFixture(aggregate)
 
 			links := Links(aggregate, linkFixtureAggregateLog, "c1", linkFixtureProvider)
 
-			Expect(links[:8]).Should(Equal([]Link{
-				{Label: "aggregate run.log", Target: "./" + linkFixtureAggregateLog},
-				{Label: "cluster directory", Target: "./c1/"},
-				{Label: "cluster run.log", Target: "./c1/run.log"},
+			Expect(links).Should(Equal([]Link{
+				{Label: "run.log", Target: "./c1/run.log"},
+				{Label: linkFixtureProvider + "/run.log", Target: "./c1/" + linkFixtureProvider + "/run.log"},
+				{Label: linkFixtureProvider + "/failed-builds/build-task_step-build.log", Target: "./c1/" + linkFixtureProvider + "/failed-builds/build-task_step-build.log"},
 				{Label: "run directory", Target: "./c1/" + linkFixtureProvider + "/"},
-				{Label: "run.log", Target: "./c1/" + linkFixtureProvider + "/run.log"},
-				{Label: "manifest.json", Target: "./c1/" + linkFixtureProvider + "/manifest.json"},
-				{Label: "status.json", Target: "./c1/" + linkFixtureProvider + "/status.json"},
-				{Label: "collection-report.json", Target: "./c1/" + linkFixtureProvider + "/collection-report.json"},
+				{Label: linkFixtureProvider + "/manifest.json", Target: "./c1/" + linkFixtureProvider + "/manifest.json"},
+				{Label: linkFixtureProvider + "/status.json", Target: "./c1/" + linkFixtureProvider + "/status.json"},
+				{Label: linkFixtureProvider + "/collection-report.json", Target: "./c1/" + linkFixtureProvider + "/collection-report.json"},
 			}))
-			Expect(links[8:]).Should(ConsistOf(
-				Link{Label: "c1/" + linkFixtureProvider + "/logs/pod-a.log", Target: "./c1/" + linkFixtureProvider + "/logs/pod-a.log"},
-				Link{Label: "c1/" + linkFixtureProvider + "/failed-builds/build-task_step-build.log", Target: "./c1/" + linkFixtureProvider + "/failed-builds/build-task_step-build.log"},
-			))
+		})
+
+		It("should keep pod logs behind the run-directory link", func() {
+			aggregate := GinkgoT().TempDir()
+			writeLinkFixture(aggregate)
+
+			for _, link := range Links(aggregate, linkFixtureAggregateLog, "c1", linkFixtureProvider) {
+				Expect(link.Target).ShouldNot(ContainSubstring("/logs/"))
+			}
+		})
+
+		It("should not repeat the aggregate log inside a cluster section", func() {
+			aggregate := GinkgoT().TempDir()
+			writeLinkFixture(aggregate)
+
+			for _, link := range Links(aggregate, linkFixtureAggregateLog, "c1", linkFixtureProvider) {
+				Expect(link.Target).ShouldNot(Equal("./" + linkFixtureAggregateLog))
+			}
 		})
 	})
 
@@ -63,30 +76,23 @@ var _ = Describe("Links", func() {
 			aggregate := GinkgoT().TempDir()
 			writeLinkFixture(aggregate)
 			Expect(os.Remove(filepath.Join(aggregate, "c1", linkFixtureProvider, "collection-report.json"))).Should(Succeed())
-			Expect(os.Remove(filepath.Join(aggregate, "c1", linkFixtureProvider, "logs", "pod-a.log"))).Should(Succeed())
 
 			links := Links(aggregate, linkFixtureAggregateLog, "c1", linkFixtureProvider)
 
 			for _, link := range links {
 				Expect(link.Target).ShouldNot(ContainSubstring("collection-report.json"))
-				Expect(link.Target).ShouldNot(ContainSubstring("pod-a.log"))
 			}
 		})
 	})
 
 	When("no provider directory is given", func() {
-		It("should list only aggregate and cluster artifacts", func() {
+		It("should list only the cluster run.log", func() {
 			aggregate := GinkgoT().TempDir()
 			writeLinkFixture(aggregate)
 
 			links := Links(aggregate, linkFixtureAggregateLog, "c1", "")
 
-			Expect(links).Should(Equal([]Link{
-				{Label: "aggregate run.log", Target: "./" + linkFixtureAggregateLog},
-				{Label: "cluster directory", Target: "./c1/"},
-				{Label: "cluster run.log", Target: "./c1/run.log"},
-			}))
-			Expect(links).Should(HaveLen(3))
+			Expect(links).Should(Equal([]Link{{Label: "run.log", Target: "./c1/run.log"}}))
 		})
 	})
 
@@ -106,17 +112,17 @@ var _ = Describe("Links", func() {
 	})
 
 	When("the logs tree has nested directories", func() {
-		It("should include each regular file with a root-relative label", func() {
+		It("should leave every pod log behind the run-directory link", func() {
 			aggregate := GinkgoT().TempDir()
 			writeLinkFixture(aggregate)
 			writeFixtureFile(filepath.Join(aggregate, "c1", linkFixtureProvider, "logs", "sub", "deep.log"))
 
 			links := Links(aggregate, linkFixtureAggregateLog, "c1", linkFixtureProvider)
 
-			Expect(links).Should(ContainElement(Link{
-				Label:  "c1/" + linkFixtureProvider + "/logs/sub/deep.log",
-				Target: "./c1/" + linkFixtureProvider + "/logs/sub/deep.log",
-			}))
+			for _, link := range links {
+				Expect(link.Target).ShouldNot(ContainSubstring("deep.log"))
+			}
+			Expect(links).Should(ContainElement(Link{Label: "run directory", Target: "./c1/" + linkFixtureProvider + "/"}))
 		})
 	})
 
@@ -127,9 +133,7 @@ var _ = Describe("Links", func() {
 
 			links := Links(aggregate, linkFixtureAggregateLog, "c9", linkFixtureProvider)
 
-			for _, link := range links {
-				Expect(link.Target).ShouldNot(Equal("./c9/"))
-			}
+			Expect(links).Should(BeEmpty())
 		})
 	})
 })

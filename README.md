@@ -576,12 +576,14 @@ retry stays admission-pending too, that cluster fails with
 `cluster remained admission-pending after one retry: <reason>`, where `<reason>`
 carries the Kueue quota message or the PipelineRun condition.
 
-Reports keep one row per cluster and provider. A row whose first attempt
-deferred uses the retry result and puts `first attempt deferred: <reason>` in
-the Note column; the first attempt's run directory and `run.log` remain
-available as additional artifact links. When the retry completes or fails
-normally, its namespace cleanup follows the normal prompt; a retry that also
-defers is cleaned up without one.
+Reports keep one row per cluster. Each row links to the cluster's run-logs
+section and names the failure reason and the architectures the cluster actually
+exercised, including any requested architecture it skipped. A cluster whose
+first attempt deferred uses the retry result and carries
+`first attempt deferred: <reason>` under its run-logs heading; the first
+attempt's run directory and `run.log` remain available as additional links.
+When the retry completes or fails normally, its namespace cleanup follows the
+normal prompt; a retry that also defers is cleaned up without one.
 
 ### When the cluster GitHub App is not installed
 
@@ -784,6 +786,10 @@ selects another root.
   tenant namespace plus `pipelines-as-code`, `tekton-pipelines`,
   `multi-platform-controller`, and `konflux-image-controller`.
 - Report links use concrete paths and include only artifacts that exist.
+- Each report has a run-data header (including mode, fixtures, and the
+  aggregate run-log link), a per-cluster results table linking to each
+  cluster's run-logs section, and one section per cluster that lists `run.log`
+  first.
 - Credential-like fields in JSON evidence are redacted before writing.
 - Incomplete failure-artifact collection suppresses cleanup prompting and
   retains the namespace.

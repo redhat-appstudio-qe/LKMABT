@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/redhat-appstudio/lkmabt/internal/clusterfile"
 	"github.com/redhat-appstudio/lkmabt/internal/config"
 	"github.com/redhat-appstudio/lkmabt/internal/model"
-	"github.com/redhat-appstudio/lkmabt/internal/platform"
 	"github.com/redhat-appstudio/lkmabt/internal/providers"
 	"github.com/redhat-appstudio/lkmabt/internal/providers/github"
 	"github.com/redhat-appstudio/lkmabt/internal/report"
@@ -115,11 +113,10 @@ var readGitLabToken = func() (string, error) {
 // results of its providers. FirstAttempt is set when the first pass deferred and
 // Results comes from the fresh retry, so reports can retain both attempts.
 type clusterRun struct {
-	Entry              clusterfile.Entry
-	AuthErr            error
-	Results            []ProviderResult
-	FirstAttempt       []ProviderResult
-	RequestedPlatforms []string
+	Entry        clusterfile.Entry
+	AuthErr      error
+	Results      []ProviderResult
+	FirstAttempt []ProviderResult
 }
 
 // RunClusters loads the clusters file, acquires provider credentials,
@@ -378,7 +375,7 @@ func scheduleClusters(ctx context.Context, request config.Request, entries []clu
 	runs := make([]clusterRun, len(entries))
 	deferred := make([]int, 0, len(entries))
 	for index, entry := range entries {
-		runs[index] = clusterRun{Entry: entry, AuthErr: authFailures[entry.Name], RequestedPlatforms: request.Platforms}
+		runs[index] = clusterRun{Entry: entry, AuthErr: authFailures[entry.Name]}
 		if runs[index].AuthErr != nil {
 			console.Result(false, fmt.Sprintf("Authenticate cluster %s 🔐", entry.Name))
 			console.Printf("  %v", runs[index].AuthErr)
@@ -529,13 +526,25 @@ func resultSummary(results []ProviderResult) string {
 
 // finishAggregateRun writes the run-named Markdown and HTML reports, prints one
 // summary line per row, and joins cluster, credential-cleanup, and report-writing
-// failures. A non-nil cleanupErr adds a credentials row to the report.
+// failures. A non-nil cleanupErr adds a run warning to the report.
 func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []clusterRun, console *Console, cleanupErr error) error {
 	rows := reportRows(aggregate.Directory, aggregate.runLogName(), runs, providerNames(request.Provider))
-	if cleanupErr != nil {
-		rows = append(rows, report.Row{Cluster: "credentials", Provider: "auth", Stage: report.StageCleanup, Error: cleanupErr.Error(), Links: report.Links(aggregate.Directory, aggregate.runLogName(), "", "")})
+	document := report.Document{
+		RunID:         aggregate.RunID,
+		ClustersFile:  request.ClustersFile,
+		Mode:          runMode(request.Smoke),
+		Fixtures:      request.Provider,
+		Architectures: request.Platforms,
+		StartedAt:     aggregate.StartedAt,
+		EndedAt:       time.Now().UTC(),
+		Rows:          rows,
 	}
-	document := report.Document{RunID: aggregate.RunID, ClustersFile: request.ClustersFile, Architectures: request.Platforms, StartedAt: aggregate.StartedAt, EndedAt: time.Now().UTC(), Passed: allPassed(rows), Rows: rows}
+	if cleanupErr != nil {
+		document.Warnings = append(document.Warnings, "credential cleanup failed: "+cleanupErr.Error())
+	}
+	if links := report.Links(aggregate.Directory, aggregate.runLogName(), "", ""); len(links) > 0 {
+		document.AggregateLog = links[0]
+	}
 	step := console.StartStep("Write reports 📝")
 	writeErr := report.Write(aggregate.Directory, document, aggregate.Name)
 	step.End(writeErr == nil)
@@ -545,7 +554,11 @@ func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []
 		if row.Note != "" {
 			note = "; " + row.Note
 		}
-		console.Printf("%s %s: %s (%s); requested architectures: %s%s", row.Cluster, row.Provider, row.Result(), row.Stage, document.ArchitecturesText(), note)
+		architectures := "not tested"
+		if len(row.Platforms) > 0 {
+			architectures = strings.Join(row.Platforms, ", ")
+		}
+		console.Printf("%s %s: %s (%s); architectures: %s%s", row.Cluster, row.Provider, row.Result(), row.Stage, architectures, note)
 	}
 	markdownPath, htmlPath := aggregate.reportPaths()
 	console.Printf("report: %s", markdownPath)
@@ -622,21 +635,15 @@ func reportRows(aggregateDirectory, aggregateLog string, runs []clusterRun, prov
 			continue
 		}
 		for _, result := range run.Results {
-			note := retryNote(run, result.Provider)
-			if tested := testedPlatformsNote(run.RequestedPlatforms, result.Platforms); tested != "" {
-				if note != "" {
-					note += "; "
-				}
-				note += tested
-			}
 			rows = append(rows, report.Row{
-				Cluster:  run.Entry.Name,
-				Provider: result.Provider,
-				Passed:   result.Err == nil,
-				Stage:    string(result.Stage),
-				Note:     note,
-				Error:    errorText(result.Err),
-				Links:    resultLinks(aggregateDirectory, aggregateLog, run, result),
+				Cluster:   run.Entry.Name,
+				Provider:  result.Provider,
+				Passed:    result.Err == nil,
+				Stage:     string(result.Stage),
+				Note:      retryNote(run, result.Provider),
+				Error:     errorText(result.Err),
+				Platforms: result.Platforms,
+				Links:     resultLinks(aggregateDirectory, aggregateLog, run, result),
 			})
 		}
 	}
@@ -665,22 +672,6 @@ func retryNote(run clusterRun, provider string) string {
 		return "first attempt failed: " + first.Err.Error()
 	}
 	return ""
-}
-
-// testedPlatformsNote reports a per-cluster architecture narrowing so the row
-// and console summary do not claim a skipped architecture was exercised.
-func testedPlatformsNote(requested, tested []string) string {
-	if len(tested) == 0 {
-		return ""
-	}
-	if len(requested) == 0 {
-		// An empty request means the default all-platform selection.
-		requested = platform.All()
-	}
-	if slices.Equal(requested, tested) {
-		return ""
-	}
-	return "tested: " + strings.Join(tested, ", ")
 }
 
 // firstAttemptResult returns a provider's result from the deferred first pass.
@@ -719,22 +710,22 @@ func resultLinks(aggregateDirectory, aggregateLog string, run clusterRun, result
 		return links
 	}
 	for _, link := range report.Links(aggregateDirectory, aggregateLog, run.Entry.Name, first.ArtifactDirectory) {
-		switch link.Label {
-		case "run directory", "run.log":
+		switch {
+		case link.Label == "run directory":
+			links = append(links, report.Link{Label: "first attempt run directory", Target: link.Target})
+		case strings.HasSuffix(link.Label, "run.log"):
 			links = append(links, report.Link{Label: "first attempt " + link.Label, Target: link.Target})
 		}
 	}
 	return links
 }
 
-// allPassed reports whether every row passed.
-func allPassed(rows []report.Row) bool {
-	for _, row := range rows {
-		if !row.Passed {
-			return false
-		}
+// runMode names the component scope recorded in the report.
+func runMode(smoke bool) string {
+	if smoke {
+		return "smoke"
 	}
-	return true
+	return "full"
 }
 
 // errorText renders an error for a report cell.
