@@ -31,9 +31,10 @@ type RetryPolicy struct {
 // provider 5xx errors. The policy is a value; mutating it does not affect later
 // calls.
 //
-// Three attempts, three minutes apart: patient enough for a provider hiccup,
-// short enough that a wedged run still looks wedged. Rate-limit responses (429)
-// are not 5xx and get no retry—they need a different conversation.
+// One attempt plus three retries, three minutes apart: patient enough for a
+// provider hiccup, short enough that a wedged run still looks wedged. Rate-limit
+// responses (429) are not 5xx and get no retry—they need a different
+// conversation.
 func DefaultRetryPolicy() RetryPolicy {
 	return RetryPolicy{MaxRetries: DefaultMax5xxRetries, Delay: Default5xxRetryDelay}
 }
