@@ -298,6 +298,31 @@ func (s *LiveStage) limitToInternetFreeComponents(ctx context.Context, namespace
 	return nil
 }
 
+// egressProbeAccessCheck authorizes one short-lived probe pod lifecycle.
+func egressProbeAccessCheck(namespace string) cluster.AccessCheck {
+	return cluster.AccessCheck{
+		Name:      "egress probe pods",
+		Resource:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+		Namespace: namespace,
+		Verbs:     []string{"create", "get", "delete"},
+		Guidance:  "grant create, get, and delete on pods in the tenant namespace so LKMABT can verify cluster internet access before building components that download from public registries",
+	}
+}
+
+// checkEgressProbeAccess verifies the run can create, read, and delete the
+// probe pod. It runs after EnsureNamespace so a ProjectRequest-created project
+// has already bound its requester as project admin.
+func (s *LiveStage) checkEgressProbeAccess(ctx context.Context, namespace string) error {
+	if s.Clients == nil || s.Clients.Kubernetes == nil {
+		return fmt.Errorf("kubernetes client is required for the egress probe")
+	}
+	check := egressProbeAccessCheck(namespace)
+	if details := cluster.AuthorizeVerbs(ctx, s.Clients.Kubernetes, check); details != "" {
+		return fmt.Errorf("egress probe access check failed: %s", details)
+	}
+	return nil
+}
+
 // probeEgress runs the configured egress probe; a test may replace it, while a
 // live run uses the cluster client.
 func (s *LiveStage) probeEgress(ctx context.Context, namespace, target string) (cluster.EgressResult, error) {
@@ -329,26 +354,14 @@ func egressReason(target, detail string) string {
 	return reason
 }
 
-// accessChecks lists the API versions preflight must verify. A selection whose
-// builds need public internet also authorizes the probe pod lifecycle, so a
-// missing permission fails preflight with guidance instead of mid-fixture.
+// accessChecks lists the API versions preflight must verify.
 func (s *LiveStage) accessChecks() []cluster.AccessCheck {
-	checks := []cluster.AccessCheck{
+	return []cluster.AccessCheck{
 		{Name: "pipelineruns", Resource: PipelineRunGVR, Namespace: s.Request.TenantNamespace},
 		{Name: "taskruns", Resource: cluster.TaskRunGVR, Namespace: s.Request.TenantNamespace},
 		{Name: "applications", Resource: cluster.ApplicationGVR, Namespace: s.Request.TenantNamespace},
 		{Name: "components", Resource: cluster.ComponentGVR, Namespace: s.Request.TenantNamespace},
 	}
-	if len(s.Request.EgressRequirements()) > 0 {
-		checks = append(checks, cluster.AccessCheck{
-			Name:      "egress probe pods",
-			Resource:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
-			Namespace: s.Request.TenantNamespace,
-			Verbs:     []string{"create", "get", "delete"},
-			Guidance:  "grant create, get, and delete on pods in the tenant namespace so LKMABT can verify cluster internet access before building components that download from public registries",
-		})
-	}
-	return checks
 }
 
 // githubAppVerification reports the context remaining valid for preflight and
@@ -602,6 +615,13 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 	// creates components; a dropped component then never exists on the cluster.
 	if len(s.Request.EgressRequirements()) > 0 {
 		if err := fixtures.EnsureNamespace(ctx, namespace, manifest.RunID); err != nil {
+			return err
+		}
+		// Authorize the probe pod lifecycle after the namespace exists: an
+		// OpenShift ProjectRequest binds its requester as project admin, which
+		// grants the pod permissions the probe needs. Checking at preflight,
+		// before stale namespaces are replaced, rejected valid private clusters.
+		if err := s.checkEgressProbeAccess(ctx, namespace); err != nil {
 			return err
 		}
 		if err := s.limitToInternetFreeComponents(ctx, namespace); err != nil {

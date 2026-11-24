@@ -91,6 +91,14 @@ func reachableEgressProbe(context.Context, string, string) (cluster.EgressResult
 	return cluster.EgressResult{Reachable: true}, nil
 }
 
+// allowEgressProbeAccess makes SelfSubjectAccessReview allow the probe pod
+// lifecycle checks in tests that run EnsureFixture with egress requirements.
+func allowEgressProbeAccess(client *kubernetesfake.Clientset) {
+	client.PrependReactor("create", "selfsubjectaccessreviews", func(kubetesting.Action) (bool, runtime.Object, error) {
+		return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true}}, nil
+	})
+}
+
 // fakePreflightCluster satisfies cluster.Cluster for Preflight tests.
 type fakePreflightCluster struct {
 	server       string
@@ -1088,6 +1096,8 @@ var _ = Describe("LiveStage", func() {
 		It("should create the single component a smoke run selects", func() {
 			fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
 			dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+			kubernetes := kubernetesfake.NewSimpleClientset()
+			allowEgressProbeAccess(kubernetes)
 			stage := &LiveStage{
 				Request: config.Request{
 					Provider:        config.ProviderGitHub,
@@ -1099,7 +1109,7 @@ var _ = Describe("LiveStage", func() {
 					ComponentPaths:  []string{"history-worker/Dockerfile"},
 					TektonPaths:     []string{".tekton/konflux-test-mathwizz-history-worker-push.yaml"},
 				},
-				Clients:     &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+				Clients:     &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetes},
 				ProbeEgress: reachableEgressProbe,
 				Provider:    &githubAppProviderStub{fixture: fixture},
 				Fixture:     fixture,
@@ -1132,6 +1142,8 @@ var _ = Describe("LiveStage", func() {
 		It("should create all three components in request order", func() {
 			fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
 			dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+			kubernetes := kubernetesfake.NewSimpleClientset()
+			allowEgressProbeAccess(kubernetes)
 			stage := &LiveStage{
 				Request: config.Request{
 					Provider:        config.ProviderGitHub,
@@ -1146,7 +1158,7 @@ var _ = Describe("LiveStage", func() {
 						".tekton/konflux-test-mathwizz-frontend-push.yaml",
 					},
 				},
-				Clients:     &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+				Clients:     &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetes},
 				ProbeEgress: reachableEgressProbe,
 				Provider:    &githubAppProviderStub{fixture: fixture},
 				Fixture:     fixture,

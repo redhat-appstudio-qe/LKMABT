@@ -111,9 +111,11 @@ to label it for cleanup, and permission to delete it during cleanup. Inside
 the namespace the run needs access to `pipelineruns`, `taskruns`,
 `applications`, and `components`. When the selection includes a component that
 downloads from a public endpoint, the run also needs `create`, `get`, and
-`delete` on `pods` there: LKMABT runs one short-lived probe pod per distinct
-endpoint to test the cluster's internet egress before it creates those
-components. GitLab runs also need `get`,
+`delete` on `pods` there: after creating the tenant namespace, LKMABT checks
+those permissions and runs one short-lived probe pod per distinct endpoint to
+test the cluster's internet egress before it creates those components. A
+namespace created through `ProjectRequest` grants its requester project admin,
+so the probe check passes there without a separate grant. GitLab runs also need `get`,
 `create`, and `update` on Secrets there, plus `delete` when the run acquires its
 own GitLab token. If you administer an existing namespace, grant the Secret and
 pod access with:
