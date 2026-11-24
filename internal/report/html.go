@@ -17,11 +17,14 @@ const htmlTemplateText = `<!DOCTYPE html>
 <meta charset="utf-8">
 <title>LKMABT aggregate run {{.RunID}}</title>
 <style>
-body{font-family:sans-serif;margin:2rem}
+body{font-family:sans-serif;margin:2rem;line-height:1.4}
 table{border-collapse:collapse;width:100%}
 th,td{border:1px solid #999;padding:0.4rem;text-align:left;vertical-align:top}
 .passed{color:#0a7d00}
 .failed{color:#a00000}
+.warning{color:#a00000}
+.note{color:#555}
+section{margin-bottom:1rem}
 </style>
 </head>
 <body>
@@ -31,23 +34,37 @@ th,td{border:1px solid #999;padding:0.4rem;text-align:left;vertical-align:top}
 <li>Ended: {{.EndedAtText}}</li>
 <li>Clusters file: <code>{{.ClustersFile}}</code></li>
 <li>Requested architectures: {{.ArchitecturesText}}</li>
-<li>Result: <span class="{{.Result}}">{{.Result}}</span></li>
-</ul>
+<li>Mode: {{.Mode}}</li>
+<li>Fixtures: {{.Fixtures}}</li>
+{{if .AggregateLog.Target}}<li>Run log: <a href="{{.AggregateLog.Target}}">{{.AggregateLog.Label}}</a></li>
+{{end}}{{range .Warnings}}<li class="warning">Warning: {{.}}</li>
+{{end}}</ul>
+<h2>Run results</h2>
 <table>
-<thead><tr><th>Cluster</th><th>Provider</th><th>Result</th><th>Stage</th><th>Note</th><th>Error</th><th>Artifacts</th></tr></thead>
+<thead><tr><th>Cluster name</th><th>Pass/Fail</th><th>Failure reason</th><th>Run architectures</th></tr></thead>
 <tbody>
-{{range .Rows}}<tr>
-<td>{{.Cluster}}</td>
-<td>{{.Provider}}</td>
+{{range .Clusters}}<tr>
+<td><a href="#{{.Anchor}}">{{.Name}}</a></td>
 <td class="{{.Result}}">{{.Result}}</td>
-<td>{{.Stage}}</td>
-<td>{{.Note}}</td>
-<td>{{.Error}}</td>
-<td>{{if .Links}}{{range $index, $link := .Links}}{{if $index}}<br>{{end}}<a href="{{$link.Target}}">{{$link.Label}}</a>{{end}}{{else}}none{{end}}</td>
+<td>{{range $index, $failure := .Failures}}{{if $index}}<br>{{end}}{{$failure}}{{end}}</td>
+<td>{{.RunArchitecturesText $.Architectures}}</td>
 </tr>
 {{end}}</tbody>
 </table>
-</body>
+<h2>Cluster run logs</h2>
+{{range .Clusters}}<section id="{{.Anchor}}">
+<h3>{{.Name}} run logs</h3>
+{{range .Notes}}<p class="note">Note: {{.}}</p>
+{{end}}{{if .LogLinks}}<ul>
+{{range .LogLinks}}<li><a href="{{.Target}}">{{.Label}}</a></li>
+{{end}}</ul>
+{{else}}<p>none</p>
+{{end}}{{if .ArtifactLinks}}<p><strong>Artifacts:</strong></p>
+<ul>
+{{range .ArtifactLinks}}<li><a href="{{.Target}}">{{.Label}}</a></li>
+{{end}}</ul>
+{{end}}</section>
+{{end}}</body>
 </html>
 `
 

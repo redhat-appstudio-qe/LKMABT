@@ -166,9 +166,11 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 		},
 	})
 	outcome := outcomeFromManifest(request.Provider, manifest)
-	if manifest.Phase == model.PhaseTriggered || manifest.Phase == model.PhaseBuildsVerified || manifest.Phase == model.PhaseBuildOutputsVerified || manifest.Phase == model.PhaseCompleted || workflow.IsDeferred(runErr) {
+	reachedBuild := manifest.Phase == model.PhaseTriggered || manifest.Phase == model.PhaseBuildsVerified || manifest.Phase == model.PhaseBuildOutputsVerified || manifest.Phase == model.PhaseCompleted
+	if !workflow.IsDeferred(runErr) && reachedBuild {
 		// Record the selection after preflight narrowing. A preflight or fixture
-		// failure has no tested architecture subset to report.
+		// failure has no tested architecture subset to report, and a deferred run
+		// never exercised the narrowed set.
 		outcome.Platforms = stage.Platforms()
 	}
 	if workflow.IsDeferred(runErr) {

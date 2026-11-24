@@ -5,10 +5,11 @@ import (
 	"strings"
 )
 
-// RenderMarkdown renders the aggregate report as Markdown: a header block and a
-// six-column table with one row per Row. Cell values are escaped for table use.
-// Markdown and HTML share the document model, so both reports agree on run
-// identity, architectures, and every result value.
+// RenderMarkdown renders the aggregate report as Markdown: a run-data header, a
+// per-cluster results table, and a run-logs section whose cluster headings the
+// table links to. Cell values are escaped for table use. Markdown and HTML
+// share the document model, so both reports agree on run identity, cluster
+// outcomes, architectures, and every artifact link.
 func RenderMarkdown(document Document) string {
 	builder := &strings.Builder{}
 	fmt.Fprintf(builder, "# LKMABT aggregate run %s\n\n", document.RunID)
@@ -16,31 +17,57 @@ func RenderMarkdown(document Document) string {
 	fmt.Fprintf(builder, "- Ended: %s\n", document.EndedAtText())
 	fmt.Fprintf(builder, "- Clusters file: `%s`\n", document.ClustersFile)
 	fmt.Fprintf(builder, "- Requested architectures: %s\n", document.ArchitecturesText())
-	fmt.Fprintf(builder, "- Result: **%s**\n\n", document.Result())
-	builder.WriteString("| Cluster | Provider | Result | Stage | Note | Error | Artifacts |\n")
-	builder.WriteString("| --- | --- | --- | --- | --- | --- | --- |\n")
-	for _, row := range document.Rows {
-		fmt.Fprintf(builder, "| %s | %s | %s | %s | %s | %s | %s |\n", cell(row.Cluster), cell(row.Provider), row.Result(), cell(row.Stage), cell(row.Note), cell(row.Error), markdownLinks(row.Links))
+	fmt.Fprintf(builder, "- Mode: %s\n", document.Mode)
+	fmt.Fprintf(builder, "- Fixtures: %s\n", document.Fixtures)
+	if document.AggregateLog.Target != "" {
+		fmt.Fprintf(builder, "- Run log: [%s](<%s>)\n", linkLabel(document.AggregateLog.Label), document.AggregateLog.Target)
+	}
+	for _, warning := range document.Warnings {
+		fmt.Fprintf(builder, "- Warning: %s\n", cell(warning))
+	}
+	clusters := document.Clusters()
+	builder.WriteString("\n## Run results\n\n")
+	builder.WriteString("| Cluster name | Pass/Fail | Failure reason | Run architectures |\n")
+	builder.WriteString("| --- | --- | --- | --- |\n")
+	for _, cluster := range clusters {
+		fmt.Fprintf(builder, "| [%s](#%s) | %s | %s | %s |\n",
+			cell(cluster.Name), cluster.Anchor(), cluster.Result(),
+			cell(strings.Join(cluster.Failures(), "\n")),
+			cell(cluster.RunArchitecturesText(document.Architectures)))
+	}
+	builder.WriteString("\n## Cluster run logs\n")
+	for _, cluster := range clusters {
+		fmt.Fprintf(builder, "\n<a id=\"%s\"></a>\n### %s run logs\n\n", cluster.Anchor(), cell(cluster.Name))
+		for _, note := range cluster.Notes() {
+			fmt.Fprintf(builder, "**Note:** %s\n\n", cell(note))
+		}
+		logs := cluster.LogLinks()
+		if len(logs) == 0 {
+			builder.WriteString("- none\n")
+		}
+		for _, link := range logs {
+			fmt.Fprintf(builder, "- [%s](<%s>)\n", linkLabel(link.Label), link.Target)
+		}
+		if artifacts := cluster.ArtifactLinks(); len(artifacts) > 0 {
+			builder.WriteString("\n**Artifacts:**\n\n")
+			for _, link := range artifacts {
+				fmt.Fprintf(builder, "- [%s](<%s>)\n", linkLabel(link.Label), link.Target)
+			}
+		}
 	}
 	return builder.String()
 }
 
-// markdownLinks renders one row's artifact links as a comma-separated Markdown
-// list, or "none" when the row has no links. Labels are escaped; targets must
-// already be safe relative URLs, since they are used verbatim in angle brackets.
-func markdownLinks(links []Link) string {
-	if len(links) == 0 {
-		return "none"
-	}
-	parts := make([]string, 0, len(links))
-	for _, link := range links {
-		parts = append(parts, fmt.Sprintf("[%s](<%s>)", cell(link.Label), link.Target))
-	}
-	return strings.Join(parts, ", ")
+// linkLabel escapes only the characters that can close or split a Markdown
+// link label, so underscores and parentheses in artifact paths stay readable.
+func linkLabel(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\\", "\\\\", "[", "\\[", "]", "\\]").Replace(value)
 }
 
 // markdownCellEscapes lists characters that can open Markdown structure inside a table cell.
-const markdownCellEscapes = "\\|[]()*_`"
+const markdownCellEscapes = "\\|[]*_`"
 
 // cell escapes a value for use inside one Markdown table cell. "&", "<", and
 // ">" are entity-escaped and Markdown delimiters are backslash-escaped; CRLF
