@@ -96,6 +96,8 @@ and appends harmless comments to trigger PipelineRuns.
 **`internal/cluster/`** — Kubernetes interactions
 - `RealCluster` wraps k8s client-go operations
 - Preflight checks validate cluster prerequisites (multi-platform-controller deployment, host-config entries). `CheckScheduling` classifies each requested platform; `RunPreflight` treats an undeclared platform as informational and a declared but incomplete platform as a failure, and the workflow narrows `Request.Platforms` to the supported subset
+- `EgressProbe` (`egress.go`) runs one short-lived pod in the tenant namespace and reports whether it reached an external URL; `mathwizz-frontend` declares `registry.npmjs.org` as its `EgressTarget`, so a private cluster drops that component before `EnsureFixture` creates it, and `LiveStage.limitToInternetFreeComponents` prints the component selection alert
+- `FixtureService.EnsureNamespace` creates or adopts the tenant namespace without fixture resources, so the egress probe can run before any component exists
 - `AdmissionInspector.QuotaMessage` reads the Kueue `QuotaReserved=False` condition for the Workload owned by a pending PipelineRun
 - GitHub preflight reads the cluster's app slug from `konflux-info/konflux-public-info` and confirms that app is installed for the fixture organization; interactive runs open the installation page and wait until the installation appears
 - Build output verification confirms node evidence (Buildah outputs) match expected architectures

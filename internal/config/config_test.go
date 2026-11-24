@@ -399,7 +399,62 @@ var _ = Describe("Request.ExpectedComponents", func() {
 		Entry("default request", Request{}, 3),
 		Entry("smoke request", Request{Smoke: true}, 1),
 		Entry("smoke request with a full component path list", Request{Smoke: true, ComponentPaths: []string{"a", "b", "c"}}, 1),
+		Entry("request with a dropped component", Request{DroppedComponents: []string{"mathwizz-frontend"}}, 2),
 	)
+})
+
+var _ = Describe("Request.DropComponent", func() {
+	It("should remove the component from all aligned slices and the expected count", func() {
+		req := Defaults()
+
+		Expect(req.DropComponent("mathwizz-frontend")).Should(BeTrue())
+
+		Expect(req.ComponentNames).Should(Equal([]string{"mathwizz-web-server", "mathwizz-history-worker"}))
+		Expect(req.ComponentPaths).Should(Equal([]string{"web-server/Dockerfile", "history-worker/Dockerfile"}))
+		Expect(req.TektonPaths).Should(Equal([]string{".tekton/konflux-test-mathwizz-web-server-push.yaml", ".tekton/konflux-test-mathwizz-history-worker-push.yaml"}))
+		Expect(req.DroppedComponents).Should(Equal([]string{"mathwizz-frontend"}))
+		Expect(req.ExpectedComponents()).Should(Equal(2))
+	})
+
+	It("should leave the selection valid after a drop", func() {
+		req := Defaults()
+		req.Command = CommandRun
+		req.Provider = ProviderGitHub
+		req.DropComponent("mathwizz-frontend")
+
+		Expect(req.Validate()).Should(Succeed())
+	})
+
+	It("should report false for an unselected component without changing the selection", func() {
+		req := Defaults()
+
+		Expect(req.DropComponent("mathwizz-history-worker")).Should(BeTrue())
+		Expect(req.DropComponent("mathwizz-history-worker")).Should(BeFalse())
+		Expect(req.ComponentNames).Should(Equal([]string{"mathwizz-web-server", "mathwizz-frontend"}))
+	})
+})
+
+var _ = Describe("Request.EgressRequirements", func() {
+	It("should pair the internet-dependent component with its probe target", func() {
+		requirements := Defaults().EgressRequirements()
+
+		Expect(requirements).Should(Equal([]EgressRequirement{{Component: "mathwizz-frontend", Target: "https://registry.npmjs.org/-/ping"}}))
+	})
+
+	It("should return nothing for a smoke selection", func() {
+		req := Defaults()
+		req.Smoke = true
+		req.ComponentNames, req.ComponentPaths, req.TektonPaths = SmokeComponents()
+
+		Expect(req.EgressRequirements()).Should(BeEmpty())
+	})
+
+	It("should return nothing once the internet-dependent component is dropped", func() {
+		req := Defaults()
+		req.DropComponent("mathwizz-frontend")
+
+		Expect(req.EgressRequirements()).Should(BeEmpty())
+	})
 })
 
 var _ = Describe("Request component selection validation", func() {

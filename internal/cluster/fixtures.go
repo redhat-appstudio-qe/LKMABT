@@ -99,6 +99,21 @@ type FixtureService struct {
 	Kubernetes kubernetes.Interface
 }
 
+// EnsureNamespace creates or adopts the tenant namespace without creating the
+// fixture resources, so a preflight probe can run in it before the components
+// exist. It is idempotent and applies the same ownership labels as
+// EnsureFixture: an existing namespace is adopted without relabeling, while a
+// requested project is labeled with runID.
+func (s FixtureService) EnsureNamespace(ctx context.Context, namespace, runID string) error {
+	if s.Dynamic == nil {
+		return fmt.Errorf("dynamic client is required")
+	}
+	if namespace == "" || runID == "" {
+		return fmt.Errorf("namespace and run ID are required")
+	}
+	return s.ensureNamespace(ctx, s.Dynamic.Resource(NamespaceGVR), namespace, runID)
+}
+
 // EnsureFixture creates missing tenant resources and rejects drift in existing
 // components. Namespace, RunID, and Application are required, as is a positive
 // ExpectedComponents matching len(Components), with unique component names;

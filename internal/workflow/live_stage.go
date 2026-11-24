@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os/exec"
 	"path"
 	"runtime"
@@ -127,6 +128,9 @@ type LiveStage struct {
 	Progress     func(string)
 	// OpenURL opens the GitHub App installation page; OpenBrowser is used when nil.
 	OpenURL func(string) error
+	// ProbeEgress checks whether a pod in a namespace reaches an external URL.
+	// Nil uses cluster.EgressProbe with Clients.Kubernetes.
+	ProbeEgress func(context.Context, string, string) (cluster.EgressResult, error)
 	// ParentContext is the run context without the preflight deadline. An
 	// interactive installation wait uses it to continue after that deadline.
 	ParentContext context.Context
@@ -237,14 +241,101 @@ func (s *LiveStage) limitToSupportedPlatforms(result cluster.PreflightResult) {
 	)
 }
 
-// accessChecks lists the API versions preflight must verify.
+// limitToInternetFreeComponents drops selected components whose builds need a
+// public endpoint the cluster cannot reach. It probes once per endpoint in the
+// tenant namespace and reports the narrowed selection through one durable alert
+// per cluster, mirroring the architecture narrowing alert. A component whose
+// build needs no public endpoint is never probed or dropped.
+func (s *LiveStage) limitToInternetFreeComponents(ctx context.Context, namespace string) error {
+	requirements := s.Request.EgressRequirements()
+	dropped := make([]string, 0, len(requirements))
+	reasons := make([]string, 0, len(requirements))
+	for _, requirement := range requirements {
+		result, err := s.probeEgress(ctx, namespace, requirement.Target)
+		if err != nil {
+			return fmt.Errorf("probe %s access for %s: %w", egressHost(requirement.Target), requirement.Component, err)
+		}
+		if result.Reachable {
+			continue
+		}
+		if !s.Request.DropComponent(requirement.Component) {
+			return fmt.Errorf("drop %s after an unreachable egress probe: component selection is inconsistent", requirement.Component)
+		}
+		dropped = append(dropped, requirement.Component)
+		reasons = append(reasons, egressReason(requirement.Target, result.Detail))
+	}
+	if len(dropped) == 0 {
+		return nil
+	}
+	name := strings.TrimSpace(s.Request.ClusterName)
+	if name == "" {
+		name = "cluster"
+	}
+	testing := strings.Join(s.Request.ComponentNames, ", ")
+	if testing == "" {
+		testing = "none"
+	}
+	s.alert(
+		fmt.Sprintf("component:%s:%s->:%s", name, strings.Join(dropped, ","), strings.Join(s.Request.ComponentNames, ",")),
+		name+": component selection narrowed",
+		"not built: "+strings.Join(dropped, ", "),
+		"reason: "+strings.Join(reasons, "; "),
+		"testing: "+testing,
+	)
+	return nil
+}
+
+// probeEgress runs the configured egress probe; a test may replace it, while a
+// live run uses the cluster client.
+func (s *LiveStage) probeEgress(ctx context.Context, namespace, target string) (cluster.EgressResult, error) {
+	if s.ProbeEgress != nil {
+		return s.ProbeEgress(ctx, namespace, target)
+	}
+	if s.Clients == nil || s.Clients.Kubernetes == nil {
+		return cluster.EgressResult{}, fmt.Errorf("kubernetes client is required for the egress probe")
+	}
+	return cluster.EgressProbe{Kubernetes: s.Clients.Kubernetes}.Probe(ctx, namespace, target)
+}
+
+// egressHost names the endpoint a probe target addresses for user-facing text.
+func egressHost(target string) string {
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.Host == "" {
+		return target
+	}
+	return parsed.Host
+}
+
+// egressReason states why a component was dropped, naming the endpoint and the
+// probe's one-line explanation.
+func egressReason(target, detail string) string {
+	reason := egressHost(target) + " is unreachable from the cluster"
+	if detail != "" {
+		reason += ": " + detail
+	}
+	return reason
+}
+
+// accessChecks lists the API versions preflight must verify. A selection whose
+// builds need public internet also authorizes the probe pod lifecycle, so a
+// missing permission fails preflight with guidance instead of mid-fixture.
 func (s *LiveStage) accessChecks() []cluster.AccessCheck {
-	return []cluster.AccessCheck{
+	checks := []cluster.AccessCheck{
 		{Name: "pipelineruns", Resource: PipelineRunGVR, Namespace: s.Request.TenantNamespace},
 		{Name: "taskruns", Resource: cluster.TaskRunGVR, Namespace: s.Request.TenantNamespace},
 		{Name: "applications", Resource: cluster.ApplicationGVR, Namespace: s.Request.TenantNamespace},
 		{Name: "components", Resource: cluster.ComponentGVR, Namespace: s.Request.TenantNamespace},
 	}
+	if len(s.Request.EgressRequirements()) > 0 {
+		checks = append(checks, cluster.AccessCheck{
+			Name:      "egress probe pods",
+			Resource:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+			Namespace: s.Request.TenantNamespace,
+			Verbs:     []string{"create", "delete"},
+			Guidance:  "grant create and delete on pods in the tenant namespace so LKMABT can verify cluster internet access before building components that download from public registries",
+		})
+	}
+	return checks
 }
 
 // githubAppVerification reports the context remaining valid for preflight and
@@ -459,7 +550,8 @@ func OpenBrowser(rawURL string) error {
 // EnsureFixture validates the provider fixture and records its tenant resources in the manifest.
 // The manifest's recorded fixture wins over the stage's, so a resumed run keeps its repository.
 // It requires one Dockerfile path per selected component name and returns an error when they disagree,
-// and replaces manifest.Fixture and s.Fixture.
+// drops components whose builds need unreachable public endpoints before creating them, and replaces
+// manifest.Fixture and s.Fixture.
 func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManifest) error {
 	fixture := s.Fixture
 	if recorded := fixtureFromManifest(manifest.Fixture); recorded.Name != "" {
@@ -482,6 +574,16 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 	manifest.Fixture.TenantNamespace = namespace
 	manifest.Fixture.EphemeralGitLabAuth = s.Request.Credentials.GitLabTokenEphemeral
 	fixtures := cluster.FixtureService{Dynamic: s.Clients.Dynamic, Kubernetes: s.Clients.Kubernetes}
+	// The probe needs the tenant namespace, so ensure it before the fixture
+	// creates components; a dropped component then never exists on the cluster.
+	if len(s.Request.EgressRequirements()) > 0 {
+		if err := fixtures.EnsureNamespace(ctx, namespace, manifest.RunID); err != nil {
+			return err
+		}
+		if err := s.limitToInternetFreeComponents(ctx, namespace); err != nil {
+			return err
+		}
+	}
 	names, paths := s.Request.ComponentNames, s.Request.ComponentPaths
 	if len(names) == 0 || len(names) != len(paths) {
 		return fmt.Errorf("run selects %d components but %d Dockerfile paths", len(names), len(paths))

@@ -49,12 +49,16 @@ const (
 )
 
 // componentProfile is one fixture component: the Konflux Component name, the
-// Dockerfile a trigger commit appends to, and the PaC PipelineRun whose
-// build-platforms parameter the run rewrites.
+// Dockerfile a trigger commit appends to, the PaC PipelineRun whose
+// build-platforms parameter the run rewrites, and the external endpoint its
+// build downloads from.
 type componentProfile struct {
 	Name       string
 	Dockerfile string
 	TektonPath string
+	// EgressTarget is the external URL the component's build must reach. Empty
+	// means the build needs no cluster internet access.
+	EgressTarget string
 }
 
 // fullProfile is the complete MathWizz fixture selection in fixture order.
@@ -63,7 +67,9 @@ type componentProfile struct {
 var fullProfile = []componentProfile{
 	{Name: "mathwizz-web-server", Dockerfile: "web-server/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-web-server-push.yaml"},
 	{Name: "mathwizz-history-worker", Dockerfile: "history-worker/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-history-worker-push.yaml"},
-	{Name: "mathwizz-frontend", Dockerfile: "frontend/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-frontend-push.yaml"},
+	// The frontend Dockerfile runs npm ci against the public registry; a
+	// cluster without internet egress cannot build it.
+	{Name: "mathwizz-frontend", Dockerfile: "frontend/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-frontend-push.yaml", EgressTarget: "https://registry.npmjs.org/-/ping"},
 }
 
 // selection splits profiles into aligned name, Dockerfile, and PipelineRun
@@ -98,6 +104,29 @@ func SmokeComponents() (names, dockerfiles, tektonPaths []string) {
 		}
 	}
 	return nil, nil, nil
+}
+
+// EgressRequirement pairs one selected component with the external endpoint
+// its build must reach over the cluster's internet egress.
+type EgressRequirement struct {
+	Component string
+	Target    string
+}
+
+// EgressRequirements returns the selected components whose builds need
+// cluster internet access, in selection order. A selection of offline-buildable
+// components returns an empty slice.
+func (r Request) EgressRequirements() []EgressRequirement {
+	requirements := make([]EgressRequirement, 0, len(r.ComponentNames))
+	for _, name := range r.ComponentNames {
+		for _, profile := range fullProfile {
+			if profile.Name == name && profile.EgressTarget != "" {
+				requirements = append(requirements, EgressRequirement{Component: name, Target: profile.EgressTarget})
+				break
+			}
+		}
+	}
+	return requirements
 }
 
 // Credentials holds the provider tokens resolved for one request. The zero
@@ -154,6 +183,9 @@ type Request struct {
 	ComponentNames []string
 	ComponentPaths []string
 	TektonPaths    []string
+	// DroppedComponents names components a preflight check removed from the
+	// selection. ExpectedComponents subtracts them from the profile contract.
+	DroppedComponents []string
 	// Platforms holds canonical platform names; Parse expands architecture
 	// aliases before storing them here.
 	Platforms   []string
@@ -186,13 +218,30 @@ func Defaults() Request {
 }
 
 // ExpectedComponents returns how many fixture components this run must
-// create and verify: one in smoke mode, the whole fixture otherwise. The
-// count is the contract, not a measurement of the request's slices.
+// create and verify: one in smoke mode, the whole fixture otherwise, less any
+// component a preflight check dropped. The count is the contract, not a
+// measurement of the request's slices.
 func (r Request) ExpectedComponents() int {
+	expected := len(fullProfile)
 	if r.Smoke {
-		return 1
+		expected = 1
 	}
-	return len(fullProfile)
+	return expected - len(r.DroppedComponents)
+}
+
+// DropComponent removes name from the aligned component selection and reports
+// whether it was selected. The Dockerfile and PipelineRun slices shrink with
+// it, so indexes stay aligned, and ExpectedComponents shrinks by one.
+func (r *Request) DropComponent(name string) bool {
+	index := slices.Index(r.ComponentNames, name)
+	if index < 0 || index >= len(r.ComponentPaths) || index >= len(r.TektonPaths) {
+		return false
+	}
+	r.ComponentNames = slices.Delete(r.ComponentNames, index, index+1)
+	r.ComponentPaths = slices.Delete(r.ComponentPaths, index, index+1)
+	r.TektonPaths = slices.Delete(r.TektonPaths, index, index+1)
+	r.DroppedComponents = append(r.DroppedComponents, name)
+	return true
 }
 
 // Parse builds and validates a request from command-line arguments and environment values.
