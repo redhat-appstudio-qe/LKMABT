@@ -369,6 +369,7 @@ var _ = Describe("VerifyGitHubAppInstallation", func() {
 
 			err := adapter.VerifyGitHubAppInstallation(context.Background(), "cluster-app")
 			Expect(errors.Is(err, providers.ErrUnverifiable)).Should(BeTrue())
+			Expect(errors.Is(err, providers.ErrTokenCannotListInstallationRepositories)).Should(BeTrue())
 			Expect(client.installationRepoCalls).Should(BeEmpty())
 		})
 	})

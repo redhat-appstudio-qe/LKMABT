@@ -111,8 +111,8 @@ to label it for cleanup, and permission to delete it during cleanup. Inside
 the namespace the run needs access to `pipelineruns`, `taskruns`,
 `applications`, and `components`. When the selection includes a component that
 downloads from a public endpoint, the run also needs `create`, `get`, and
-`delete` on `pods` there: after creating the tenant namespace, LKMABT checks
-those permissions and runs one short-lived probe pod per distinct endpoint to
+`delete` on `pods` there: during preflight, after replacing stale namespaces and creating the tenant namespace, LKMABT checks
+those permissions and later runs one short-lived probe pod per distinct endpoint to
 test the cluster's internet egress before it creates those components. A
 namespace created through `ProjectRequest` grants its requester project admin,
 so the probe check passes there without a separate grant. GitLab runs also need `get`,
@@ -402,7 +402,9 @@ Classic tokens need `read:org` and may need `read:user` for the installation
 repository listing; `gh` OAuth tokens skip that listing. Cluster preflight also
 lists installation repositories for Apps installed for selected repositories;
 when the token cannot list them, preflight skips that check and continues
-without user-facing output, and the trigger-stage PaC wait remains the backstop.
+without user-facing output for the expected `gh` OAuth limitation. Other
+unverifiable causes, such as a rate limit or missing scope, are logged as a
+warning. The trigger-stage PaC wait remains the backstop.
 
 **`GITLAB_BOT_TOKEN`.** The token is used as-is and is never revoked. PaC
 reuses an existing usable GitLab SCM Secret (labeled

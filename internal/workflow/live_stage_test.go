@@ -610,7 +610,7 @@ var _ = Describe("LiveStage", func() {
 		})
 
 		When("the provider cannot verify selected repositories", func() {
-			It("should continue without a warning", func() {
+			It("should warn and continue for an unexpected cause", func() {
 				provider := &githubAppProviderStub{err: fmt.Errorf("%w: selected repositories", providers.ErrUnverifiable)}
 				log := &bytes.Buffer{}
 				stage := &LiveStage{
@@ -621,8 +621,23 @@ var _ = Describe("LiveStage", func() {
 
 				_, err := stage.verifyGitHubApp(context.Background())
 				Expect(err).ShouldNot(HaveOccurred())
+				Expect(log.String()).Should(ContainSubstring("warning:"))
+				Expect(log.String()).Should(ContainSubstring("cannot be verified"))
+			})
+
+			It("should stay silent for the gh OAuth token limitation", func() {
+				provider := &githubAppProviderStub{err: fmt.Errorf("%w: %w: selected repositories", providers.ErrUnverifiable, providers.ErrTokenCannotListInstallationRepositories)}
+				log := &bytes.Buffer{}
+				stage := &LiveStage{
+					Provider: provider,
+					Clients:  &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/konflux-kflux-ocp-p01"))},
+					Log:      log,
+				}
+
+				_, err := stage.verifyGitHubApp(context.Background())
+				Expect(err).ShouldNot(HaveOccurred())
 				Expect(log.String()).ShouldNot(ContainSubstring("warning:"))
-				Expect(log.String()).ShouldNot(ContainSubstring("cannot be verified"))
+				Expect(log.String()).ShouldNot(ContainSubstring("cannot list them"))
 			})
 		})
 
@@ -954,7 +969,7 @@ var _ = Describe("LiveStage", func() {
 		})
 
 		When("the installation appears but its repository selection cannot be verified", func() {
-			It("should continue silently without claiming the installation was verified", func() {
+			It("should warn without claiming the installation was verified", func() {
 				required := appInstallationRequired()
 				provider := &githubAppProviderStub{verify: func(call int) error {
 					if call == 1 {
@@ -981,8 +996,40 @@ var _ = Describe("LiveStage", func() {
 				verification, err := stage.verifyGitHubApp(ctx)
 				Expect(err).ShouldNot(HaveOccurred())
 				Expect(verification.Verified).Should(BeFalse())
+				Expect(out.String()).Should(ContainSubstring("warning:"))
+				Expect(out.String()).Should(ContainSubstring("cannot be verified"))
+				Expect(out.String()).ShouldNot(ContainSubstring("installation verified"))
+			})
+
+			It("should stay silent for the gh OAuth token limitation", func() {
+				required := appInstallationRequired()
+				provider := &githubAppProviderStub{verify: func(call int) error {
+					if call == 1 {
+						return required
+					}
+					return fmt.Errorf("%w: %w: selected repositories", providers.ErrUnverifiable, providers.ErrTokenCannotListInstallationRepositories)
+				}}
+				out := &bytes.Buffer{}
+				stage := &LiveStage{
+					Provider:      provider,
+					Clients:       &cluster.ClientSet{Kubernetes: kubernetesfake.NewSimpleClientset(konfluxInfoObject("https://github.com/apps/cluster-app"))},
+					Interactive:   true,
+					ParentContext: context.Background(),
+					Out:           out,
+					OpenURL:       func(string) error { return nil },
+					Log:           &bytes.Buffer{},
+				}
+				previous := githubAppPollInterval
+				githubAppPollInterval = time.Millisecond
+				defer func() { githubAppPollInterval = previous }()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
+				verification, err := stage.verifyGitHubApp(ctx)
+				Expect(err).ShouldNot(HaveOccurred())
+				Expect(verification.Verified).Should(BeFalse())
 				Expect(out.String()).ShouldNot(ContainSubstring("warning:"))
-				Expect(out.String()).ShouldNot(ContainSubstring("cannot be verified"))
+				Expect(out.String()).ShouldNot(ContainSubstring("cannot list them"))
 				Expect(out.String()).ShouldNot(ContainSubstring("installation verified"))
 			})
 		})

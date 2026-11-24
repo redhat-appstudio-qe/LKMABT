@@ -43,8 +43,8 @@ var _ = Describe("NamespaceDeletions", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			queue := &NamespaceDeletions{}
 			var out, log bytes.Buffer
-			queue.Add("cluster-a", "https://a.example", service, infoA, &out)
-			queue.Add("cluster-b", "https://b.example", service, infoB, &out)
+			queue.Add("cluster-a", "https://a.example", service, infoA, &out, nil)
+			queue.Add("cluster-b", "https://b.example", service, infoB, &out, nil)
 			prompt := &recordingPrompt{approved: true}
 
 			Expect(queue.Finalize(context.Background(), prompt, &log)).Should(Succeed())
@@ -69,7 +69,7 @@ var _ = Describe("NamespaceDeletions", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			queue := &NamespaceDeletions{}
 			var out, log bytes.Buffer
-			queue.Add("cluster-a", "https://a.example", service, info, &out)
+			queue.Add("cluster-a", "https://a.example", service, info, &out, nil)
 			prompt := &recordingPrompt{approved: false}
 
 			Expect(queue.Finalize(context.Background(), prompt, &log)).Should(Succeed())
@@ -88,7 +88,7 @@ var _ = Describe("NamespaceDeletions", func() {
 			info, err := service.Inspect(context.Background(), "tenant-a")
 			Expect(err).ShouldNot(HaveOccurred())
 			queue := &NamespaceDeletions{}
-			queue.Add("cluster-a", "https://a.example", service, info, nil)
+			queue.Add("cluster-a", "https://a.example", service, info, nil, nil)
 			namespace, err := client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-a", metav1.GetOptions{})
 			Expect(err).ShouldNot(HaveOccurred())
 			labels := namespace.GetLabels()
@@ -104,7 +104,52 @@ var _ = Describe("NamespaceDeletions", func() {
 			Expect(getErr).ShouldNot(HaveOccurred())
 		})
 	})
+
+	When("the queued namespace still holds its tenant lock", func() {
+		It("should release the lock only after the prompt is answered", func() {
+			client := deferredDeletionClient(namespaceObject("tenant-a", "run-a"))
+			service := cleanup.NamespaceService{Dynamic: client}
+			info, err := service.Inspect(context.Background(), "tenant-a")
+			Expect(err).ShouldNot(HaveOccurred())
+			queue := &NamespaceDeletions{}
+			released := 0
+			queue.Add("cluster-a", "https://a.example", service, info, nil, func() { released++ })
+
+			Expect(released).Should(Equal(0))
+			Expect(queue.Finalize(context.Background(), &recordingPrompt{approved: false}, nil)).Should(Succeed())
+			Expect(released).Should(Equal(1))
+		})
+	})
+
+	When("the prompt fails", func() {
+		It("should record a retention notice and release the lock", func() {
+			client := deferredDeletionClient(namespaceObject("tenant-a", "run-a"))
+			service := cleanup.NamespaceService{Dynamic: client}
+			info, err := service.Inspect(context.Background(), "tenant-a")
+			Expect(err).ShouldNot(HaveOccurred())
+			queue := &NamespaceDeletions{}
+			var out bytes.Buffer
+			released := 0
+			queue.Add("cluster-a", "https://a.example", service, info, &out, func() { released++ })
+
+			err = queue.Finalize(context.Background(), errorPrompt{err: context.Canceled}, nil)
+
+			Expect(err).Should(MatchError(context.Canceled))
+			Expect(out.String()).Should(ContainSubstring("retained tenant namespace tenant-a on cluster cluster-a: cleanup prompt failed"))
+			Expect(released).Should(Equal(1))
+		})
+	})
 })
+
+// errorPrompt returns a fixed confirmation error.
+type errorPrompt struct {
+	err error
+}
+
+// Confirm returns the configured error.
+func (p errorPrompt) Confirm(context.Context, string) (bool, error) {
+	return false, p.err
+}
 
 var _ = Describe("Lifecycle deferred namespace deletion", func() {
 	It("should queue the prompt instead of asking during finalization", func() {
@@ -115,14 +160,17 @@ var _ = Describe("Lifecycle deferred namespace deletion", func() {
 		manifest := model.RunManifest{RunID: "run-1", Phase: model.PhaseCompleted, Fixture: model.FixtureIdentity{TenantNamespace: "tenant-deferred"}}
 		store := evidence.NewManifestStore(stateDir)
 		Expect(store.Create(&manifest)).Should(Succeed())
-		lifecycle := Lifecycle{Store: store, Namespace: cleanup.NamespaceService{Dynamic: client}, Collector: collector.Collector{StateDir: stateDir}, Prompt: prompt, Deletions: queue, Cluster: "cluster-a", LockServer: "https://a.example", Sources: lifecycleTestSources()}
+		released := 0
+		lifecycle := Lifecycle{Store: store, Namespace: cleanup.NamespaceService{Dynamic: client}, Collector: collector.Collector{StateDir: stateDir}, Prompt: prompt, Deletions: queue, Cluster: "cluster-a", LockServer: "https://a.example", Release: func() { released++ }, Sources: lifecycleTestSources()}
 
 		Expect(lifecycle.Finalize(context.Background(), manifest, nil)).Should(Succeed())
 
 		Expect(prompt.calls).Should(BeZero())
 		Expect(queue.pending).Should(HaveLen(1))
+		Expect(released).Should(Equal(0))
 		Expect(queue.Finalize(context.Background(), prompt, nil)).Should(Succeed())
 		Expect(prompt.calls).Should(Equal(1))
+		Expect(released).Should(Equal(1))
 		Expect(prompt.messages[0]).Should(ContainSubstring("tenant-deferred"))
 		_, err := client.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant-deferred", metav1.GetOptions{})
 		Expect(apierrors.IsNotFound(err)).Should(BeTrue())

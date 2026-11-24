@@ -337,7 +337,7 @@ func verifyGitHubAppRepositories(ctx context.Context, client client, installatio
 		return nil
 	case "selected":
 		if oauthToken {
-			return fmt.Errorf("%w: GitHub App %s is installed for selected repositories in %s and a gh OAuth user token cannot list them", providers.ErrUnverifiable, appSlug, canonicalOwner)
+			return fmt.Errorf("%w: %w: GitHub App %s is installed for selected repositories in %s and a gh OAuth user token cannot list them", providers.ErrUnverifiable, providers.ErrTokenCannotListInstallationRepositories, appSlug, canonicalOwner)
 		}
 		repositories, err := client.ListUserInstallationRepositories(ctx, installation.GetID())
 		if err != nil {

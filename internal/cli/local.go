@@ -151,7 +151,12 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 	if err != nil {
 		return RunOutcome{Provider: request.Provider}, err
 	}
-	defer releaseNamespace()
+	lockHeld := true
+	defer func() {
+		if lockHeld {
+			releaseNamespace()
+		}
+	}()
 	store := evidence.NewManifestStore(request.StateDir)
 	observer := newPhaseObserver(runner.Out, providerLabel(request))
 	if observer != nil {
@@ -197,7 +202,8 @@ func (runner LiveRunner) Run(ctx context.Context, request config.Request, log Ru
 		fmt.Fprintf(log, "deferred run %s at phase %s: %v\n", manifest.RunID, outcome.Stage, runErr)
 		return outcome, runErr
 	}
-	finalizeErr := runner.finalizeRun(ctx, request, clients, stage, store, manifest, runErr, log)
+	finalizeErr := runner.finalizeRun(ctx, request, clients, stage, store, manifest, runErr, log, releaseNamespace)
+	lockHeld = false
 	runErr = runErrorWithLogFailure(runErr, logAttachErr)
 	if runErr != nil {
 		if finalizeErr != nil {
@@ -445,6 +451,9 @@ type Lifecycle struct {
 	// Cluster and LockServer identify the queued namespace's cluster.
 	Cluster    string
 	LockServer string
+	// Release releases the tenant namespace lock acquired for this run. The
+	// aggregate queue takes ownership when it defers the deletion prompt.
+	Release func()
 	// Sources overrides the collector sources otherwise derived from Namespace.Dynamic.
 	Sources []collector.Source
 	// Out receives retention notices for humans; nil discards them.
@@ -499,6 +508,14 @@ func waitForNamespaceDeletion(ctx context.Context, service cleanup.NamespaceServ
 func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, runErr error) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalizationTimeout)
 	defer cancel()
+	release := l.Release
+	// The aggregate queue takes over the lock when the prompt is deferred; every
+	// other return path releases it here.
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
 	namespace := manifest.Fixture.TenantNamespace
 	if namespace == "" {
 		return nil
@@ -550,7 +567,8 @@ func (l Lifecycle) Finalize(ctx context.Context, manifest model.RunManifest, run
 		return secretErr
 	}
 	if l.Deletions != nil {
-		l.Deletions.Add(l.Cluster, l.LockServer, l.Namespace, info, l.Out)
+		l.Deletions.Add(l.Cluster, l.LockServer, l.Namespace, info, l.Out, release)
+		release = nil
 		return secretErr
 	}
 	approved, err := l.Prompt.Confirm(ctx, fmt.Sprintf("Delete owned tenant namespace %s from run %s", namespace, manifest.RunID))
@@ -694,10 +712,10 @@ func (runner LiveRunner) finalizeDeferredRun(ctx context.Context, stage *workflo
 // including pod logs since manifest.CreatedAt from the tenant and default log
 // namespaces, and reuses the stage's prompt so the confirmation policy matches
 // the run.
-func (runner LiveRunner) finalizeRun(ctx context.Context, request config.Request, clients *cluster.ClientSet, stage *workflow.LiveStage, store evidence.ManifestStore, manifest model.RunManifest, runErr error, log io.Writer) error {
+func (runner LiveRunner) finalizeRun(ctx context.Context, request config.Request, clients *cluster.ClientSet, stage *workflow.LiveStage, store evidence.ManifestStore, manifest model.RunManifest, runErr error, log io.Writer, releaseNamespace func()) error {
 	sources := collector.KubernetesSources(clients.Dynamic, manifest.Fixture.TenantNamespace)
 	sources = append(sources, collector.KubernetesPodLogSources(clients.Kubernetes, manifest.Fixture.TenantNamespace, manifest.CreatedAt)...)
-	lifecycle := Lifecycle{Store: store, Namespace: stage.Namespace, Collector: collector.Collector{StateDir: request.StateDir}, Prompt: stage.Prompt, Deletions: runner.Deletions, Cluster: request.ClusterName, LockServer: request.ClusterServer, Sources: sources, Out: stage.Out, Log: log}
+	lifecycle := Lifecycle{Store: store, Namespace: stage.Namespace, Collector: collector.Collector{StateDir: request.StateDir}, Prompt: stage.Prompt, Deletions: runner.Deletions, Cluster: request.ClusterName, LockServer: request.ClusterServer, Release: releaseNamespace, Sources: sources, Out: stage.Out, Log: log}
 	return lifecycle.Finalize(ctx, manifest, runErr)
 }
 

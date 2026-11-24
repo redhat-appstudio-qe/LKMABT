@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -205,32 +204,31 @@ var _ = Describe("LiveStage internet preflight", func() {
 		Expect(log.String()).Should(ContainSubstring("not built: mathwizz-frontend"))
 	})
 
-	It("should check probe pod access after ensuring the tenant namespace", func() {
+	It("should check probe pod access during preflight", func() {
 		fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
 		dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
 		kubernetes := kubernetesfake.NewSimpleClientset()
 		kubernetes.PrependReactor("create", "selfsubjectaccessreviews", func(kubetesting.Action) (bool, runtime.Object, error) {
 			return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Reason: "rbac denied"}}, nil
 		})
-		probe := &recordingEgressProbe{}
 		request := fullSelectionRequest()
-		request.Provider = config.ProviderGitHub
-		request.ApplicationName = "app"
-		request.SourceBranch = "main"
+		request.Provider = config.ProviderGitLab
+		request.ClusterServer = "https://api.example"
 		stage := &LiveStage{
-			Request:     request,
-			Clients:     &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetes},
-			ProbeEgress: probe.probe,
-			Provider:    &githubAppProviderStub{fixture: fixture},
-			Fixture:     fixture,
-			Log:         io.Discard,
+			Request:          request,
+			Clients:          &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetes},
+			PreflightCluster: fakePreflightCluster{server: request.ClusterServer},
+			Namespace:        cleanup.NamespaceService{Dynamic: dynamic, NameLister: testNameLister{}},
+			Provider:         &githubAppProviderStub{fixture: fixture},
+			Fixture:          fixture,
 		}
+		manifest := &model.RunManifest{RunID: "run-1"}
 
-		err := stage.EnsureFixture(context.Background(), &model.RunManifest{RunID: "run-1"})
+		err := stage.Preflight(context.Background(), manifest)
 
 		Expect(err).Should(MatchError(ContainSubstring("egress probe access check failed")))
 		Expect(err).Should(MatchError(ContainSubstring("rbac denied")))
-		Expect(probe.targets).Should(BeEmpty())
+		Expect(manifest.Fixture.TenantNamespace).Should(Equal("tenant"))
 		_, getErr := dynamic.Resource(cleanup.NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
 		Expect(getErr).ShouldNot(HaveOccurred())
 	})

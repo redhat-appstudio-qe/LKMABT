@@ -98,7 +98,7 @@ PipelineRuns.
 - `RealCluster` wraps k8s client-go operations
 - Preflight checks validate cluster prerequisites (multi-platform-controller deployment, host-config entries). `CheckScheduling` classifies each requested platform; `RunPreflight` treats an undeclared platform as informational and a declared but incomplete platform as a failure, and the workflow narrows `Request.Platforms` to the supported subset
 - `EgressProbe` (`egress.go`) runs one short-lived pod in the tenant namespace and reports whether it reached an external URL; component profiles declare their build's public endpoints (`EgressTargets`), so every selected component whose endpoint is unreachable is dropped before `EnsureFixture` creates it, and `LiveStage.limitToInternetFreeComponents` prints the component selection alert. Only the probe script's failure exit code counts as unreachable; eviction, OOM, deadline termination, an unschedulable pod, and an unpullable probe image are unknown-outcome errors, not drops
-- `FixtureService.EnsureNamespace` creates or adopts the tenant namespace without fixture resources, so the egress probes can run before any component exists; the probe pod lifecycle is authorized after that call, when a `ProjectRequest`-created namespace has bound the requester as project admin
+- `FixtureService.EnsureNamespace` creates or adopts the tenant namespace without fixture resources; for internet-dependent selections, preflight replaces stale namespaces, calls `EnsureNamespace`, and authorizes the probe pod lifecycle after that call, when a `ProjectRequest`-created namespace has bound the requester as project admin. The egress probes then run before any component exists
 - `AdmissionInspector.QuotaMessage` reads the Kueue `QuotaReserved=False` condition for the Workload owned by a pending PipelineRun
 - GitHub preflight reads the cluster's app slug from `info.json` in the `konflux-info/konflux-public-info` ConfigMap and confirms that the app is installed for the fixture organization; interactive runs open the installation page and wait until the installation appears
 - Build output verification confirms that node evidence (Buildah outputs) matches the expected architectures
@@ -295,8 +295,9 @@ verifies the cluster App against the fixture. A classic or OAuth token may need
 the `read:user` scope to list selected-installation repositories; add it with
 `gh auth refresh -h github.com -s read:user`. GitHub rejects a `gh` OAuth user
 token (`gho_`) for that endpoint even with the scope, so the acquisition check
-skips it and preflight skips the listing without user-facing output. The
-acquisition check does not require the fixture in every installation because
+skips it and preflight skips the listing without user-facing output. Other
+unverifiable causes, such as a rate limit or missing scope, are recorded as a
+warning. The acquisition check does not require the fixture in every installation because
 the cluster app slug is unknown there; a listing that remains unverifiable
 after the browser login does not block the run. When `GITLAB_BOT_TOKEN` is empty, GitLab opens the prefilled PAT page (1-day
 expiration, `api` and `write_repository`) and prompts for the token without

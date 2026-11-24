@@ -164,9 +164,10 @@ func NewLiveStage(request config.Request, clients *cluster.ClientSet, provider p
 
 // Preflight validates the cluster, required APIs, platform scheduling, and tenant namespace.
 // For GitHub it also verifies that the published App can onboard the fixture repository,
-// waiting when an interactive run approves a pending installation. It records the target
-// cluster in manifest and deletes stale tenant namespaces, so a partially executed
-// preflight can already have removed cluster resources.
+// waiting when an interactive run approves a pending installation. For selections with
+// public build dependencies it creates the tenant namespace and authorizes the probe pod
+// lifecycle. It records the target cluster in manifest and deletes stale tenant namespaces,
+// so a partially executed preflight can already have removed or created cluster resources.
 func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) error {
 	spec := cluster.PreflightSpec{ExpectedServer: s.Request.ClusterServer, AccessChecks: s.accessChecks(), Scheduling: cluster.SchedulingSpec{
 		Namespace:  cluster.MultiPlatformControllerNamespace,
@@ -198,6 +199,25 @@ func (s *LiveStage) Preflight(ctx context.Context, manifest *model.RunManifest) 
 	}
 	if err := s.ensureTenantNamespaceAvailable(ctx, manifest); err != nil {
 		return err
+	}
+	if len(s.Request.EgressRequirements()) > 0 {
+		if s.Clients == nil {
+			return fmt.Errorf("cluster clients are not initialized")
+		}
+		namespace := manifest.Fixture.TenantNamespace
+		if namespace == "" {
+			namespace = s.Request.TenantNamespace
+		}
+		// Record the namespace before creating it so finalization can clean up
+		// even when the probe authorization fails here.
+		manifest.Fixture.TenantNamespace = namespace
+		fixtures := cluster.FixtureService{Dynamic: s.Clients.Dynamic, Kubernetes: s.Clients.Kubernetes}
+		if err := fixtures.EnsureNamespace(ctx, namespace, manifest.RunID); err != nil {
+			return err
+		}
+		if err := s.checkEgressProbeAccess(ctx, namespace); err != nil {
+			return err
+		}
 	}
 	manifest.TargetClusterServer = s.Request.ClusterServer
 	return nil
@@ -374,8 +394,10 @@ type githubAppVerification struct {
 
 // verifyGitHubApp rejects clusters whose published GitHub App cannot onboard the fixture repository.
 // An interactive run opens the installation page and waits for an organization administrator to approve it.
-// ErrUnverifiable leaves the App unverified without user-facing output; the returned Context is the caller's
-// context unless an approved installation wait outlived it and continued on ParentContext.
+// ErrUnverifiable leaves the App unverified with Verified false; the expected
+// gh OAuth token limitation is silent, while any other cause is recorded as a
+// warning. The returned Context is the caller's context unless an approved
+// installation wait outlived it and continued on ParentContext.
 func (s *LiveStage) verifyGitHubApp(ctx context.Context) (githubAppVerification, error) {
 	result := githubAppVerification{Context: ctx}
 	if s.Clients == nil {
@@ -400,9 +422,12 @@ func (s *LiveStage) verifyGitHubApp(ctx context.Context) (githubAppVerification,
 		wait.Slug = required.AppSlug
 		return wait, nil
 	case errors.Is(err, providers.ErrUnverifiable):
-		// The check is best-effort. A token that cannot list installation
-		// repositories leaves the App unverified; the build itself is the backstop,
-		// so a warning here would only repeat a capability the token lacks.
+		// A gh OAuth user token cannot list installation repositories; that
+		// expected limitation stays silent. Any other unverifiable check is a
+		// real observability gap, so record why fixture access was not verified.
+		if !errors.Is(err, providers.ErrTokenCannotListInstallationRepositories) {
+			s.notice("warning: %v", err)
+		}
 		return result, nil
 	default:
 		return result, err
@@ -515,6 +540,9 @@ func (s *LiveStage) pollGitHubAppInstallation(ctx context.Context, checker clust
 				return true, nil
 			}
 			if errors.Is(err, providers.ErrUnverifiable) {
+				if !errors.Is(err, providers.ErrTokenCannotListInstallationRepositories) {
+					s.notice("warning: %v", err)
+				}
 				return false, nil
 			}
 			var selection *providers.AppRepositorySelectionError
@@ -615,13 +643,6 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 	// creates components; a dropped component then never exists on the cluster.
 	if len(s.Request.EgressRequirements()) > 0 {
 		if err := fixtures.EnsureNamespace(ctx, namespace, manifest.RunID); err != nil {
-			return err
-		}
-		// Authorize the probe pod lifecycle after the namespace exists: an
-		// OpenShift ProjectRequest binds its requester as project admin, which
-		// grants the pod permissions the probe needs. Checking at preflight,
-		// before stale namespaces are replaced, rejected valid private clusters.
-		if err := s.checkEgressProbeAccess(ctx, namespace); err != nil {
 			return err
 		}
 		if err := s.limitToInternetFreeComponents(ctx, namespace); err != nil {
