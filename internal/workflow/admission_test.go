@@ -312,8 +312,9 @@ var _ = Describe("LiveStage platform narrowing", func() {
 		stage.limitToSupportedPlatforms(result)
 
 		Expect(stage.Request.Platforms).Should(Equal([]string{platform.LinuxAMD64}))
-		Expect(log.String()).Should(ContainSubstring("does not declare " + platform.LinuxS390X))
+		Expect(log.String()).Should(Equal(" ! cluster: architecture support narrowed\n   not supported: " + platform.LinuxS390X + "\n   testing: " + platform.LinuxAMD64 + "\n"))
 		Expect(log.String()).ShouldNot(ContainSubstring("warning:"))
+		Expect(log.String()).ShouldNot(ContainSubstring("does not declare"))
 	})
 
 	It("does not notice when every requested platform is supported", func() {

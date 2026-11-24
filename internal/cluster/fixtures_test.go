@@ -22,15 +22,17 @@ import (
 	kubetesting "k8s.io/client-go/testing"
 )
 
-// testFixtureSpec builds a fixture specification with three components for a provider.
+// testFixtureSpec builds a fixture specification with three components and
+// their expected count for a provider.
 func testFixtureSpec(provider, token string) FixtureSpec {
 	return FixtureSpec{
-		Namespace:   "tenant",
-		RunID:       "run-1",
-		Application: "app",
-		Provider:    provider,
-		GitLabToken: token,
-		Repository:  "https://gitlab.com/o/r",
+		Namespace:          "tenant",
+		RunID:              "run-1",
+		Application:        "app",
+		Provider:           provider,
+		GitLabToken:        token,
+		ExpectedComponents: 3,
+		Repository:         "https://gitlab.com/o/r",
 		Components: []ComponentSpec{
 			{Name: "one", Repository: "https://gitlab.com/o/r", Branch: "main"},
 			{Name: "two", Repository: "https://gitlab.com/o/r", Branch: "main"},
@@ -78,6 +80,22 @@ func forbidSecretList(client *fake.FakeDynamicClient) {
 	client.PrependReactor("list", "secrets", func(kubetesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "secrets", fmt.Errorf("not allowed"))
 	})
+}
+
+// existingComponent builds a Component that validateComponent accepts for spec.
+func existingComponent(spec ComponentSpec, application string, finalizers ...string) *unstructured.Unstructured {
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "appstudio.redhat.com/v1alpha1", "kind": "Component",
+		"metadata": map[string]any{"name": spec.Name, "namespace": "tenant"},
+		"spec": map[string]any{
+			"application": application,
+			"source": map[string]any{"git": map[string]any{
+				"url": spec.Repository, "revision": spec.Branch, "context": spec.Context, "dockerfileUrl": spec.Dockerfile,
+			}},
+		},
+	}}
+	object.SetFinalizers(finalizers)
+	return object
 }
 
 var _ = Describe("FixtureService", func() {
@@ -318,9 +336,10 @@ var _ = Describe("FixtureService", func() {
 		client := fixtureTestClient()
 		service := fixtureTestService(client)
 		_, err := service.EnsureFixture(context.Background(), FixtureSpec{
-			Namespace:   "tenant",
-			RunID:       "run-1",
-			Application: "app",
+			Namespace:          "tenant",
+			RunID:              "run-1",
+			Application:        "app",
+			ExpectedComponents: 3,
 			Components: []ComponentSpec{
 				{Name: "one", Repository: "https://gitlab.com/o/r", Branch: "main"},
 				{Name: "two", Repository: "https://gitlab.com/o/r", Branch: "main"},
@@ -328,28 +347,29 @@ var _ = Describe("FixtureService", func() {
 			},
 		})
 		if err != nil {
-			Expect(err).NotTo(HaveOccurred())
+			Expect(err).ShouldNot(HaveOccurred())
 		}
 
 		application, err := client.Resource(ApplicationGVR).Namespace("tenant").Get(context.Background(), "app", metav1.GetOptions{})
 		if err != nil {
-			Expect(err).NotTo(HaveOccurred())
+			Expect(err).ShouldNot(HaveOccurred())
 		}
 		displayName, found, err := unstructured.NestedString(application.Object, "spec", "displayName")
 		if err != nil {
-			Expect(err).NotTo(HaveOccurred())
+			Expect(err).ShouldNot(HaveOccurred())
 		}
-		Expect(found).To(BeTrue())
-		Expect(displayName).To(Equal("app"))
+		Expect(found).Should(BeTrue())
+		Expect(displayName).Should(Equal("app"))
 	})
 
 	It("configures build and image controllers", func() {
 		client := fixtureTestClient()
 		service := fixtureTestService(client)
 		_, err := service.EnsureFixture(context.Background(), FixtureSpec{
-			Namespace:   "tenant",
-			RunID:       "run-1",
-			Application: "app",
+			Namespace:          "tenant",
+			RunID:              "run-1",
+			Application:        "app",
+			ExpectedComponents: 3,
 			Components: []ComponentSpec{
 				{Name: "one", Repository: "https://gitlab.com/o/r", Branch: "main"},
 				{Name: "two", Repository: "https://gitlab.com/o/r", Branch: "main"},
@@ -357,47 +377,146 @@ var _ = Describe("FixtureService", func() {
 			},
 		})
 		if err != nil {
-			Expect(err).NotTo(HaveOccurred())
+			Expect(err).ShouldNot(HaveOccurred())
 		}
 
 		for _, name := range []string{"one", "two", "three"} {
 			component, err := client.Resource(ComponentGVR).Namespace("tenant").Get(context.Background(), name, metav1.GetOptions{})
 			if err != nil {
-				Expect(err).NotTo(HaveOccurred())
+				Expect(err).ShouldNot(HaveOccurred())
 			}
 			annotations := component.GetAnnotations()
-			Expect(annotations).To(HaveKeyWithValue("build.appstudio.openshift.io/request", "configure-pac"))
-			Expect(annotations).To(HaveKeyWithValue("image.redhat.com/generate", `{"visibility":"public"}`))
+			Expect(annotations).Should(HaveKeyWithValue("build.appstudio.openshift.io/request", "configure-pac"))
+			Expect(annotations).Should(HaveKeyWithValue("image.redhat.com/generate", `{"visibility":"public"}`))
 		}
 	})
 
 	It("rejects drift", func() {
 		client := fixtureTestClient()
 		service := fixtureTestService(client)
-		spec := FixtureSpec{Namespace: "tenant", RunID: "run-1", Application: "app", Components: []ComponentSpec{{Name: "one", Repository: "https://gitlab.com/o/r", Branch: "main", Dockerfile: "one/Dockerfile"}, {Name: "two", Repository: "https://gitlab.com/o/r", Branch: "main", Dockerfile: "two/Dockerfile"}, {Name: "three", Repository: "https://gitlab.com/o/r", Branch: "main", Dockerfile: "three/Dockerfile"}}}
+		spec := FixtureSpec{Namespace: "tenant", RunID: "run-1", Application: "app", ExpectedComponents: 3, Components: []ComponentSpec{{Name: "one", Repository: "https://gitlab.com/o/r", Branch: "main", Dockerfile: "one/Dockerfile"}, {Name: "two", Repository: "https://gitlab.com/o/r", Branch: "main", Dockerfile: "two/Dockerfile"}, {Name: "three", Repository: "https://gitlab.com/o/r", Branch: "main", Dockerfile: "three/Dockerfile"}}}
 		_, err := service.EnsureFixture(context.Background(), spec)
 		if err != nil {
-			Expect(err).NotTo(HaveOccurred())
+			Expect(err).ShouldNot(HaveOccurred())
 		}
 		spec.Components[0].Repository = "https://gitlab.com/other/repository"
 		_, err = service.EnsureFixture(context.Background(), spec)
-		Expect(err).To(MatchError(ContainSubstring("repository drift")))
+		Expect(err).Should(MatchError(ContainSubstring("repository drift")))
 	})
 
 	It("labels created namespace with ownership", func() {
 		client := fixtureTestClient()
 		_, err := (fixtureTestService(client)).EnsureFixture(context.Background(), FixtureSpec{
-			Namespace: "tenant", RunID: "run-1", Application: "app",
+			Namespace: "tenant", RunID: "run-1", Application: "app", ExpectedComponents: 3,
 			Components: []ComponentSpec{{Name: "one", Repository: "https://gitlab.com/o/r", Branch: "main"}, {Name: "two", Repository: "https://gitlab.com/o/r", Branch: "main"}, {Name: "three", Repository: "https://gitlab.com/o/r", Branch: "main"}},
 		})
 		if err != nil {
-			Expect(err).NotTo(HaveOccurred())
+			Expect(err).ShouldNot(HaveOccurred())
 		}
 		namespace, err := client.Resource(NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
 		if err != nil {
-			Expect(err).NotTo(HaveOccurred())
+			Expect(err).ShouldNot(HaveOccurred())
 		}
-		Expect(namespace.GetLabels()).To(SatisfyAll(HaveKeyWithValue("app.konflux-ci.org/managed-by", "lkmabt"), HaveKeyWithValue("app.konflux.org/run-id", "run-1"), HaveKeyWithValue("konflux-ci.dev/type", "tenant"), HaveKeyWithValue("cost-center", "670")))
+		Expect(namespace.GetLabels()).Should(SatisfyAll(HaveKeyWithValue("app.konflux-ci.org/managed-by", "lkmabt"), HaveKeyWithValue("app.konflux.org/run-id", "run-1"), HaveKeyWithValue("konflux-ci.dev/type", "tenant"), HaveKeyWithValue("cost-center", "670")))
+	})
+
+	When("the expected component count is invalid", func() {
+		It("should reject a zero count before creating anything", func() {
+			client := fixtureTestClient()
+			spec := testFixtureSpec("github", "token")
+			spec.ExpectedComponents = 0
+
+			_, err := fixtureTestService(client).EnsureFixture(context.Background(), spec)
+
+			Expect(err).Should(MatchError(Equal("fixture requires a positive expected component count; got 0")))
+			Expect(client.Actions()).Should(BeEmpty())
+		})
+
+		It("should reject a negative count before creating anything", func() {
+			client := fixtureTestClient()
+			spec := testFixtureSpec("github", "token")
+			spec.ExpectedComponents = -1
+
+			_, err := fixtureTestService(client).EnsureFixture(context.Background(), spec)
+
+			Expect(err).Should(MatchError(Equal("fixture requires a positive expected component count; got -1")))
+			Expect(client.Actions()).Should(BeEmpty())
+		})
+
+		It("should reject a count above the component list", func() {
+			client := fixtureTestClient()
+			spec := testFixtureSpec("github", "token")
+			spec.ExpectedComponents = 3
+			spec.Components = spec.Components[:2]
+
+			_, err := fixtureTestService(client).EnsureFixture(context.Background(), spec)
+
+			Expect(err).Should(MatchError(Equal("fixture expects 3 components but got 2")))
+			Expect(client.Actions()).Should(BeEmpty())
+		})
+
+		It("should reject a count below the component list", func() {
+			client := fixtureTestClient()
+			spec := testFixtureSpec("github", "token")
+			spec.ExpectedComponents = 1
+
+			_, err := fixtureTestService(client).EnsureFixture(context.Background(), spec)
+
+			Expect(err).Should(MatchError(Equal("fixture expects 1 components but got 3")))
+			Expect(client.Actions()).Should(BeEmpty())
+		})
+	})
+
+	When("the component list repeats a name", func() {
+		It("should reject a duplicate component name before creating anything", func() {
+			client := fixtureTestClient()
+			spec := testFixtureSpec("github", "token")
+			spec.Components[1].Name = "one"
+
+			_, err := fixtureTestService(client).EnsureFixture(context.Background(), spec)
+
+			Expect(err).Should(MatchError(Equal(`fixture lists component "one" more than once`)))
+			Expect(client.Actions()).Should(BeEmpty())
+		})
+	})
+
+	When("one component is expected", func() {
+		It("should create only the selected component when one is expected", func() {
+			client := fixtureTestClient()
+			spec := testFixtureSpec("github", "token")
+			spec.Components = spec.Components[:1]
+			spec.ExpectedComponents = 1
+
+			result, err := fixtureTestService(client).EnsureFixture(context.Background(), spec)
+
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(result.Components).Should(Equal([]string{"one"}))
+			_, err = client.Resource(ComponentGVR).Namespace("tenant").Get(context.Background(), "one", metav1.GetOptions{})
+			Expect(err).ShouldNot(HaveOccurred())
+			_, err = client.Resource(ComponentGVR).Namespace("tenant").Get(context.Background(), "two", metav1.GetOptions{})
+			Expect(apierrors.IsNotFound(err)).Should(BeTrue())
+		})
+	})
+
+	When("an existing component lists finalizers", func() {
+		It("should reject duplicate finalizer strings", func() {
+			spec := testFixtureSpec("github", "token")
+			client := fixtureTestClient(existingComponent(spec.Components[0], "app", "appstudio.redhat.com/finalizer", "appstudio.redhat.com/finalizer"))
+
+			_, err := fixtureTestService(client).EnsureFixture(context.Background(), spec)
+
+			Expect(err).Should(MatchError(Equal("component one lists duplicate finalizers (appstudio.redhat.com/finalizer); finalizers: appstudio.redhat.com/finalizer, appstudio.redhat.com/finalizer")))
+		})
+
+		It("should accept several distinct finalizers", func() {
+			spec := testFixtureSpec("github", "token")
+			client := fixtureTestClient(existingComponent(spec.Components[0], "app", "appstudio.redhat.com/finalizer", "chains.tekton.dev/pipelinerun"))
+
+			result, err := fixtureTestService(client).EnsureFixture(context.Background(), spec)
+
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(result.Components).Should(Equal([]string{"one", "two", "three"}))
+		})
 	})
 })
 

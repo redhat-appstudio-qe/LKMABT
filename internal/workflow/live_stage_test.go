@@ -62,6 +62,30 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
+// alertCall records one AlertSink invocation.
+type alertCall struct {
+	key   string
+	title string
+	lines []string
+}
+
+// recordingAlertSink implements both AlertSink and io.Writer so tests can
+// assert the durable alert block and the plain fallback separately.
+type recordingAlertSink struct {
+	calls   []alertCall
+	written bytes.Buffer
+}
+
+// Alert records one call with a copy of its detail lines.
+func (s *recordingAlertSink) Alert(key, title string, lines ...string) {
+	s.calls = append(s.calls, alertCall{key: key, title: title, lines: append([]string(nil), lines...)})
+}
+
+// Write records a plain writer copy of a block.
+func (s *recordingAlertSink) Write(p []byte) (int, error) {
+	return s.written.Write(p)
+}
+
 // fakePreflightCluster satisfies cluster.Cluster for Preflight tests.
 type fakePreflightCluster struct {
 	server       string
@@ -440,8 +464,9 @@ var _ = Describe("LiveStage", func() {
 			Expect(scheduling.Platforms).Should(Equal([]string{platform.LinuxS390X, platform.LinuxPPC64LE}))
 		})
 
-		It("narrows an undeclared platform with an informational notice", func() {
+		It("should alert the unsupported and effective platforms", func() {
 			var scheduling cluster.SchedulingSpec
+			sink := &recordingAlertSink{}
 			log := &bytes.Buffer{}
 			stage := &LiveStage{
 				Request: config.Request{
@@ -459,14 +484,96 @@ var _ = Describe("LiveStage", func() {
 					},
 				},
 				Namespace: cleanup.NamespaceService{Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), NameLister: testNameLister{}},
+				Out:       sink,
 				Log:       log,
 			}
 
 			Expect(stage.Preflight(context.Background(), &model.RunManifest{RunID: "run-1"})).Should(Succeed())
 			Expect(scheduling.Platforms).Should(Equal([]string{platform.LinuxAMD64, platform.LinuxS390X}))
 			Expect(stage.Request.Platforms).Should(Equal([]string{platform.LinuxAMD64}))
-			Expect(log.String()).Should(ContainSubstring("cluster osp-p01 does not declare " + platform.LinuxS390X))
+			Expect(sink.calls).Should(HaveLen(1))
+			Expect(sink.calls[0].key).Should(Equal("architecture:osp-p01:linux/s390x->:linux/amd64"))
+			Expect(sink.calls[0].title).Should(Equal("osp-p01: architecture support narrowed"))
+			Expect(sink.calls[0].lines).Should(Equal([]string{"not supported: linux/s390x", "testing: linux/amd64"}))
+			Expect(sink.written.String()).Should(BeEmpty())
+			Expect(log.String()).Should(Equal(" ! osp-p01: architecture support narrowed\n   not supported: linux/s390x\n   testing: linux/amd64\n"))
+			Expect(log.String()).ShouldNot(ContainSubstring("does not declare"))
 			Expect(log.String()).ShouldNot(ContainSubstring("warning:"))
+			Expect(log.String()).ShouldNot(ContainSubstring("error:"))
+		})
+
+		It("should not alert when preflight rejects an entirely unsupported selection", func() {
+			sink := &recordingAlertSink{}
+			log := &bytes.Buffer{}
+			stage := &LiveStage{
+				Request: config.Request{
+					ClusterServer:   "https://api.example",
+					ClusterName:     "osp-p01",
+					TenantNamespace: "tenant",
+					Platforms:       []string{platform.LinuxAMD64, platform.LinuxS390X},
+				},
+				PreflightCluster: fakePreflightCluster{
+					server: "https://api.example",
+					platforms: []cluster.PlatformSupport{
+						{Platform: platform.LinuxAMD64, Configured: false, Supported: false},
+						{Platform: platform.LinuxS390X, Configured: false, Supported: false},
+					},
+				},
+				Namespace: cleanup.NamespaceService{Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()), NameLister: testNameLister{}},
+				Out:       sink,
+				Log:       log,
+			}
+
+			err := stage.Preflight(context.Background(), &model.RunManifest{RunID: "run-1"})
+
+			Expect(err).Should(MatchError(ContainSubstring("does not support any requested platform")))
+			Expect(sink.calls).Should(BeEmpty())
+			Expect(log.String()).Should(BeEmpty())
+			Expect(stage.Request.Platforms).Should(Equal([]string{platform.LinuxAMD64, platform.LinuxS390X}))
+		})
+
+		It("should use a new alert key when the support split changes", func() {
+			sink := &recordingAlertSink{}
+			stage := &LiveStage{
+				Request: config.Request{ClusterName: "osp-p01", Platforms: []string{platform.LinuxAMD64, platform.LinuxS390X}},
+				Out:     sink,
+				Log:     io.Discard,
+			}
+			amd64Supported := cluster.PreflightResult{Platforms: []cluster.PlatformSupport{
+				{Platform: platform.LinuxAMD64, Configured: true, Supported: true},
+				{Platform: platform.LinuxS390X, Configured: false, Supported: false},
+			}}
+
+			stage.limitToSupportedPlatforms(amd64Supported)
+
+			stage.Request.Platforms = []string{platform.LinuxAMD64, platform.LinuxS390X}
+			s390xSupported := cluster.PreflightResult{Platforms: []cluster.PlatformSupport{
+				{Platform: platform.LinuxAMD64, Configured: false, Supported: false},
+				{Platform: platform.LinuxS390X, Configured: true, Supported: true},
+			}}
+			stage.limitToSupportedPlatforms(s390xSupported)
+
+			Expect(sink.calls).Should(HaveLen(2))
+			Expect(sink.calls[0].key).Should(Equal("architecture:osp-p01:linux/s390x->:linux/amd64"))
+			Expect(sink.calls[1].key).Should(Equal("architecture:osp-p01:linux/amd64->:linux/s390x"))
+		})
+
+		It("should key the alert as cluster when the request has no cluster name", func() {
+			sink := &recordingAlertSink{}
+			stage := &LiveStage{
+				Request: config.Request{Platforms: []string{platform.LinuxAMD64, platform.LinuxS390X}},
+				Out:     sink,
+				Log:     io.Discard,
+			}
+			result := cluster.PreflightResult{Platforms: []cluster.PlatformSupport{
+				{Platform: platform.LinuxAMD64, Configured: true, Supported: true},
+				{Platform: platform.LinuxS390X, Configured: false, Supported: false},
+			}}
+
+			stage.limitToSupportedPlatforms(result)
+
+			Expect(sink.calls).Should(HaveLen(1))
+			Expect(sink.calls[0].key).Should(Equal("architecture:cluster:linux/s390x->:linux/amd64"))
 		})
 	})
 
@@ -946,10 +1053,11 @@ var _ = Describe("LiveStage", func() {
 			return true, &authorizationv1.SelfSubjectAccessReview{Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true}}, nil
 		})
 		fixture := providers.FixtureRepository{Owner: "konflux-qe", Name: "dr_test_mathwizz_gl", URL: "https://gitlab.com/konflux-qe/dr_test_mathwizz_gl"}
+		names, paths, _ := config.FullComponents()
 		stage := &LiveStage{
 			Request: config.Request{
 				Provider: "gitlab", TenantNamespace: "tenant", ApplicationName: "app",
-				SourceBranch: "main", ComponentPaths: config.DefaultComponentPaths,
+				SourceBranch: "main", ComponentNames: names, ComponentPaths: paths,
 				Credentials: config.Credentials{GitLabToken: "token", GitLabTokenEphemeral: true},
 			},
 			Clients:  &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetes},
@@ -967,6 +1075,146 @@ var _ = Describe("LiveStage", func() {
 		secret, getErr := dynamic.Resource(cluster.SecretGVR).Namespace("tenant").Get(context.Background(), cluster.GitLabCredentialSecretName, metav1.GetOptions{})
 		Expect(getErr).ShouldNot(HaveOccurred())
 		Expect(secret.GetAnnotations()).Should(HaveKeyWithValue("appstudio.redhat.com/scm.repository", "konflux-qe/dr_test_mathwizz_gl"))
+	})
+
+	When("a smoke run selects one component", func() {
+		It("should create the single component a smoke run selects", func() {
+			fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
+			dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+			stage := &LiveStage{
+				Request: config.Request{
+					Provider:        config.ProviderGitHub,
+					TenantNamespace: "tenant",
+					ApplicationName: "app",
+					SourceBranch:    "smoke-branch",
+					Smoke:           true,
+					ComponentNames:  []string{"mathwizz-history-worker"},
+					ComponentPaths:  []string{"history-worker/Dockerfile"},
+					TektonPaths:     []string{".tekton/konflux-test-mathwizz-history-worker-push.yaml"},
+				},
+				Clients:  &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+				Provider: &githubAppProviderStub{fixture: fixture},
+				Fixture:  fixture,
+				Log:      io.Discard,
+			}
+			manifest := &model.RunManifest{RunID: "run-1"}
+
+			Expect(stage.EnsureFixture(context.Background(), manifest)).Should(Succeed())
+			Expect(manifest.Fixture.Components).Should(Equal([]string{"mathwizz-history-worker"}))
+			Expect(manifest.Fixture.Branch).Should(Equal("smoke-branch"))
+			object, err := dynamic.Resource(cluster.ComponentGVR).Namespace("tenant").Get(context.Background(), "mathwizz-history-worker", metav1.GetOptions{})
+			Expect(err).ShouldNot(HaveOccurred())
+			git, found, getErr := unstructured.NestedMap(object.Object, "spec", "source", "git")
+			Expect(getErr).ShouldNot(HaveOccurred())
+			Expect(found).Should(BeTrue())
+			Expect(git).Should(Equal(map[string]any{
+				"url":           fixture.URL,
+				"revision":      "smoke-branch",
+				"context":       "history-worker",
+				"dockerfileUrl": "Dockerfile",
+			}))
+			for _, name := range []string{"mathwizz-web-server", "mathwizz-frontend"} {
+				_, getErr := dynamic.Resource(cluster.ComponentGVR).Namespace("tenant").Get(context.Background(), name, metav1.GetOptions{})
+				Expect(apierrors.IsNotFound(getErr)).Should(BeTrue(), name)
+			}
+		})
+	})
+
+	When("a full run selects the fixture", func() {
+		It("should create all three components in request order", func() {
+			fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
+			dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
+			stage := &LiveStage{
+				Request: config.Request{
+					Provider:        config.ProviderGitHub,
+					TenantNamespace: "tenant",
+					ApplicationName: "app",
+					SourceBranch:    "main",
+					ComponentNames:  []string{"mathwizz-web-server", "mathwizz-history-worker", "mathwizz-frontend"},
+					ComponentPaths:  []string{"web-server/Dockerfile", "history-worker/Dockerfile", "frontend/Dockerfile"},
+					TektonPaths: []string{
+						".tekton/konflux-test-mathwizz-web-server-push.yaml",
+						".tekton/konflux-test-mathwizz-history-worker-push.yaml",
+						".tekton/konflux-test-mathwizz-frontend-push.yaml",
+					},
+				},
+				Clients:  &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+				Provider: &githubAppProviderStub{fixture: fixture},
+				Fixture:  fixture,
+				Log:      io.Discard,
+			}
+			manifest := &model.RunManifest{RunID: "run-1"}
+
+			Expect(stage.EnsureFixture(context.Background(), manifest)).Should(Succeed())
+			Expect(manifest.Fixture.Components).Should(Equal([]string{"mathwizz-web-server", "mathwizz-history-worker", "mathwizz-frontend"}))
+		})
+	})
+
+	When("the selection is invalid", func() {
+		It("should reject a selection whose names and paths disagree", func() {
+			for _, test := range []struct {
+				names []string
+				paths []string
+				want  string
+			}{
+				{
+					names: []string{"mathwizz-web-server", "mathwizz-history-worker"},
+					paths: []string{"web-server/Dockerfile"},
+					want:  "run selects 2 components but 1 Dockerfile paths",
+				},
+				{
+					names: []string{"mathwizz-web-server"},
+					paths: []string{"web-server/Dockerfile", "history-worker/Dockerfile"},
+					want:  "run selects 1 components but 2 Dockerfile paths",
+				},
+				{
+					names: nil,
+					paths: nil,
+					want:  "run selects 0 components but 0 Dockerfile paths",
+				},
+			} {
+				fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
+				stage := &LiveStage{
+					Request: config.Request{
+						Provider:        config.ProviderGitHub,
+						TenantNamespace: "tenant",
+						ApplicationName: "app",
+						SourceBranch:    "main",
+						ComponentNames:  test.names,
+						ComponentPaths:  test.paths,
+					},
+					Clients:  &cluster.ClientSet{Dynamic: namespaceDynamicClient(), Kubernetes: kubernetesfake.NewSimpleClientset()},
+					Provider: &githubAppProviderStub{fixture: fixture},
+					Fixture:  fixture,
+					Log:      io.Discard,
+				}
+				Expect(stage.EnsureFixture(context.Background(), &model.RunManifest{RunID: "run-1"})).Should(MatchError(test.want), "%v", test.names)
+			}
+		})
+
+		It("should reject a selection that disagrees with the expected component count", func() {
+			fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
+			dynamic := namespaceDynamicClient()
+			stage := &LiveStage{
+				Request: config.Request{
+					Provider:        config.ProviderGitHub,
+					TenantNamespace: "tenant",
+					ApplicationName: "app",
+					SourceBranch:    "main",
+					ComponentNames:  []string{"mathwizz-history-worker"},
+					ComponentPaths:  []string{"history-worker/Dockerfile"},
+				},
+				Clients:  &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+				Provider: &githubAppProviderStub{fixture: fixture},
+				Fixture:  fixture,
+				Log:      io.Discard,
+			}
+
+			err := stage.EnsureFixture(context.Background(), &model.RunManifest{RunID: "run-1"})
+
+			Expect(err).Should(MatchError("fixture expects 3 components but got 1"))
+			Expect(dynamic.Actions()).Should(BeEmpty())
+		})
 	})
 
 	It("restores recorded canonical repository from manifest", func() {
@@ -1057,6 +1305,25 @@ var _ = Describe("LiveStage", func() {
 		second.SetCreationTimestamp(metav1.NewTime(triggeredAt.Add(2 * time.Second)))
 		_, _, err = matchBuildTaskRuns([]unstructured.Unstructured{first, second}, nil, []model.TriggerCommit{{Component: "mathwizz-web-server", SHA: "trigger-sha", CreatedAt: triggeredAt}}, nil)
 		Expect(err).Should(MatchError(ContainSubstring("ambiguous")))
+	})
+
+	It("should name every ambiguous fallback candidate and its source SHA", func() {
+		trigger := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+		commit := model.TriggerCommit{Component: "mathwizz-web-server", SHA: "sha-trigger", CreatedAt: trigger}
+		pipelines := []unstructured.Unstructured{
+			pipelineRunAt("run-fallback-a", "mathwizz-web-server", "sha-a", "uid-a", "True", trigger.Add(time.Minute)),
+			pipelineRunAt("run-fallback-b", "mathwizz-web-server", "sha-b", "uid-b", "True", trigger.Add(2*time.Minute)),
+		}
+
+		_, _, err := matchBuildTaskRuns(pipelines, nil, []model.TriggerCommit{commit}, nil)
+
+		Expect(err).Should(MatchError("ambiguous PipelineRuns for component mathwizz-web-server after trigger sha-trigger; candidates: mathwizz-test/run-fallback-a (sha sha-a), mathwizz-test/run-fallback-b (sha sha-b)"))
+	})
+
+	It("should render a candidate without a source SHA as unknown", func() {
+		object := pipelineRun("run-nosha", "mathwizz-web-server", "", "uid-nosha", "True")
+
+		Expect(pipelineRunCandidates([]*unstructured.Unstructured{&object})).Should(Equal("mathwizz-test/run-nosha (sha unknown)"))
 	})
 
 	It("accepts successful Buildah TaskRuns while the PipelineRun is still running", func() {
@@ -1286,7 +1553,7 @@ var _ = Describe("LiveStage", func() {
 			pipelineRun("run-1", "mathwizz-web-server", "sha-1", "uid-1", "True"),
 			pipelineRun("run-2", "mathwizz-web-server", "sha-1", "uid-2", "True"),
 		}, nil, commits, nil)
-		Expect(err).Should(MatchError(ContainSubstring("overshoot")))
+		Expect(err).Should(MatchError("PipelineRun overshoot for component mathwizz-web-server: 2 succeeded for commit sha-1, expected exactly 1; candidates: mathwizz-test/run-1 (sha sha-1), mathwizz-test/run-2 (sha sha-1)"))
 	})
 
 	It("polls PaC before triggering commits", func() {
@@ -1318,6 +1585,93 @@ var _ = Describe("LiveStage", func() {
 			},
 		}}
 		Expect(paCStatusError(&object)).Should(HaveOccurred())
+	})
+
+	It("should ignore an unrelated component's PaC onboarding failure while triggering", func() {
+		dynamic := namespaceDynamicClient()
+		dynamic.PrependReactor("list", "components", func(kubetesting.Action) (bool, runtime.Object, error) {
+			return true, &unstructured.UnstructuredList{Items: []unstructured.Unstructured{
+				componentWithPaCStatus("mathwizz-web-server", "error"),
+				componentWithPaCStatus("mathwizz-history-worker", "enabled"),
+			}}, nil
+		})
+		provider := &recordingProvider{files: map[string]string{
+			"history-worker/Dockerfile":                              "FROM base\n",
+			".tekton/konflux-test-mathwizz-history-worker-push.yaml": "spec:\n  params:\n  - name: build-platforms\n    value:\n    - linux/x86_64\n",
+		}}
+		fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
+		stage := &LiveStage{
+			Request: config.Request{
+				Provider:        config.ProviderGitHub,
+				TenantNamespace: "tenant",
+				ApplicationName: "app",
+				SourceBranch:    "smoke-branch",
+				Smoke:           true,
+				ComponentNames:  []string{"mathwizz-history-worker"},
+				ComponentPaths:  []string{"history-worker/Dockerfile"},
+				TektonPaths:     []string{".tekton/konflux-test-mathwizz-history-worker-push.yaml"},
+				Platforms:       []string{platform.LinuxAMD64},
+				Timeouts:        config.Timeouts{Trigger: time.Second, Build: time.Second},
+			},
+			Out:      io.Discard,
+			Log:      io.Discard,
+			Fixture:  fixture,
+			Clients:  &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+			Provider: provider,
+		}
+		manifest := &model.RunManifest{
+			RunID:   "run-1",
+			Fixture: model.FixtureIdentity{TenantNamespace: "tenant", Components: []string{"mathwizz-history-worker"}},
+		}
+
+		Expect(stage.TriggerComponents(context.Background(), manifest)).Should(Succeed())
+		Expect(manifest.TriggerCommits).Should(HaveLen(1))
+		Expect(manifest.TriggerCommits[0].Component).Should(Equal("mathwizz-history-worker"))
+		Expect(provider.updated).Should(HaveKey("history-worker/Dockerfile"))
+	})
+
+	It("should fail triggering when the selected component's PaC onboarding failed", func() {
+		dynamic := namespaceDynamicClient()
+		dynamic.PrependReactor("list", "components", func(kubetesting.Action) (bool, runtime.Object, error) {
+			return true, &unstructured.UnstructuredList{Items: []unstructured.Unstructured{
+				componentWithPaCStatus("mathwizz-history-worker", "error"),
+				componentWithPaCStatus("mathwizz-web-server", "enabled"),
+			}}, nil
+		})
+		provider := &recordingProvider{files: map[string]string{
+			"history-worker/Dockerfile":                              "FROM base\n",
+			".tekton/konflux-test-mathwizz-history-worker-push.yaml": "spec:\n  params:\n  - name: build-platforms\n    value:\n    - linux/x86_64\n",
+		}}
+		fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
+		stage := &LiveStage{
+			Request: config.Request{
+				Provider:        config.ProviderGitHub,
+				TenantNamespace: "tenant",
+				ApplicationName: "app",
+				SourceBranch:    "smoke-branch",
+				Smoke:           true,
+				ComponentNames:  []string{"mathwizz-history-worker"},
+				ComponentPaths:  []string{"history-worker/Dockerfile"},
+				TektonPaths:     []string{".tekton/konflux-test-mathwizz-history-worker-push.yaml"},
+				Platforms:       []string{platform.LinuxAMD64},
+				Timeouts:        config.Timeouts{Trigger: time.Second, Build: time.Second},
+			},
+			Out:      io.Discard,
+			Log:      io.Discard,
+			Fixture:  fixture,
+			Clients:  &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+			Provider: provider,
+		}
+		manifest := &model.RunManifest{
+			RunID:   "run-1",
+			Fixture: model.FixtureIdentity{TenantNamespace: "tenant", Components: []string{"mathwizz-history-worker"}},
+		}
+
+		err := stage.TriggerComponents(context.Background(), manifest)
+
+		Expect(err).Should(MatchError(ContainSubstring("wait for PaC onboarding: component mathwizz-history-worker PaC onboarding failed")))
+		Expect(manifest.TriggerCommits).Should(BeEmpty())
+		Expect(provider.updated).Should(BeEmpty())
 	})
 
 	Describe("LiveStage build progress", func() {
@@ -1722,7 +2076,7 @@ var _ = Describe("build evidence capture", func() {
 			Clients: &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
 		}
 		manifest := &model.RunManifest{
-			Fixture:        model.FixtureIdentity{TenantNamespace: "mathwizz-test"},
+			Fixture:        model.FixtureIdentity{TenantNamespace: "mathwizz-test", Components: []string{"component-b"}},
 			TriggerCommits: []model.TriggerCommit{commit},
 		}
 
@@ -1731,6 +2085,34 @@ var _ = Describe("build evidence capture", func() {
 		Expect(err).Should(MatchError(ContainSubstring("component component-b PaC onboarding failed")))
 		Expect(manifest.BuildOutputs).Should(HaveLen(1))
 		Expect(manifest.BuildOutputs[0].Component).Should(Equal("component-a"))
+	})
+
+	It("should ignore an unrelated component's PaC onboarding failure while verifying builds", func() {
+		runA := pipelineRun("run-a", "component-a", "sha-a", "uid-a", "True")
+		taskA := buildTaskRunForWorkflow("task-a", "uid-a", "True", "buildah-oci-ta")
+		dynamic := namespaceDynamicClient()
+		dynamic.PrependReactor("list", "components", func(kubetesting.Action) (bool, runtime.Object, error) {
+			return true, &unstructured.UnstructuredList{Items: []unstructured.Unstructured{componentWithPaCStatus("component-b", "error")}}, nil
+		})
+		dynamic.PrependReactor("list", "pipelineruns", func(kubetesting.Action) (bool, runtime.Object, error) {
+			return true, &unstructured.UnstructuredList{Items: []unstructured.Unstructured{runA}}, nil
+		})
+		dynamic.PrependReactor("list", "taskruns", func(kubetesting.Action) (bool, runtime.Object, error) {
+			return true, &unstructured.UnstructuredList{Items: []unstructured.Unstructured{taskA}}, nil
+		})
+		stage := &LiveStage{
+			Request: config.Request{Platforms: []string{platform.LinuxAMD64}, Timeouts: config.Timeouts{Trigger: time.Second, Build: time.Second}},
+			Clients: &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+		}
+		manifest := &model.RunManifest{
+			Fixture:        model.FixtureIdentity{TenantNamespace: "mathwizz-test", Components: []string{"component-a"}},
+			TriggerCommits: []model.TriggerCommit{{Component: "component-a", SHA: "sha-a"}},
+		}
+
+		Expect(stage.VerifyBuilds(context.Background(), manifest)).Should(Succeed())
+		Expect(manifest.BuildOutputs).Should(HaveLen(1))
+		Expect(manifest.BuildOutputs[0].Component).Should(Equal("component-a"))
+		Expect(manifest.PipelineRuns).Should(HaveLen(1))
 	})
 
 	It("keeps captured evidence across a PaC retrigger", func() {

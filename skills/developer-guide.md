@@ -364,7 +364,7 @@ GitLab concurrently inside a cluster.
 ### Per-Cluster Platform Support
 - `cluster.CheckScheduling` (`internal/cluster/client.go`) returns `SchedulingResult{Checks, Platforms}`; `PlatformSupport{Platform,Supported,Configured,Details}` distinguishes an undeclared platform (`Configured=false,Supported=false`) from a declared but incomplete one (`Configured=true,Supported=false`).
 - `RunPreflight` (`internal/cluster/preflight.go`) fails for a declared-but-incomplete platform and when none of the requested platforms is supported; an undeclared platform does not fail preflight. `PreflightResult.Supported()` and `Unsupported()` expose the split.
-- `LiveStage.Preflight` (`internal/workflow/live_stage.go`) calls `limitToSupportedPlatforms`, emits an informational notice, and mutates `Request.Platforms` to the supported subset so triggering and verification use it.
+- `LiveStage.Preflight` (`internal/workflow/live_stage.go`) calls `limitToSupportedPlatforms`, which mutates `Request.Platforms` to the supported subset and emits one durable alert per cluster (`LiveStage.alert` → `workflow.AlertSink`, implemented by `cli.Console.Alert`) naming the unsupported and effective platforms; the alert is deduplicated per console, so a `both` run shows one block
 - Kueue diagnostics use `cluster.KueueWorkloadGVR` and `AdmissionInspector.QuotaMessage` (`internal/cluster/admission.go`), which reads `QuotaReserved=False.message` from the Workload owned by the PipelineRun. Missing Workloads and errors fall back to the PipelineRun condition and never fail the wait.
 
 ## Design Decisions
@@ -374,7 +374,8 @@ The tool uses **persistent fixtures** rather than creating/deleting test resourc
 - One persistent tenant namespace per provider (GitHub, GitLab); `both`
   starts both providers concurrently inside the cluster with distinct run IDs
   and artifact directories; clusters themselves run sequentially
-- One Application with three Components (`mathwizz-web-server`, `mathwizz-history-worker`, `mathwizz-frontend`)
+- One Application with three Components (`mathwizz-web-server`, `mathwizz-history-worker`, `mathwizz-frontend`); `--smoke` narrows one run to `mathwizz-history-worker` only
+- `cluster.FixtureSpec.ExpectedComponents` is required and must be positive; `EnsureFixture` rejects a count mismatch or a duplicate component name before creating a namespace, Application, or Component, and `workflow.LiveStage.EnsureFixture` passes `config.Request.ExpectedComponents()` (1 for `--smoke`, 3 otherwise)
 - Persistent provider forks (never deleted by the tool)
 
 **Rationale**: avoids PaC onboarding delays, reduces flakiness from resource

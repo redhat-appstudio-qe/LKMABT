@@ -64,11 +64,11 @@ type ComponentSpec struct {
 }
 
 // FixtureSpec describes the tenant resources EnsureFixture creates. Namespace,
-// RunID, and Application are required, together with exactly three Components.
-// Provider "gitlab" enables GitLab SCM credential handling, using GitLabToken
-// and Repository; any other Provider skips it. GitLabTokenEphemeral marks a
-// token revoked at run end, which forces the Secret write and requires delete
-// permission.
+// RunID, and Application are required, together with Components matching
+// ExpectedComponents exactly. Provider "gitlab" enables
+// GitLab SCM credential handling, using GitLabToken and Repository; any other
+// Provider skips it. GitLabTokenEphemeral marks a token revoked at run end,
+// which forces the Secret write and requires delete permission.
 type FixtureSpec struct {
 	Namespace            string
 	RunID                string
@@ -78,6 +78,9 @@ type FixtureSpec struct {
 	GitLabTokenEphemeral bool
 	Repository           string
 	Components           []ComponentSpec
+	// ExpectedComponents is the number of Components this fixture must
+	// contain. It is required and must be positive; zero is not "any count".
+	ExpectedComponents int
 }
 
 // FixtureResult reports the namespace, application, and component names that
@@ -97,17 +100,28 @@ type FixtureService struct {
 }
 
 // EnsureFixture creates missing tenant resources and rejects drift in existing
-// components. Namespace, RunID, and Application are required, as are exactly
-// three Components. Existing namespaces are adopted without relabeling, an
-// existing Application must live in the requested namespace, and existing
-// Components must match their expected source configuration. The first failure
-// aborts the call; resources created before it remain for cleanup.
+// components. Namespace, RunID, and Application are required, as is a positive
+// ExpectedComponents matching len(Components), with unique component names;
+// those checks run before any cluster resource is created. Existing
+// namespaces are adopted without relabeling, an existing Application must
+// live in the requested namespace, and existing Components must match their
+// expected source configuration. The first failure aborts the call;
+// resources created before it remain for cleanup.
 func (s FixtureService) EnsureFixture(ctx context.Context, spec FixtureSpec) (FixtureResult, error) {
 	if s.Dynamic == nil {
 		return FixtureResult{}, fmt.Errorf("dynamic client is required")
 	}
-	if spec.Namespace == "" || spec.RunID == "" || spec.Application == "" || len(spec.Components) != 3 {
-		return FixtureResult{}, fmt.Errorf("fixture requires namespace, application, and exactly three components")
+	if spec.Namespace == "" || spec.RunID == "" || spec.Application == "" {
+		return FixtureResult{}, fmt.Errorf("fixture requires namespace, run ID, and application")
+	}
+	if spec.ExpectedComponents <= 0 {
+		return FixtureResult{}, fmt.Errorf("fixture requires a positive expected component count; got %d", spec.ExpectedComponents)
+	}
+	if len(spec.Components) != spec.ExpectedComponents {
+		return FixtureResult{}, fmt.Errorf("fixture expects %d components but got %d", spec.ExpectedComponents, len(spec.Components))
+	}
+	if duplicate, found := duplicateComponentName(spec.Components); found {
+		return FixtureResult{}, fmt.Errorf("fixture lists component %q more than once", duplicate)
 	}
 	namespaces := s.Dynamic.Resource(NamespaceGVR)
 	if err := s.ensureNamespace(ctx, namespaces, spec.Namespace, spec.RunID); err != nil {
@@ -158,8 +172,15 @@ func (s FixtureService) EnsureFixture(ctx context.Context, spec FixtureSpec) (Fi
 			}
 		} else if getErr != nil {
 			return FixtureResult{}, fmt.Errorf("get component %s: %w", component.Name, getErr)
-		} else if err := validateComponent(object, component, spec.Application); err != nil {
-			return FixtureResult{}, err
+		} else {
+			// Duplicate finalizers are corruption, not drift; report them
+			// before validateComponent so the failure names the problem.
+			if duplicates := duplicateFinalizers(object); len(duplicates) > 0 {
+				return FixtureResult{}, fmt.Errorf("component %s lists duplicate finalizers (%s); finalizers: %s", component.Name, strings.Join(duplicates, ", "), strings.Join(object.GetFinalizers(), ", "))
+			}
+			if err := validateComponent(object, component, spec.Application); err != nil {
+				return FixtureResult{}, err
+			}
 		}
 		result.Components = append(result.Components, component.Name)
 	}
@@ -502,6 +523,40 @@ func usableBasicAuthSecret(secret *unstructured.Unstructured) bool {
 		}
 	}
 	return false
+}
+
+// duplicateComponentName reports whether a component name repeats. The bool
+// result distinguishes "no duplicate" from a repeated empty name, which is
+// a duplicate too. When found is true, name is the first repeated name.
+func duplicateComponentName(components []ComponentSpec) (name string, found bool) {
+	seen := make(map[string]struct{}, len(components))
+	for _, component := range components {
+		if _, exists := seen[component.Name]; exists {
+			return component.Name, true
+		}
+		seen[component.Name] = struct{}{}
+	}
+	return "", false
+}
+
+// duplicateFinalizers returns the finalizer strings an object lists more
+// than once, in first-seen order. Several distinct controller finalizers are
+// legitimate; a repeated string is not.
+func duplicateFinalizers(object *unstructured.Unstructured) []string {
+	seen := make(map[string]struct{})
+	reported := make(map[string]struct{})
+	duplicates := make([]string, 0)
+	for _, finalizer := range object.GetFinalizers() {
+		_, isDuplicate := seen[finalizer]
+		_, alreadyReported := reported[finalizer]
+		if isDuplicate && !alreadyReported {
+			duplicates = append(duplicates, finalizer)
+			reported[finalizer] = struct{}{}
+		} else if !isDuplicate {
+			seen[finalizer] = struct{}{}
+		}
+	}
+	return duplicates
 }
 
 // validateComponent checks that an existing component belongs to application

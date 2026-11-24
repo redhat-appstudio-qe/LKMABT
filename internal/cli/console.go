@@ -42,7 +42,11 @@ type Console struct {
 	// Transient heartbeats are never buffered.
 	pending bytes.Buffer
 	partial []byte
-	width   int
+	// seenAlerts deduplicates Alert keys for the lifetime of this console,
+	// which is one aggregate run. It is created on first use and guarded by
+	// outMu.
+	seenAlerts map[string]struct{}
+	width      int
 
 	active        []*Step
 	frame         int
@@ -195,6 +199,37 @@ func (c *Console) Result(success bool, description string) {
 	}
 	c.writePermanentLocked(1, func() {
 		fmt.Fprintln(c.Out, line)
+	})
+}
+
+// Alert writes one durable informational block above the live region and
+// suppresses later calls with the same key. It never prompts and never
+// changes a run result; while a prompt owns the terminal the block is
+// buffered and flushed with the prompt's other pending output.
+func (c *Console) Alert(key, title string, lines ...string) {
+	if c == nil || c.Out == nil {
+		return
+	}
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	if c.seenAlerts == nil {
+		c.seenAlerts = make(map[string]struct{})
+	}
+	if _, seen := c.seenAlerts[key]; seen {
+		return
+	}
+	c.seenAlerts[key] = struct{}{}
+	block := alertBlock(c.color, title, lines)
+	if c.promptActive {
+		for _, line := range block {
+			fmt.Fprintln(&c.pending, line)
+		}
+		return
+	}
+	c.writePermanentLocked(len(block), func() {
+		for _, line := range block {
+			fmt.Fprintln(c.Out, line)
+		}
 	})
 }
 

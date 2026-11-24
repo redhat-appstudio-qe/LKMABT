@@ -250,6 +250,185 @@ var _ = Describe("Console.Confirm", func() {
 	})
 })
 
+var _ = Describe("Console.Alert", func() {
+	const (
+		alertKey   = "architecture:kflux-osp-p01:linux/s390x,linux/ppc64le->:linux/amd64,linux/arm64"
+		alertTitle = "kflux-osp-p01: architecture support narrowed"
+	)
+
+	var alertLines []string
+
+	BeforeEach(func() {
+		alertLines = []string{
+			"not supported: linux/s390x, linux/ppc64le",
+			"testing: linux/amd64, linux/arm64",
+		}
+	})
+
+	When("color is disabled", func() {
+		It("should write the pinned plain block when color is disabled", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out}
+
+			console.Alert(alertKey, alertTitle, alertLines...)
+
+			Expect(out.String()).Should(Equal(" ! " + alertTitle + "\n" +
+				"   not supported: linux/s390x, linux/ppc64le\n" +
+				"   testing: linux/amd64, linux/arm64\n"))
+			Expect(out.String()).ShouldNot(ContainSubstring("\x1b["))
+		})
+	})
+
+	When("color is enabled", func() {
+		It("should mark the title in amber and leave detail lines uncolored", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, animate: true, color: true, frameInterval: time.Hour}
+
+			console.Alert(alertKey, alertTitle, alertLines...)
+
+			Expect(out.String()).Should(Equal(" \x1b[33m!\x1b[0m \x1b[33m" + alertTitle + "\x1b[0m\n" +
+				"   not supported: linux/s390x, linux/ppc64le\n" +
+				"   testing: linux/amd64, linux/arm64\n"))
+		})
+	})
+
+	When("the same key repeats", func() {
+		It("should write one block for a repeated key", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out}
+
+			console.Alert(alertKey, alertTitle, alertLines...)
+			console.Alert(alertKey, alertTitle, alertLines...)
+
+			Expect(strings.Count(out.String(), alertTitle)).Should(Equal(1))
+			Expect(strings.Count(out.String(), "not supported: linux/s390x, linux/ppc64le")).Should(Equal(1))
+			Expect(strings.Count(out.String(), "testing: linux/amd64, linux/arm64")).Should(Equal(1))
+		})
+	})
+
+	When("every key is distinct", func() {
+		It("should write one block per distinct key", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out}
+
+			console.Alert("k1", alertTitle, alertLines...)
+			console.Alert("k2", alertTitle, alertLines...)
+
+			Expect(strings.Count(out.String(), alertTitle)).Should(Equal(2))
+			Expect(strings.Count(out.String(), "not supported: linux/s390x, linux/ppc64le")).Should(Equal(2))
+			Expect(strings.Count(out.String(), "testing: linux/amd64, linux/arm64")).Should(Equal(2))
+		})
+	})
+
+	When("goroutines share a key", func() {
+		It("should write exactly one whole block when goroutines share a key", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out}
+
+			var group sync.WaitGroup
+			for range 8 {
+				group.Add(1)
+				go func() {
+					defer group.Done()
+					console.Alert(alertKey, alertTitle, alertLines...)
+				}()
+			}
+			group.Wait()
+
+			Expect(out.String()).Should(Equal(" ! " + alertTitle + "\n" +
+				"   not supported: linux/s390x, linux/ppc64le\n" +
+				"   testing: linux/amd64, linux/arm64\n"))
+		})
+	})
+
+	When("an animated step is active", func() {
+		It("should keep the alert block above the redrawn live region", func() {
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, animate: true, frameInterval: time.Hour}
+			step := console.StartStep("Preflight cluster (github) 🔍")
+
+			console.Alert(alertKey, alertTitle, alertLines...)
+			console.Printf("after alert")
+			step.End(true)
+
+			rendered := out.String()
+			Expect(rendered).Should(ContainSubstring(" ! " + alertTitle + "\n" +
+				"   not supported: linux/s390x, linux/ppc64le\n" +
+				"   testing: linux/amd64, linux/arm64\n"))
+			lastBlock := strings.LastIndex(rendered, "   testing: linux/amd64, linux/arm64")
+			afterAlert := strings.Index(rendered, "after alert")
+			Expect(strings.Index(rendered, " ! "+alertTitle)).Should(BeNumerically(">=", 0))
+			Expect(afterAlert).Should(BeNumerically(">", lastBlock))
+			Expect(strings.LastIndex(rendered[:afterAlert], "Preflight cluster (github) 🔍")).Should(BeNumerically(">", lastBlock))
+		})
+	})
+
+	When("a prompt owns the terminal", func() {
+		It("should buffer the block until a prompt completes", func() {
+			prompt := &countingPrompt{approved: true, entered: make(chan struct{}), release: make(chan struct{})}
+			out := &bytes.Buffer{}
+			console := &Console{Out: out, Prompt: prompt}
+
+			confirmDone := make(chan struct{})
+			go func() {
+				defer close(confirmDone)
+				_, _ = console.Confirm(context.Background(), "delete tenant")
+			}()
+			<-prompt.entered
+
+			alertDone := make(chan struct{})
+			go func() {
+				defer close(alertDone)
+				console.Alert(alertKey, alertTitle, alertLines...)
+			}()
+			Eventually(alertDone, 100*time.Millisecond).Should(BeClosed())
+			Expect(out.String()).ShouldNot(ContainSubstring(alertTitle))
+
+			close(prompt.release)
+			Eventually(confirmDone).Should(BeClosed())
+			Expect(out.String()).Should(ContainSubstring(" ! " + alertTitle))
+			Expect(out.String()).Should(ContainSubstring("   not supported: linux/s390x, linux/ppc64le"))
+			Expect(out.String()).Should(ContainSubstring("   testing: linux/amd64, linux/arm64"))
+
+			console.Printf("after prompt")
+			Expect(strings.Index(out.String(), "after prompt")).Should(BeNumerically(">", strings.LastIndex(out.String(), "   testing: linux/amd64, linux/arm64")))
+		})
+	})
+
+	When("the console is nil", func() {
+		It("should do nothing on a nil console", func() {
+			var console *Console
+			Expect(func() { console.Alert(alertKey, alertTitle, alertLines...) }).ShouldNot(Panic())
+		})
+	})
+
+	When("Out is nil", func() {
+		It("should do nothing when Out is nil", func() {
+			console := &Console{}
+			Expect(func() { console.Alert(alertKey, alertTitle, alertLines...) }).ShouldNot(Panic())
+			Expect(console.seenAlerts).Should(BeNil())
+		})
+	})
+
+	When("another console already showed the key", func() {
+		It("should not share deduplication between consoles", func() {
+			out1 := &bytes.Buffer{}
+			out2 := &bytes.Buffer{}
+			console1 := &Console{Out: out1}
+			console2 := &Console{Out: out2}
+
+			console1.Alert(alertKey, alertTitle, alertLines...)
+			console2.Alert(alertKey, alertTitle, alertLines...)
+
+			block := " ! " + alertTitle + "\n" +
+				"   not supported: linux/s390x, linux/ppc64le\n" +
+				"   testing: linux/amd64, linux/arm64\n"
+			Expect(out1.String()).Should(Equal(block))
+			Expect(out2.String()).Should(Equal(block))
+		})
+	})
+})
+
 var _ = Describe("Console.Close", func() {
 	When("an animated step is active", func() {
 		It("should erase the live region and drop buffered output", func() {

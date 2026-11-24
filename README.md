@@ -51,6 +51,7 @@ broken build fails later and leaves its receipt in `.lkmabt-runs/`.
 - [Cleaning up a namespace](#cleaning-up-a-namespace)
 - [Run logs and artifact retention](#run-logs-and-artifact-retention)
 
+---
 ## Prerequisites
 
 The *tachles*: a Go toolchain, cluster credentials, provider accounts with push
@@ -130,7 +131,7 @@ Provider credentials are described in
 ### Cluster requirements
 
 These are not suggestions. The run checks platforms, access, and the GitHub App
-at preflight, before triggering three components that cannot build.
+at preflight, before triggering up to three components that cannot build.
 
 - The `multi-platform-controller` deployment is ready in namespace
   `multi-platform-controller`, and its `host-config` ConfigMap carries the
@@ -141,8 +142,10 @@ at preflight, before triggering three components that cannot build.
   selection. Dynamic provisioning is sufficient; physical architecture nodes
   are not required.
   - An architecture the cluster does not declare is informational, not a
-    preflight failure. LKMABT prints a notice and continues on that cluster with
-    the selected architectures the cluster does declare.
+    preflight failure. LKMABT prints an alert naming the architectures it will
+    not test and the ones it will (`not supported:` / `testing:`), then
+    continues on that cluster with the selected architectures the cluster does
+    declare.
   - A declared architecture must be schedulable. A static
     `host.<name>.platform` entry needs `address`, `user`, and `secret`; a
     dynamic entry needs a provider type. A declared but incomplete or
@@ -152,7 +155,7 @@ at preflight, before triggering three components that cannot build.
   - GitHub App onboarding is a separate preflight check. A cluster that cannot
     install the fixture's GitHub App still fails preflight even when its
     architecture support is sufficient.
-- PaC onboarding is complete for all three components, with current `.tekton`
+- PaC onboarding is complete for the selected components, with current `.tekton`
   configuration on the fixture branch. Each push PipelineRun must declare a
   `build-platforms` parameter; LKMABT rewrites it and fails when it is absent.
   LKMABT waits for PaC readiness and does not merge onboarding changes.
@@ -177,6 +180,7 @@ access to:
   that host replaces `gitlab.com`;
 - `gitlab.cee.redhat.com` when LKMABT has to clone and build kflux.
 
+---
 ## Setup
 
 ### 1. Install LKMABT
@@ -283,6 +287,7 @@ browser-login token is first exercised during that cluster's preflight or
 fixture setup. Checking now avoids a failed run; five minutes here saves a
 *schlep* through failure artifacts later.
 
+---
 ## Authentication methods
 
 LKMABT needs a GitHub token for GitHub runs and a GitLab token for GitLab runs.
@@ -356,7 +361,7 @@ the token to the default endpoint.
 | `GITLAB_BOT_TOKEN` | Personal access token with `api` and `write_repository`. Leave empty for the token-page prompt on `gitlab.com`. LKMABT never revokes it. |
 | `GITLAB_API_URL` | Defaults to `https://gitlab.com/api/v4`. |
 
-**`GITHUB_TOKEN`.** In a terminal, LKMABT checks before the first cluster that
+**`GITHUB_TOKEN`** In a terminal, LKMABT checks before the first cluster that
 the token can list App installations for `redhat-appstudio-qe`, push to the
 fixture, and list repositories for selected-repository App installations. A
 token GitHub rejects is replaced by an existing `gh` login when that login
@@ -368,13 +373,14 @@ lists installation repositories for Apps installed for selected repositories;
 when the token cannot list them, preflight logs a warning and continues, and
 the trigger-stage PaC wait remains the backstop.
 
-**`GITLAB_BOT_TOKEN`.** The token is used as-is and is never revoked. PaC
+**`GITLAB_BOT_TOKEN`** The token is used as-is and is never revoked. PaC
 reuses an existing usable GitLab SCM Secret (labeled
 `appstudio.redhat.com/credentials=scm` and
 `appstudio.redhat.com/scm.host=gitlab.com`, and annotated for the fixture
 repository) when one exists; otherwise LKMABT creates `gitlab-build-secret`
 and keeps it for later runs.
 
+---
 ## Running LKMABT
 
 Run from the checkout root, or pass absolute paths. `--clusters-file` defaults
@@ -415,9 +421,19 @@ Run-only flags:
 | `--tenant-namespace` | `mathwizz-test-github` or `mathwizz-test-gitlab` | Single-provider runs select the namespace; `both` fixes it per provider and rejects any other value. |
 | `--application` | `mathwizz` | Application name created or reused in the tenant namespace. |
 | `--branch` | `main` | Fixture branch for configuration and trigger commits. |
+| `--smoke` | off | Build only `mathwizz-history-worker`; a normal run builds all three fixture components. Rejected by `cleanup`. |
 | `--preflight-timeout` | `10m` | Bounds preflight and fixture setup. |
 | `--trigger-timeout` | `5m` | Bounds only the wait for a triggered PipelineRun to appear. |
 | `--build-timeout` | `60m` | Bounds each of triggering, the build wait, and build-output verification. |
+
+Smoke runs build the single `mathwizz-history-worker` component; architecture
+selection is unchanged.
+
+```bash
+lkmabt github --smoke
+lkmabt github amd64 --smoke
+lkmabt both --smoke
+```
 
 The fixture repository is fixed: `--source-repository` must equal the selected
 provider's fixture URL (the GitHub fixture for `both`). `cleanup` requires
@@ -462,16 +478,17 @@ LKMABT applies the selection to every component:
    incomplete or unschedulable platform fails preflight, and a cluster that
    declares none of the selection fails preflight outright. Build verification
    requires one successful Buildah output per platform the cluster runs. The
-   final result line lists the requested architectures; the per-cluster notice
+   final result line lists the requested architectures; the per-cluster alert
    and the row's `tested:` note name the subset that cluster actually builds.
 
 The fixtures are shared; the configuration and Dockerfile commits are visible
 to other users. Your trigger commit is a postcard to everyone else at the
 fixture; assuming nobody will notice takes a certain *chutzpah*. One selection
-applies to all three components—no per-component exceptions, because that way
-lies *mishigas*.
+applies to every component the run builds—no per-component architecture
+exceptions, because that way lies *mishigas*.
 
-### LKMABT under the hood
+---
+## LKMABT under the hood
 
 - Clusters run one at a time in clusters-file order—no parallel heroics. Each
   cluster finishes or fails before the next one starts. `both` runs the two
@@ -645,6 +662,7 @@ selection. This applies to configured tokens and browser logins.
   `--tenant-namespace`; otherwise wait for that run. The lock has the patience
   of my nephew Doron from Israel: none, but it tells you exactly why.
 
+---
 ## Cleaning up a namespace
 
 ```bash
@@ -684,6 +702,7 @@ not accept `--env-file`.
   controller's remaining resources or finalizers.
 - `cleanup` needs no provider credentials.
 
+---
 ## Run logs and artifact retention
 
 Runtime evidence is stored under `.lkmabt-runs/` by default; `--state-dir`
