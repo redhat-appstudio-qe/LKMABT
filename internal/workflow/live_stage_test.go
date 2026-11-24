@@ -602,7 +602,7 @@ var _ = Describe("LiveStage", func() {
 		})
 
 		When("the provider cannot verify selected repositories", func() {
-			It("should warn and continue", func() {
+			It("should continue without a warning", func() {
 				provider := &githubAppProviderStub{err: fmt.Errorf("%w: selected repositories", providers.ErrUnverifiable)}
 				log := &bytes.Buffer{}
 				stage := &LiveStage{
@@ -613,8 +613,8 @@ var _ = Describe("LiveStage", func() {
 
 				_, err := stage.verifyGitHubApp(context.Background())
 				Expect(err).ShouldNot(HaveOccurred())
-				Expect(log.String()).Should(ContainSubstring("warning:"))
-				Expect(log.String()).Should(ContainSubstring("selected repositories"))
+				Expect(log.String()).ShouldNot(ContainSubstring("warning:"))
+				Expect(log.String()).ShouldNot(ContainSubstring("cannot be verified"))
 			})
 		})
 
@@ -946,7 +946,7 @@ var _ = Describe("LiveStage", func() {
 		})
 
 		When("the installation appears but its repository selection cannot be verified", func() {
-			It("should warn without claiming the installation was verified", func() {
+			It("should continue silently without claiming the installation was verified", func() {
 				required := appInstallationRequired()
 				provider := &githubAppProviderStub{verify: func(call int) error {
 					if call == 1 {
@@ -973,7 +973,8 @@ var _ = Describe("LiveStage", func() {
 				verification, err := stage.verifyGitHubApp(ctx)
 				Expect(err).ShouldNot(HaveOccurred())
 				Expect(verification.Verified).Should(BeFalse())
-				Expect(out.String()).Should(ContainSubstring("warning:"))
+				Expect(out.String()).ShouldNot(ContainSubstring("warning:"))
+				Expect(out.String()).ShouldNot(ContainSubstring("cannot be verified"))
 				Expect(out.String()).ShouldNot(ContainSubstring("installation verified"))
 			})
 		})

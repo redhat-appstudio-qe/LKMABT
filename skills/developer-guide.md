@@ -275,8 +275,8 @@ context until the installation appears or the run is canceled.
 Declining, or a non-interactive run, fails with the installation URL.
 Installations limited to selected repositories must include the fixture;
 a confirmed selection that omits it fails the wait immediately with the
-installation settings URL, while selections the token cannot list log a
-warning and continue. After an approved wait that outlives the preflight
+installation settings URL, while selections the token cannot list are skipped
+without user-facing output. After an approved wait that outlives the preflight
 deadline, the remaining preflight steps continue on the run context.
 
 ### Provider Credential Lifecycle
@@ -295,10 +295,10 @@ verifies the cluster App against the fixture. A classic or OAuth token may need
 the `read:user` scope to list selected-installation repositories; add it with
 `gh auth refresh -h github.com -s read:user`. GitHub rejects a `gh` OAuth user
 token (`gho_`) for that endpoint even with the scope, so the acquisition check
-skips it and preflight keeps the warning path. The acquisition check does not
-require the fixture in every installation because the cluster app slug is
-unknown there; a listing that remains unverifiable after the browser login still
-only produces the preflight warning. When `GITLAB_BOT_TOKEN` is empty, GitLab opens the prefilled PAT page (1-day
+skips it and preflight skips the listing without user-facing output. The
+acquisition check does not require the fixture in every installation because
+the cluster app slug is unknown there; a listing that remains unverifiable
+after the browser login does not block the run. When `GITLAB_BOT_TOKEN` is empty, GitLab opens the prefilled PAT page (1-day
 expiration, `api` and `write_repository`) and prompts for the token without
 echo; the token is used directly and is never written to the credential store.
 The ephemeral GitLab token is also written to the tenant SCM Secret for PaC;

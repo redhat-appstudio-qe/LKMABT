@@ -399,8 +399,8 @@ failures, rate limits, and timeouts abort the run without replacing the token.
 Classic tokens need `read:org` and may need `read:user` for the installation
 repository listing; `gh` OAuth tokens skip that listing. Cluster preflight also
 lists installation repositories for Apps installed for selected repositories;
-when the token cannot list them, preflight logs a warning and continues, and
-the trigger-stage PaC wait remains the backstop.
+when the token cannot list them, preflight skips that check and continues
+without user-facing output, and the trigger-stage PaC wait remains the backstop.
 
 **`GITLAB_BOT_TOKEN`.** The token is used as-is and is never revoked. PaC
 reuses an existing usable GitLab SCM Secret (labeled
@@ -628,9 +628,10 @@ fails immediately at `preflight` with the installation settings URL. Add
 `redhat-appstudio-qe/dr_test_mathwizz` to the installation or select all
 repositories.
 
-**Token cannot list installation repositories.** Preflight logs a warning and
-continues; the PaC wait during triggering remains the backstop for a missing
-selection. This applies to configured tokens and browser logins.
+**Token cannot list installation repositories.** Preflight skips the check and
+continues without user-facing output; the PaC wait during triggering remains the
+backstop for a missing selection. This applies to configured tokens and browser
+logins.
 
 ### During the run
 

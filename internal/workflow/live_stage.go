@@ -361,7 +361,7 @@ type githubAppVerification struct {
 
 // verifyGitHubApp rejects clusters whose published GitHub App cannot onboard the fixture repository.
 // An interactive run opens the installation page and waits for an organization administrator to approve it.
-// ErrUnverifiable downgrades to a warning with Verified false; the returned Context is the caller's
+// ErrUnverifiable leaves the App unverified without user-facing output; the returned Context is the caller's
 // context unless an approved installation wait outlived it and continued on ParentContext.
 func (s *LiveStage) verifyGitHubApp(ctx context.Context) (githubAppVerification, error) {
 	result := githubAppVerification{Context: ctx}
@@ -387,7 +387,9 @@ func (s *LiveStage) verifyGitHubApp(ctx context.Context) (githubAppVerification,
 		wait.Slug = required.AppSlug
 		return wait, nil
 	case errors.Is(err, providers.ErrUnverifiable):
-		s.notice("warning: %v", err)
+		// The check is best-effort. A token that cannot list installation
+		// repositories leaves the App unverified; the build itself is the backstop,
+		// so a warning here would only repeat a capability the token lacks.
 		return result, nil
 	default:
 		return result, err
@@ -500,7 +502,6 @@ func (s *LiveStage) pollGitHubAppInstallation(ctx context.Context, checker clust
 				return true, nil
 			}
 			if errors.Is(err, providers.ErrUnverifiable) {
-				s.notice("warning: %v", err)
 				return false, nil
 			}
 			var selection *providers.AppRepositorySelectionError
