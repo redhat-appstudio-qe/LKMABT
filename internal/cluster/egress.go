@@ -15,8 +15,10 @@ import (
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
-// EgressProbeImage is the frontend fixture's base image. The probe reuses it so
-// a pull failure is the same condition the frontend build would hit.
+// EgressProbeImage is the probe container image. It provides the Node runtime
+// that performs the request; because the same image is not a build dependency
+// of every target, its pull failure is an unknown outcome, never an unreachable
+// endpoint.
 const EgressProbeImage = "docker.io/library/node:20-alpine"
 
 // DefaultEgressProbeTimeout bounds probe pod startup, the outbound request, and
@@ -193,7 +195,11 @@ func (p EgressProbe) wait(ctx, parent context.Context, pods typedcorev1.PodInter
 			case corev1.PodSucceeded:
 				return EgressResult{Reachable: true}, nil
 			case corev1.PodFailed:
-				return EgressResult{Detail: p.failureDetail(ctx, pods, pod)}, nil
+				detail := p.failureDetail(ctx, pods, pod)
+				if !containerRan(pod) {
+					return EgressResult{}, fmt.Errorf("probe pod failed before running: %s; cluster internet access is unknown", detail)
+				}
+				return EgressResult{Detail: detail}, nil
 			}
 			if detail, terminal := terminalWaitingDetail(pod); terminal {
 				return EgressResult{}, fmt.Errorf("probe pod cannot start: %s", detail)
@@ -243,10 +249,25 @@ func (p EgressProbe) failureDetail(ctx context.Context, pods typedcorev1.PodInte
 			}
 		}
 	}
+	if reason := containerWaitingReason(pod); reason != "" {
+		return reason
+	}
 	if reason := strings.TrimSpace(pod.Status.Reason); reason != "" {
 		return reason
 	}
 	return strings.TrimSpace(pod.Status.Message)
+}
+
+// containerRan reports whether the probe container terminated. A pod that
+// failed without ever starting the container (an unpullable image, for
+// example) cannot say anything about the target's reachability.
+func containerRan(pod *corev1.Pod) bool {
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.State.Terminated != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // lastLogLine returns the probe container's final non-empty log line, bounded
@@ -308,19 +329,19 @@ func unschedulableDetail(pod *corev1.Pod) string {
 	return ""
 }
 
-// unfinished classifies a probe that exhausted its own deadline. An image pull
-// failure means the component's base image is not obtainable, so the build
-// cannot start either; a still-running probe means the request stalled. Any
-// other pending state leaves the answer unknown and must not drop a component.
+// unfinished classifies a probe that exhausted its own deadline. A probe that
+// is still running reached the network and stalled, so the target is
+// unreachable; a probe that never started leaves the answer unknown. The probe
+// image is the frontend's, so its pull failure says nothing about a backend
+// target and must not drop backend components.
 func unfinished(phase corev1.PodPhase, waiting string, timeout time.Duration) (EgressResult, error) {
-	switch {
-	case waiting == "ErrImagePull" || waiting == "ImagePullBackOff":
-		return EgressResult{Detail: "probe pod cannot start: " + waiting}, nil
-	case phase == corev1.PodRunning:
+	if phase == corev1.PodRunning {
 		return EgressResult{Detail: fmt.Sprintf("probe did not finish within %s", timeout)}, nil
-	default:
-		return EgressResult{}, fmt.Errorf("probe pod did not finish within %s; cluster internet access is unknown", timeout)
 	}
+	if waiting != "" {
+		return EgressResult{}, fmt.Errorf("probe pod cannot start: %s; cluster internet access is unknown", waiting)
+	}
+	return EgressResult{}, fmt.Errorf("probe pod did not finish within %s; cluster internet access is unknown", timeout)
 }
 
 // deletePod removes the probe pod with no grace period, retrying a failed

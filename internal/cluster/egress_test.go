@@ -92,7 +92,7 @@ var _ = Describe("EgressProbe", func() {
 	})
 
 	When("the probe pod image cannot be pulled", func() {
-		It("should report the target unreachable after the timeout", func() {
+		It("should fail with an unknown outcome instead of dropping the component", func() {
 			client := egressTestClient(func(kubetesting.Action) (bool, runtime.Object, error) {
 				pod := probePod(corev1.PodPending)
 				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
@@ -103,11 +103,29 @@ var _ = Describe("EgressProbe", func() {
 			})
 			probe := EgressProbe{Kubernetes: client, Timeout: 40 * time.Millisecond, PollInterval: 5 * time.Millisecond}
 
-			result, err := probe.Probe(context.Background(), "tenant", target)
+			_, err := probe.Probe(context.Background(), "tenant", target)
 
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(result.Reachable).Should(BeFalse())
-			Expect(result.Detail).Should(Equal("probe pod cannot start: ImagePullBackOff"))
+			Expect(err).Should(MatchError(Equal("probe pod cannot start: ImagePullBackOff; cluster internet access is unknown")))
+		})
+	})
+
+	When("the probe pod fails before its container runs", func() {
+		It("should fail with an unknown outcome instead of dropping the component", func() {
+			client := egressTestClient(func(kubetesting.Action) (bool, runtime.Object, error) {
+				pod := probePod(corev1.PodFailed)
+				pod.Status.Reason = "DeadlineExceeded"
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name:  egressProbeContainer,
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+				}}
+				return true, pod, nil
+			})
+			probe := EgressProbe{Kubernetes: client, Timeout: time.Second, PollInterval: time.Millisecond}
+
+			_, err := probe.Probe(context.Background(), "tenant", target)
+
+			Expect(err).Should(MatchError(ContainSubstring("probe pod failed before running")))
+			Expect(err.Error()).Should(ContainSubstring("cluster internet access is unknown"))
 		})
 	})
 
