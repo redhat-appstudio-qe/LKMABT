@@ -242,45 +242,58 @@ func (s *LiveStage) limitToSupportedPlatforms(result cluster.PreflightResult) {
 }
 
 // limitToInternetFreeComponents drops selected components whose builds need a
-// public endpoint the cluster cannot reach. It probes once per endpoint in the
-// tenant namespace and reports the narrowed selection through one durable alert
-// per cluster, mirroring the architecture narrowing alert. A component whose
-// build needs no public endpoint is never probed or dropped.
+// public endpoint the cluster cannot reach. It probes each distinct endpoint
+// once in the tenant namespace and reports the narrowed selection through one
+// durable alert per cluster, mirroring the architecture narrowing alert. A
+// component whose build needs no public endpoint is never probed or dropped;
+// when no selected component can build, the stage fails with the reasons rather
+// than running an empty fixture.
 func (s *LiveStage) limitToInternetFreeComponents(ctx context.Context, namespace string) error {
 	requirements := s.Request.EgressRequirements()
-	dropped := make([]string, 0, len(requirements))
+	dropped := make([]string, 0, len(s.Request.ComponentNames))
 	reasons := make([]string, 0, len(requirements))
+	reasonSeen := make(map[string]struct{}, len(requirements))
+	droppedSeen := make(map[string]struct{}, len(s.Request.ComponentNames))
 	for _, requirement := range requirements {
 		result, err := s.probeEgress(ctx, namespace, requirement.Target)
 		if err != nil {
-			return fmt.Errorf("probe %s access for %s: %w", egressHost(requirement.Target), requirement.Component, err)
+			return fmt.Errorf("probe %s access for %s: %w", egressHost(requirement.Target), strings.Join(requirement.Components, ", "), err)
 		}
 		if result.Reachable {
 			continue
 		}
-		if !s.Request.DropComponent(requirement.Component) {
-			return fmt.Errorf("drop %s after an unreachable egress probe: component selection is inconsistent", requirement.Component)
+		reason := egressReason(requirement.Target, result.Detail)
+		if _, seen := reasonSeen[reason]; !seen {
+			reasonSeen[reason] = struct{}{}
+			reasons = append(reasons, reason)
 		}
-		dropped = append(dropped, requirement.Component)
-		reasons = append(reasons, egressReason(requirement.Target, result.Detail))
+		for _, component := range requirement.Components {
+			if _, seen := droppedSeen[component]; seen {
+				continue
+			}
+			if !s.Request.DropComponent(component) {
+				return fmt.Errorf("drop %s after an unreachable egress probe: component selection is inconsistent", component)
+			}
+			droppedSeen[component] = struct{}{}
+			dropped = append(dropped, component)
+		}
 	}
 	if len(dropped) == 0 {
 		return nil
 	}
+	if len(s.Request.ComponentNames) == 0 {
+		return fmt.Errorf("cluster cannot reach the build dependencies of any selected component: %s; nothing to build", strings.Join(reasons, "; "))
+	}
 	name := strings.TrimSpace(s.Request.ClusterName)
 	if name == "" {
 		name = "cluster"
-	}
-	testing := strings.Join(s.Request.ComponentNames, ", ")
-	if testing == "" {
-		testing = "none"
 	}
 	s.alert(
 		fmt.Sprintf("component:%s:%s->:%s", name, strings.Join(dropped, ","), strings.Join(s.Request.ComponentNames, ",")),
 		name+": component selection narrowed",
 		"not built: "+strings.Join(dropped, ", "),
 		"reason: "+strings.Join(reasons, "; "),
-		"testing: "+testing,
+		"testing: "+strings.Join(s.Request.ComponentNames, ", "),
 	)
 	return nil
 }
@@ -331,8 +344,8 @@ func (s *LiveStage) accessChecks() []cluster.AccessCheck {
 			Name:      "egress probe pods",
 			Resource:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 			Namespace: s.Request.TenantNamespace,
-			Verbs:     []string{"create", "delete"},
-			Guidance:  "grant create and delete on pods in the tenant namespace so LKMABT can verify cluster internet access before building components that download from public registries",
+			Verbs:     []string{"create", "get", "delete"},
+			Guidance:  "grant create, get, and delete on pods in the tenant namespace so LKMABT can verify cluster internet access before building components that download from public registries",
 		})
 	}
 	return checks
@@ -573,6 +586,16 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 	}
 	manifest.Fixture.TenantNamespace = namespace
 	manifest.Fixture.EphemeralGitLabAuth = s.Request.Credentials.GitLabTokenEphemeral
+	names, paths := s.Request.ComponentNames, s.Request.ComponentPaths
+	if len(names) == 0 || len(names) != len(paths) {
+		return fmt.Errorf("run selects %d components but %d Dockerfile paths", len(names), len(paths))
+	}
+	// Validate the fixture contract before touching the cluster: an invalid
+	// selection must not create a namespace or run a probe. FixtureService
+	// repeats these checks for its other callers.
+	if expected := s.Request.ExpectedComponents(); len(names) != expected {
+		return fmt.Errorf("fixture expects %d components but got %d", expected, len(names))
+	}
 	fixtures := cluster.FixtureService{Dynamic: s.Clients.Dynamic, Kubernetes: s.Clients.Kubernetes}
 	// The probe needs the tenant namespace, so ensure it before the fixture
 	// creates components; a dropped component then never exists on the cluster.
@@ -583,10 +606,7 @@ func (s *LiveStage) EnsureFixture(ctx context.Context, manifest *model.RunManife
 		if err := s.limitToInternetFreeComponents(ctx, namespace); err != nil {
 			return err
 		}
-	}
-	names, paths := s.Request.ComponentNames, s.Request.ComponentPaths
-	if len(names) == 0 || len(names) != len(paths) {
-		return fmt.Errorf("run selects %d components but %d Dockerfile paths", len(names), len(paths))
+		names, paths = s.Request.ComponentNames, s.Request.ComponentPaths
 	}
 	components := make([]cluster.ComponentSpec, 0, len(names))
 	for index, name := range names {

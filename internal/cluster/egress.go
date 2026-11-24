@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -29,6 +30,14 @@ const egressProbePollInterval = 2 * time.Second
 // egressProbeCleanupTimeout bounds the best-effort probe pod deletion.
 const egressProbeCleanupTimeout = 15 * time.Second
 
+// egressProbeDeleteAttempts bounds how often a failed probe pod deletion is
+// retried inside the cleanup window.
+const egressProbeDeleteAttempts = 3
+
+// egressProbeDeleteBackoff is the first retry delay; later attempts add one
+// more delay each.
+const egressProbeDeleteBackoff = 500 * time.Millisecond
+
 // egressProbeRequestTimeout bounds the in-pod request so a blackholed route
 // fails instead of holding the pod open.
 const egressProbeRequestTimeout = 10 * time.Second
@@ -48,8 +57,10 @@ const (
 
 // egressProbeScript requests target and exits non-zero on any failure. The
 // target arrives as argv[1] so no shell quoting is involved, and the image's
-// own runtime performs the request the way the fixture build would.
-var egressProbeScript = fmt.Sprintf(`fetch(process.argv[1], {signal: AbortSignal.timeout(%d)}).then((response) => process.exit(response.ok ? 0 : 1)).catch((error) => { console.error(error.message); process.exit(1) })`, egressProbeRequestTimeout.Milliseconds())
+// own runtime performs the request the way the fixture build would. Failures
+// print the HTTP status or the underlying cause (DNS, TLS, reset) so the alert
+// distinguishes them.
+var egressProbeScript = fmt.Sprintf(`fetch(process.argv[1], {signal: AbortSignal.timeout(%d)}).then((response) => { if (!response.ok) { console.error('HTTP ' + response.status); process.exit(1) } process.exit(0) }).catch((error) => { console.error([error.message, error.cause && (error.cause.code || error.cause.message)].filter(Boolean).join(': ')); process.exit(1) })`, egressProbeRequestTimeout.Milliseconds())
 
 // EgressResult reports whether a cluster pod reached the probe target. Detail
 // explains an unreachable target in one short line; it is empty on success.
@@ -65,7 +76,8 @@ type EgressProbe struct {
 	Kubernetes kubernetes.Interface
 	// Image overrides the probe container image; empty uses EgressProbeImage.
 	Image string
-	// Timeout overrides the probe deadline; zero uses DefaultEgressProbeTimeout.
+	// Timeout overrides the total probe deadline, including pod creation;
+	// zero uses DefaultEgressProbeTimeout.
 	Timeout time.Duration
 	// PollInterval overrides the phase check interval; zero uses
 	// egressProbePollInterval.
@@ -73,9 +85,11 @@ type EgressProbe struct {
 }
 
 // Probe creates a probe pod in namespace, waits for its outcome, and returns
-// whether target was reachable. An unreachable target, a pod that never starts,
-// and a pod that times out all return Reachable false with a detail instead of
-// an error; errors are reserved for API failures that leave the answer unknown.
+// whether target was reachable. A pod that ran and failed is an unreachable
+// target with a detail. A pod that could not run, disappeared, or exhausted the
+// probe deadline without proving a network failure is an error: the harness
+// must not mistake its own environment for a registry outage. Errors are also
+// returned for API failures and for a probe pod that cannot be deleted.
 func (p EgressProbe) Probe(ctx context.Context, namespace, target string) (EgressResult, error) {
 	if p.Kubernetes == nil {
 		return EgressResult{}, fmt.Errorf("kubernetes client is required for the egress probe")
@@ -98,19 +112,24 @@ func (p EgressProbe) Probe(ctx context.Context, namespace, target string) (Egres
 	if image == "" {
 		image = EgressProbeImage
 	}
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	pods := p.Kubernetes.CoreV1().Pods(namespace)
-	pod, err := pods.Create(ctx, p.pod(namespace, image, target, timeout), metav1.CreateOptions{})
+	pod, err := pods.Create(probeCtx, p.pod(namespace, image, target, timeout), metav1.CreateOptions{})
 	if err != nil {
 		return EgressResult{}, fmt.Errorf("create egress probe pod in namespace %s: %w", namespace, err)
 	}
-	defer p.deletePod(ctx, pods, pod.Name)
-	return p.wait(ctx, pods, pod.Name, timeout, interval)
+	result, waitErr := p.wait(probeCtx, ctx, pods, pod.Name, timeout, interval)
+	if deleteErr := p.deletePod(ctx, pods, pod.Name); deleteErr != nil {
+		waitErr = errors.Join(waitErr, deleteErr)
+	}
+	return result, waitErr
 }
 
 // pod builds the probe pod. It requests no service account token and leaves
 // runAsUser to the namespace's SCC: the frontend's image has no non-root USER,
 // so only the SCC can supply the UID range. An active deadline stops a stuck
-// pod.
+// pod, and the toleration lets it land on the tainted tenant nodes.
 func (p EgressProbe) pod(namespace, image, target string, timeout time.Duration) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -153,15 +172,15 @@ func (p EgressProbe) pod(namespace, image, target string, timeout time.Duration)
 	}
 }
 
-// wait polls the probe pod until it succeeds, fails, the probe deadline
-// expires, or the caller's context ends. A started pod that has not finished
-// by the deadline reports why instead of an error.
-func (p EgressProbe) wait(ctx context.Context, pods typedcorev1.PodInterface, name string, timeout, interval time.Duration) (EgressResult, error) {
-	deadline := time.Now().Add(timeout)
+// wait polls the probe pod until it succeeds, fails, the probe or caller
+// deadline expires, or the pod disappears. A pod that ran and failed reports an
+// unreachable target; an unknown outcome returns an error. The probe context
+// bounds every read and poll; the parent context distinguishes a caller
+// deadline, which must fail the stage, from the probe's own budget.
+func (p EgressProbe) wait(ctx, parent context.Context, pods typedcorev1.PodInterface, name string, timeout, interval time.Duration) (EgressResult, error) {
 	var (
-		lastPhase     corev1.PodPhase
-		waiting       string
-		unschedulable string
+		lastPhase corev1.PodPhase
+		waiting   string
 	)
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
@@ -177,26 +196,31 @@ func (p EgressProbe) wait(ctx context.Context, pods typedcorev1.PodInterface, na
 				return EgressResult{Detail: p.failureDetail(ctx, pods, pod)}, nil
 			}
 			if detail, terminal := terminalWaitingDetail(pod); terminal {
-				return EgressResult{Detail: "probe pod cannot start: " + detail}, nil
+				return EgressResult{}, fmt.Errorf("probe pod cannot start: %s", detail)
 			}
 			if message := unschedulableDetail(pod); message != "" {
-				unschedulable = message
+				return EgressResult{}, fmt.Errorf("probe pod cannot be scheduled: %s", message)
 			}
 			if reason := containerWaitingReason(pod); reason != "" {
 				waiting = reason
 			}
-		case !apierrors.IsNotFound(err):
+		case apierrors.IsNotFound(err):
+			return EgressResult{}, fmt.Errorf("egress probe pod %s disappeared before its outcome was known", name)
+		case parent.Err() != nil:
+			return EgressResult{}, parent.Err()
+		case ctx.Err() != nil:
+			return unfinished(lastPhase, waiting, timeout)
+		default:
 			return EgressResult{}, fmt.Errorf("read egress probe pod %s: %w", name, err)
 		}
-		if time.Now().After(deadline) {
-			return EgressResult{Detail: unfinishedDetail(lastPhase, waiting, unschedulable, timeout)}, nil
-		}
 		select {
+		case <-parent.Done():
+			return EgressResult{}, parent.Err()
 		case <-ctx.Done():
-			if ctx.Err() == context.DeadlineExceeded {
-				return EgressResult{Detail: unfinishedDetail(lastPhase, waiting, unschedulable, timeout)}, nil
+			if parent.Err() != nil {
+				return EgressResult{}, parent.Err()
 			}
-			return EgressResult{}, ctx.Err()
+			return unfinished(lastPhase, waiting, timeout)
 		case <-timer.C:
 			timer.Reset(interval)
 		}
@@ -284,28 +308,40 @@ func unschedulableDetail(pod *corev1.Pod) string {
 	return ""
 }
 
-// unfinishedDetail explains a probe that did not reach a terminal phase within
-// the deadline. A scheduler message is the most specific cause, then a
-// container waiting reason.
-func unfinishedDetail(phase corev1.PodPhase, waiting, unschedulable string, timeout time.Duration) string {
+// unfinished classifies a probe that exhausted its own deadline. An image pull
+// failure means the component's base image is not obtainable, so the build
+// cannot start either; a still-running probe means the request stalled. Any
+// other pending state leaves the answer unknown and must not drop a component.
+func unfinished(phase corev1.PodPhase, waiting string, timeout time.Duration) (EgressResult, error) {
 	switch {
-	case unschedulable != "":
-		return "probe pod cannot start: " + unschedulable
-	case waiting != "":
-		return "probe pod cannot start: " + waiting
+	case waiting == "ErrImagePull" || waiting == "ImagePullBackOff":
+		return EgressResult{Detail: "probe pod cannot start: " + waiting}, nil
 	case phase == corev1.PodRunning:
-		return fmt.Sprintf("probe did not finish within %s", timeout)
+		return EgressResult{Detail: fmt.Sprintf("probe did not finish within %s", timeout)}, nil
 	default:
-		return fmt.Sprintf("probe pod did not start within %s", timeout)
+		return EgressResult{}, fmt.Errorf("probe pod did not finish within %s; cluster internet access is unknown", timeout)
 	}
 }
 
-// deletePod removes the probe pod with no grace period. The namespace is
-// deleted at run end, so a failed deletion does not fail the probe.
-func (p EgressProbe) deletePod(ctx context.Context, pods typedcorev1.PodInterface, name string) {
+// deletePod removes the probe pod with no grace period, retrying a failed
+// deletion inside the cleanup window. A pod left in an adopted namespace would
+// outlive the run, so the error is reported instead of discarded.
+func (p EgressProbe) deletePod(ctx context.Context, pods typedcorev1.PodInterface, name string) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), egressProbeCleanupTimeout)
 	defer cancel()
-	_ = pods.Delete(cleanupCtx, name, metav1.DeleteOptions{GracePeriodSeconds: new(int64(0))})
+	var deleteErr error
+	for attempt := 1; attempt <= egressProbeDeleteAttempts; attempt++ {
+		deleteErr = pods.Delete(cleanupCtx, name, metav1.DeleteOptions{GracePeriodSeconds: new(int64(0))})
+		if deleteErr == nil || apierrors.IsNotFound(deleteErr) {
+			return nil
+		}
+		select {
+		case <-cleanupCtx.Done():
+			return fmt.Errorf("delete egress probe pod %s: %w", name, deleteErr)
+		case <-time.After(egressProbeDeleteBackoff * time.Duration(attempt)):
+		}
+	}
+	return fmt.Errorf("delete egress probe pod %s: %w", name, deleteErr)
 }
 
 // truncateDetail shortens a one-line probe detail to limit bytes.

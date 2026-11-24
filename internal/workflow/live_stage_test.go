@@ -1098,10 +1098,11 @@ var _ = Describe("LiveStage", func() {
 					ComponentPaths:  []string{"history-worker/Dockerfile"},
 					TektonPaths:     []string{".tekton/konflux-test-mathwizz-history-worker-push.yaml"},
 				},
-				Clients:  &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
-				Provider: &githubAppProviderStub{fixture: fixture},
-				Fixture:  fixture,
-				Log:      io.Discard,
+				Clients:     &cluster.ClientSet{Dynamic: dynamic, Kubernetes: kubernetesfake.NewSimpleClientset()},
+				ProbeEgress: reachableEgressProbe,
+				Provider:    &githubAppProviderStub{fixture: fixture},
+				Fixture:     fixture,
+				Log:         io.Discard,
 			}
 			manifest := &model.RunManifest{RunID: "run-1"}
 

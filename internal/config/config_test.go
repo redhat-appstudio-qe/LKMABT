@@ -432,28 +432,55 @@ var _ = Describe("Request.DropComponent", func() {
 		Expect(req.DropComponent("mathwizz-history-worker")).Should(BeFalse())
 		Expect(req.ComponentNames).Should(Equal([]string{"mathwizz-web-server", "mathwizz-frontend"}))
 	})
+
+	It("should not mutate slices shared with a sibling provider's copy", func() {
+		req := Defaults()
+		sibling := req
+
+		Expect(req.DropComponent("mathwizz-frontend")).Should(BeTrue())
+
+		Expect(sibling.ComponentNames).Should(Equal([]string{"mathwizz-web-server", "mathwizz-history-worker", "mathwizz-frontend"}))
+		Expect(sibling.ComponentPaths).Should(HaveLen(3))
+		Expect(sibling.TektonPaths).Should(HaveLen(3))
+		Expect(sibling.DroppedComponents).Should(BeEmpty())
+		Expect(sibling.ExpectedComponents()).Should(Equal(3))
+	})
 })
 
 var _ = Describe("Request.EgressRequirements", func() {
-	It("should pair the internet-dependent component with its probe target", func() {
+	It("should list each distinct endpoint once with every component that needs it", func() {
 		requirements := Defaults().EgressRequirements()
 
-		Expect(requirements).Should(Equal([]EgressRequirement{{Component: "mathwizz-frontend", Target: "https://registry.npmjs.org/-/ping"}}))
+		Expect(requirements).Should(Equal([]EgressRequirement{
+			{Target: "https://proxy.golang.org/golang.org/x/text/@v/list", Components: []string{"mathwizz-web-server", "mathwizz-history-worker"}},
+			{Target: "https://dl-cdn.alpinelinux.org/alpine/", Components: []string{"mathwizz-web-server", "mathwizz-history-worker"}},
+			{Target: "https://registry.npmjs.org/-/ping", Components: []string{"mathwizz-frontend"}},
+		}))
 	})
 
-	It("should return nothing for a smoke selection", func() {
+	It("should cover the selected smoke component's own endpoints", func() {
 		req := Defaults()
 		req.Smoke = true
 		req.ComponentNames, req.ComponentPaths, req.TektonPaths = SmokeComponents()
 
-		Expect(req.EgressRequirements()).Should(BeEmpty())
+		requirements := req.EgressRequirements()
+
+		Expect(requirements).Should(HaveLen(2))
+		Expect(requirements[0].Target).Should(Equal("https://proxy.golang.org/golang.org/x/text/@v/list"))
+		Expect(requirements[0].Components).Should(Equal([]string{"mathwizz-history-worker"}))
+		Expect(requirements[1].Target).Should(Equal("https://dl-cdn.alpinelinux.org/alpine/"))
 	})
 
-	It("should return nothing once the internet-dependent component is dropped", func() {
+	It("should drop only the endpoints of removed components", func() {
 		req := Defaults()
 		req.DropComponent("mathwizz-frontend")
 
-		Expect(req.EgressRequirements()).Should(BeEmpty())
+		requirements := req.EgressRequirements()
+
+		Expect(requirements).Should(HaveLen(2))
+		for _, requirement := range requirements {
+			Expect(requirement.Components).Should(ConsistOf("mathwizz-web-server", "mathwizz-history-worker"))
+		}
 	})
 })
 

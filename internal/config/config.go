@@ -50,26 +50,36 @@ const (
 
 // componentProfile is one fixture component: the Konflux Component name, the
 // Dockerfile a trigger commit appends to, the PaC PipelineRun whose
-// build-platforms parameter the run rewrites, and the external endpoint its
+// build-platforms parameter the run rewrites, and the external endpoints its
 // build downloads from.
 type componentProfile struct {
 	Name       string
 	Dockerfile string
 	TektonPath string
-	// EgressTarget is the external URL the component's build must reach. Empty
+	// EgressTargets are external URLs the component's build must reach. Empty
 	// means the build needs no cluster internet access.
-	EgressTarget string
+	EgressTargets []string
 }
 
 // fullProfile is the complete MathWizz fixture selection in fixture order.
 // It is the single definition of the component set; every other list is
 // derived from it.
 var fullProfile = []componentProfile{
-	{Name: "mathwizz-web-server", Dockerfile: "web-server/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-web-server-push.yaml"},
-	{Name: "mathwizz-history-worker", Dockerfile: "history-worker/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-history-worker-push.yaml"},
-	// The frontend Dockerfile runs npm ci against the public registry; a
-	// cluster without internet egress cannot build it.
-	{Name: "mathwizz-frontend", Dockerfile: "frontend/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-frontend-push.yaml", EgressTarget: "https://registry.npmjs.org/-/ping"},
+	// Both backends run apk add and go mod download in the builder image.
+	{Name: "mathwizz-web-server", Dockerfile: "web-server/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-web-server-push.yaml", EgressTargets: []string{"https://proxy.golang.org/golang.org/x/text/@v/list", "https://dl-cdn.alpinelinux.org/alpine/"}},
+	{Name: "mathwizz-history-worker", Dockerfile: "history-worker/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-history-worker-push.yaml", EgressTargets: []string{"https://proxy.golang.org/golang.org/x/text/@v/list", "https://dl-cdn.alpinelinux.org/alpine/"}},
+	// The frontend Dockerfile runs npm ci against the public registry.
+	{Name: "mathwizz-frontend", Dockerfile: "frontend/Dockerfile", TektonPath: ".tekton/konflux-test-mathwizz-frontend-push.yaml", EgressTargets: []string{"https://registry.npmjs.org/-/ping"}},
+}
+
+// profileFor returns the profile for a component name.
+func profileFor(name string) (componentProfile, bool) {
+	for _, profile := range fullProfile {
+		if profile.Name == name {
+			return profile, true
+		}
+	}
+	return componentProfile{}, false
 }
 
 // selection splits profiles into aligned name, Dockerfile, and PipelineRun
@@ -98,32 +108,40 @@ func FullComponents() (names, dockerfiles, tektonPaths []string) {
 // SmokeComponents returns the single-component smoke selection in the same
 // aligned form, reusing the full profile entry so the two cannot drift.
 func SmokeComponents() (names, dockerfiles, tektonPaths []string) {
-	for _, profile := range fullProfile {
-		if profile.Name == SmokeComponentName {
-			return selection([]componentProfile{profile})
-		}
+	profile, ok := profileFor(SmokeComponentName)
+	if !ok {
+		return nil, nil, nil
 	}
-	return nil, nil, nil
+	return selection([]componentProfile{profile})
 }
 
-// EgressRequirement pairs one selected component with the external endpoint
-// its build must reach over the cluster's internet egress.
+// EgressRequirement names one external endpoint and the selected components
+// whose builds must reach it.
 type EgressRequirement struct {
-	Component string
-	Target    string
+	Target     string
+	Components []string
 }
 
-// EgressRequirements returns the selected components whose builds need
-// cluster internet access, in selection order. A selection of offline-buildable
-// components returns an empty slice.
+// EgressRequirements returns every external endpoint the selected components'
+// builds must reach, in first-seen order, with the components that need it.
+// One endpoint is listed once even when several components share it, so the
+// workflow probes it once. A selection of offline-buildable components returns
+// an empty slice.
 func (r Request) EgressRequirements() []EgressRequirement {
 	requirements := make([]EgressRequirement, 0, len(r.ComponentNames))
+	positions := make(map[string]int, len(r.ComponentNames))
 	for _, name := range r.ComponentNames {
-		for _, profile := range fullProfile {
-			if profile.Name == name && profile.EgressTarget != "" {
-				requirements = append(requirements, EgressRequirement{Component: name, Target: profile.EgressTarget})
-				break
+		profile, ok := profileFor(name)
+		if !ok {
+			continue
+		}
+		for _, target := range profile.EgressTargets {
+			if position, seen := positions[target]; seen {
+				requirements[position].Components = append(requirements[position].Components, name)
+				continue
 			}
+			positions[target] = len(requirements)
+			requirements = append(requirements, EgressRequirement{Target: target, Components: []string{name}})
 		}
 	}
 	return requirements
@@ -231,17 +249,27 @@ func (r Request) ExpectedComponents() int {
 
 // DropComponent removes name from the aligned component selection and reports
 // whether it was selected. The Dockerfile and PipelineRun slices shrink with
-// it, so indexes stay aligned, and ExpectedComponents shrinks by one.
+// it, so indexes stay aligned, and ExpectedComponents shrinks by one. Every
+// slice is copied rather than truncated in place: a `both` run hands each
+// provider a shallow copy of the request, and an in-place delete would corrupt
+// the sibling provider's selection.
 func (r *Request) DropComponent(name string) bool {
 	index := slices.Index(r.ComponentNames, name)
 	if index < 0 || index >= len(r.ComponentPaths) || index >= len(r.TektonPaths) {
 		return false
 	}
-	r.ComponentNames = slices.Delete(r.ComponentNames, index, index+1)
-	r.ComponentPaths = slices.Delete(r.ComponentPaths, index, index+1)
-	r.TektonPaths = slices.Delete(r.TektonPaths, index, index+1)
-	r.DroppedComponents = append(r.DroppedComponents, name)
+	r.ComponentNames = withoutIndex(r.ComponentNames, index)
+	r.ComponentPaths = withoutIndex(r.ComponentPaths, index)
+	r.TektonPaths = withoutIndex(r.TektonPaths, index)
+	r.DroppedComponents = append(append([]string(nil), r.DroppedComponents...), name)
 	return true
+}
+
+// withoutIndex returns a fresh slice without the element at index.
+func withoutIndex(values []string, index int) []string {
+	result := make([]string, 0, len(values)-1)
+	result = append(result, values[:index]...)
+	return append(result, values[index+1:]...)
 }
 
 // Parse builds and validates a request from command-line arguments and environment values.

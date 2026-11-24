@@ -25,8 +25,8 @@ incomplete or unschedulable platform, fails at preflight, before LKMABT touches
 the fixture. A platform the cluster does not declare is informational: LKMABT
 continues on that cluster with the platforms its live `host-config` supports. A
 component whose build needs a public registry the cluster cannot reach is
-dropped before it is created, with an alert saying why. A
-broken build fails later and leaves its receipt in `.lkmabt-runs/`.
+dropped before it is created, with an alert saying why. A broken build fails
+later and leaves its receipt in `.lkmabt-runs/`.
 
 ## Contents
 
@@ -108,9 +108,10 @@ through an OpenShift `ProjectRequest`, cluster-scoped `update` on `namespaces`
 to label it for cleanup, and permission to delete it during cleanup. Inside
 the namespace the run needs access to `pipelineruns`, `taskruns`,
 `applications`, and `components`. When the selection includes a component that
-downloads from a public registry, the run also needs `create` and `delete` on
-`pods` there: LKMABT runs one short-lived probe pod to test the cluster's
-internet egress before it creates that component. GitLab runs also need `get`,
+downloads from a public registry, the run also needs `create`, `get`, and
+`delete` on `pods` there: LKMABT runs one short-lived probe pod per distinct
+build dependency to test the cluster's internet egress before it creates those
+components. GitLab runs also need `get`,
 `create`, and `update` on Secrets there, plus `delete` when the run acquires its
 own GitLab token. If you administer an existing namespace, grant the Secret and
 pod access with:
@@ -161,18 +162,19 @@ at preflight, before triggering up to three components that cannot build.
   - GitHub App onboarding is a separate preflight check. A cluster that cannot
     install the fixture's GitHub App still fails preflight even when its
     architecture support is sufficient.
-- The cluster can reach the public registries its selected components build
-  from. `mathwizz-frontend` runs `npm ci` against `registry.npmjs.org`; the
-  other two components build from images the cluster already mirrors. Before
-  the fixture creates any component, LKMABT runs a one-shot probe pod in the
-  tenant namespace on the tenant workload nodes
-  (`konflux-ci.dev/workload=konflux-tenants`), the same nodes that run builds.
-  If the probe cannot reach `registry.npmjs.org`, the frontend is dropped from
-  that cluster's build and the run prints an alert naming the component it will
-  not build, the reason, and the components it will (`not built:` / `reason:` /
-  `testing:`). A private cluster therefore passes with two components instead of
-  failing on the frontend; a probe that cannot run at all (for example, missing
-  pod permission) fails the stage with the API error instead of guessing.
+- The cluster can reach the public endpoints its selected components' builds
+  download from. The backends run `apk add` and `go mod download`
+  (`proxy.golang.org`, `dl-cdn.alpinelinux.org`); the frontend runs `npm ci`
+  (`registry.npmjs.org`). Before the fixture creates any component, LKMABT
+  probes each distinct endpoint once from a pod in the tenant namespace on the
+  tenant workload nodes (`konflux-ci.dev/workload=konflux-tenants`), the same
+  nodes that run builds. An unreachable endpoint drops every selected component
+  that needs it, and the run prints an alert naming the components it will not
+  build, the reasons, and the components it will (`not built:` / `reason:` /
+  `testing:`). When no selected component can build, the cluster fails fixture
+  setup with those reasons instead of running an empty fixture. A probe that
+  cannot run at all (for example, missing pod permission) fails the stage with
+  the API error instead of guessing.
 - PaC onboarding is complete for the selected components, with current `.tekton`
   configuration on the fixture branch. Each push PipelineRun must declare a
   `build-platforms` parameter; LKMABT rewrites it and fails when it is absent.

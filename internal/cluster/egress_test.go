@@ -91,8 +91,8 @@ var _ = Describe("EgressProbe", func() {
 		})
 	})
 
-	When("the probe pod never starts", func() {
-		It("should report the waiting reason after the timeout", func() {
+	When("the probe pod image cannot be pulled", func() {
+		It("should report the target unreachable after the timeout", func() {
 			client := egressTestClient(func(kubetesting.Action) (bool, runtime.Object, error) {
 				pod := probePod(corev1.PodPending)
 				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
@@ -112,7 +112,7 @@ var _ = Describe("EgressProbe", func() {
 	})
 
 	When("the probe pod has a terminal configuration error", func() {
-		It("should report the container message instead of waiting for the timeout", func() {
+		It("should fail with the container message instead of dropping the component", func() {
 			client := egressTestClient(func(kubetesting.Action) (bool, runtime.Object, error) {
 				pod := probePod(corev1.PodPending)
 				pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
@@ -126,16 +126,14 @@ var _ = Describe("EgressProbe", func() {
 			})
 			probe := EgressProbe{Kubernetes: client, Timeout: time.Minute, PollInterval: time.Millisecond}
 
-			result, err := probe.Probe(context.Background(), "tenant", target)
+			_, err := probe.Probe(context.Background(), "tenant", target)
 
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(result.Reachable).Should(BeFalse())
-			Expect(result.Detail).Should(Equal("probe pod cannot start: container has runAsNonRoot and image will run as root"))
+			Expect(err).Should(MatchError(Equal("probe pod cannot start: container has runAsNonRoot and image will run as root")))
 		})
 	})
 
 	When("the probe pod cannot be scheduled", func() {
-		It("should report the scheduler message", func() {
+		It("should fail with the scheduler message instead of dropping the component", func() {
 			client := egressTestClient(func(kubetesting.Action) (bool, runtime.Object, error) {
 				pod := probePod(corev1.PodPending)
 				pod.Status.Conditions = []corev1.PodCondition{{
@@ -146,18 +144,16 @@ var _ = Describe("EgressProbe", func() {
 				}}
 				return true, pod, nil
 			})
-			probe := EgressProbe{Kubernetes: client, Timeout: 40 * time.Millisecond, PollInterval: 5 * time.Millisecond}
+			probe := EgressProbe{Kubernetes: client, Timeout: time.Minute, PollInterval: time.Millisecond}
 
-			result, err := probe.Probe(context.Background(), "tenant", target)
+			_, err := probe.Probe(context.Background(), "tenant", target)
 
-			Expect(err).ShouldNot(HaveOccurred())
-			Expect(result.Reachable).Should(BeFalse())
-			Expect(result.Detail).Should(Equal("probe pod cannot start: 0/22 nodes are available: 5 node(s) had untolerated taint {konflux-ci.dev/workload: konflux-tenants}"))
+			Expect(err).Should(MatchError(Equal("probe pod cannot be scheduled: 0/22 nodes are available: 5 node(s) had untolerated taint {konflux-ci.dev/workload: konflux-tenants}")))
 		})
 	})
 
 	When("the probe pod does not finish in time", func() {
-		It("should report the deadline instead of an error", func() {
+		It("should report the deadline as an unreachable target", func() {
 			client := egressTestClient(phaseReactor(corev1.PodRunning))
 			probe := EgressProbe{Kubernetes: client, Timeout: 40 * time.Millisecond, PollInterval: 5 * time.Millisecond}
 
@@ -166,6 +162,44 @@ var _ = Describe("EgressProbe", func() {
 			Expect(err).ShouldNot(HaveOccurred())
 			Expect(result.Reachable).Should(BeFalse())
 			Expect(result.Detail).Should(Equal("probe did not finish within 40ms"))
+		})
+	})
+
+	When("the probe pod stays pending without a reason", func() {
+		It("should fail with an unknown outcome instead of dropping the component", func() {
+			client := egressTestClient(phaseReactor(corev1.PodPending))
+			probe := EgressProbe{Kubernetes: client, Timeout: 40 * time.Millisecond, PollInterval: 5 * time.Millisecond}
+
+			_, err := probe.Probe(context.Background(), "tenant", target)
+
+			Expect(err).Should(MatchError(Equal("probe pod did not finish within 40ms; cluster internet access is unknown")))
+		})
+	})
+
+	When("the probe pod disappears while polling", func() {
+		It("should fail with an unknown outcome instead of dropping the component", func() {
+			client := egressTestClient(func(kubetesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "lkmabt-egress-probe-test")
+			})
+			probe := EgressProbe{Kubernetes: client, Timeout: time.Second, PollInterval: time.Millisecond}
+
+			_, err := probe.Probe(context.Background(), "tenant", target)
+
+			Expect(err).Should(MatchError(ContainSubstring("disappeared before its outcome was known")))
+		})
+	})
+
+	When("the probe pod cannot be deleted", func() {
+		It("should return the deletion error", func() {
+			client := egressTestClient(phaseReactor(corev1.PodSucceeded))
+			client.PrependReactor("delete", "pods", func(kubetesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "pods", nil)
+			})
+			probe := EgressProbe{Kubernetes: client, Timeout: time.Second, PollInterval: time.Millisecond}
+
+			_, err := probe.Probe(context.Background(), "tenant", target)
+
+			Expect(err).Should(MatchError(ContainSubstring("delete egress probe pod lkmabt-egress-probe-test")))
 		})
 	})
 
@@ -193,6 +227,20 @@ var _ = Describe("EgressProbe", func() {
 			_, err := probe.Probe(ctx, "tenant", target)
 
 			Expect(err).Should(MatchError(context.Canceled))
+		})
+	})
+
+	When("the caller's deadline expires first", func() {
+		It("should return the context deadline instead of an unreachable target", func() {
+			client := egressTestClient(phaseReactor(corev1.PodPending))
+			probe := EgressProbe{Kubernetes: client, Timeout: time.Minute, PollInterval: 5 * time.Millisecond}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+
+			result, err := probe.Probe(ctx, "tenant", target)
+
+			Expect(err).Should(MatchError(context.DeadlineExceeded))
+			Expect(result.Reachable).Should(BeFalse())
 		})
 	})
 

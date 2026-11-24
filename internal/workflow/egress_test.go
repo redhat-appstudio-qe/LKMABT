@@ -17,6 +17,12 @@ import (
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 )
 
+const (
+	goProxyTarget = "https://proxy.golang.org/golang.org/x/text/@v/list"
+	alpineTarget  = "https://dl-cdn.alpinelinux.org/alpine/"
+	npmTarget     = "https://registry.npmjs.org/-/ping"
+)
+
 // fullSelectionRequest returns a request selecting the whole fixture with a
 // cluster name, as a live run would.
 func fullSelectionRequest() config.Request {
@@ -30,9 +36,10 @@ func fullSelectionRequest() config.Request {
 	}
 }
 
-// recordingEgressProbe records every probe and returns a fixed result.
+// recordingEgressProbe records every probe and returns the configured result per
+// target. An unlisted target is reachable.
 type recordingEgressProbe struct {
-	result     cluster.EgressResult
+	results    map[string]cluster.EgressResult
 	err        error
 	namespaces []string
 	targets    []string
@@ -42,20 +49,28 @@ type recordingEgressProbe struct {
 func (p *recordingEgressProbe) probe(_ context.Context, namespace, target string) (cluster.EgressResult, error) {
 	p.namespaces = append(p.namespaces, namespace)
 	p.targets = append(p.targets, target)
-	return p.result, p.err
+	if p.err != nil {
+		return cluster.EgressResult{}, p.err
+	}
+	if result, ok := p.results[target]; ok {
+		return result, nil
+	}
+	return cluster.EgressResult{Reachable: true}, nil
 }
 
 var _ = Describe("LiveStage component narrowing", func() {
 	It("should drop a component whose registry is unreachable and report the new selection", func() {
 		sink := &recordingAlertSink{}
 		log := &bytes.Buffer{}
-		probe := &recordingEgressProbe{result: cluster.EgressResult{Detail: "connection timed out"}}
+		probe := &recordingEgressProbe{results: map[string]cluster.EgressResult{
+			npmTarget: {Detail: "connection timed out"},
+		}}
 		stage := &LiveStage{Request: fullSelectionRequest(), ProbeEgress: probe.probe, Out: sink, Log: log}
 
 		Expect(stage.limitToInternetFreeComponents(context.Background(), "tenant")).Should(Succeed())
 
-		Expect(probe.namespaces).Should(Equal([]string{"tenant"}))
-		Expect(probe.targets).Should(Equal([]string{"https://registry.npmjs.org/-/ping"}))
+		Expect(probe.namespaces).Should(Equal([]string{"tenant", "tenant", "tenant"}))
+		Expect(probe.targets).Should(Equal([]string{goProxyTarget, alpineTarget, npmTarget}))
 		Expect(stage.Request.ComponentNames).Should(Equal([]string{"mathwizz-web-server", "mathwizz-history-worker"}))
 		Expect(stage.Request.ComponentPaths).Should(Equal([]string{"web-server/Dockerfile", "history-worker/Dockerfile"}))
 		Expect(stage.Request.TektonPaths).Should(HaveLen(2))
@@ -75,33 +90,70 @@ var _ = Describe("LiveStage component narrowing", func() {
 			"   testing: mathwizz-web-server, mathwizz-history-worker\n"))
 	})
 
-	It("should keep the full selection when every registry is reachable", func() {
+	It("should drop every component that needs an unreachable endpoint", func() {
+		sink := &recordingAlertSink{}
+		probe := &recordingEgressProbe{results: map[string]cluster.EgressResult{
+			goProxyTarget: {Detail: "fetch failed: ENOTFOUND"},
+		}}
+		stage := &LiveStage{Request: fullSelectionRequest(), ProbeEgress: probe.probe, Out: sink}
+
+		Expect(stage.limitToInternetFreeComponents(context.Background(), "tenant")).Should(Succeed())
+
+		Expect(stage.Request.ComponentNames).Should(Equal([]string{"mathwizz-frontend"}))
+		Expect(stage.Request.DroppedComponents).Should(Equal([]string{"mathwizz-web-server", "mathwizz-history-worker"}))
+		Expect(sink.calls).Should(HaveLen(1))
+		Expect(sink.calls[0].lines).Should(Equal([]string{
+			"not built: mathwizz-web-server, mathwizz-history-worker",
+			"reason: proxy.golang.org is unreachable from the cluster: fetch failed: ENOTFOUND",
+			"testing: mathwizz-frontend",
+		}))
+	})
+
+	It("should fail when no selected component can build", func() {
+		sink := &recordingAlertSink{}
+		probe := &recordingEgressProbe{results: map[string]cluster.EgressResult{
+			goProxyTarget: {Detail: "fetch failed"},
+			alpineTarget:  {Detail: "fetch failed"},
+			npmTarget:     {Detail: "fetch failed"},
+		}}
+		stage := &LiveStage{Request: fullSelectionRequest(), ProbeEgress: probe.probe, Out: sink}
+
+		err := stage.limitToInternetFreeComponents(context.Background(), "tenant")
+
+		Expect(err).Should(MatchError(ContainSubstring("cannot reach the build dependencies of any selected component")))
+		Expect(err.Error()).Should(ContainSubstring("proxy.golang.org"))
+		Expect(err.Error()).Should(ContainSubstring("registry.npmjs.org"))
+		Expect(err.Error()).Should(ContainSubstring("nothing to build"))
+		Expect(stage.Request.ComponentNames).Should(BeEmpty())
+		Expect(sink.calls).Should(BeEmpty())
+	})
+
+	It("should keep the full selection when every endpoint is reachable", func() {
 		sink := &recordingAlertSink{}
 		log := &bytes.Buffer{}
-		probe := &recordingEgressProbe{result: cluster.EgressResult{Reachable: true}}
+		probe := &recordingEgressProbe{}
 		stage := &LiveStage{Request: fullSelectionRequest(), ProbeEgress: probe.probe, Out: sink, Log: log}
 
 		Expect(stage.limitToInternetFreeComponents(context.Background(), "tenant")).Should(Succeed())
 
-		Expect(probe.targets).Should(Equal([]string{"https://registry.npmjs.org/-/ping"}))
+		Expect(probe.targets).Should(Equal([]string{goProxyTarget, alpineTarget, npmTarget}))
 		Expect(stage.Request.ComponentNames).Should(HaveLen(3))
 		Expect(stage.Request.DroppedComponents).Should(BeEmpty())
 		Expect(sink.calls).Should(BeEmpty())
 		Expect(log.String()).Should(BeEmpty())
 	})
 
-	It("should not probe a selection whose builds need no public endpoint", func() {
-		names, paths, tektonPaths := config.SmokeComponents()
+	It("should not probe a selection whose components declare no endpoints", func() {
 		probe := &recordingEgressProbe{}
 		stage := &LiveStage{
-			Request:     config.Request{ComponentNames: names, ComponentPaths: paths, TektonPaths: tektonPaths},
+			Request:     config.Request{ComponentNames: []string{"custom"}, ComponentPaths: []string{"Dockerfile"}, TektonPaths: []string{"pipeline.yaml"}},
 			ProbeEgress: probe.probe,
 		}
 
 		Expect(stage.limitToInternetFreeComponents(context.Background(), "tenant")).Should(Succeed())
 
 		Expect(probe.targets).Should(BeEmpty())
-		Expect(stage.Request.ComponentNames).Should(Equal(names))
+		Expect(stage.Request.ComponentNames).Should(Equal([]string{"custom"}))
 	})
 
 	It("should fail the stage when the probe itself fails", func() {
@@ -110,7 +162,7 @@ var _ = Describe("LiveStage component narrowing", func() {
 
 		err := stage.limitToInternetFreeComponents(context.Background(), "tenant")
 
-		Expect(err).Should(MatchError(ContainSubstring("probe registry.npmjs.org access for mathwizz-frontend: forbidden")))
+		Expect(err).Should(MatchError(ContainSubstring("probe proxy.golang.org access for mathwizz-web-server, mathwizz-history-worker: forbidden")))
 		Expect(stage.Request.ComponentNames).Should(HaveLen(3))
 	})
 })
@@ -120,7 +172,9 @@ var _ = Describe("LiveStage internet preflight", func() {
 		fixture := providers.FixtureRepository{Owner: "owner", Name: "repo", URL: "https://example.com/owner/repo"}
 		dynamic := namespaceDynamicClient(namespaceObject("tenant", "run-1"))
 		log := &bytes.Buffer{}
-		probe := &recordingEgressProbe{result: cluster.EgressResult{Detail: "connection timed out"}}
+		probe := &recordingEgressProbe{results: map[string]cluster.EgressResult{
+			npmTarget: {Detail: "connection timed out"},
+		}}
 		request := fullSelectionRequest()
 		request.Provider = config.ProviderGitHub
 		request.ApplicationName = "app"
@@ -144,18 +198,17 @@ var _ = Describe("LiveStage internet preflight", func() {
 		Expect(log.String()).Should(ContainSubstring("not built: mathwizz-frontend"))
 	})
 
-	It("should authorize the probe pod lifecycle only when a component needs internet", func() {
+	It("should authorize the probe pod lifecycle only when a component declares an endpoint", func() {
 		stage := &LiveStage{Request: fullSelectionRequest()}
 		checks := stage.accessChecks()
 
 		Expect(checks).Should(HaveLen(5))
 		Expect(checks[4].Name).Should(Equal("egress probe pods"))
 		Expect(checks[4].Namespace).Should(Equal("tenant"))
-		Expect(checks[4].Verbs).Should(Equal([]string{"create", "delete"}))
+		Expect(checks[4].Verbs).Should(Equal([]string{"create", "get", "delete"}))
 		Expect(checks[4].Guidance).Should(ContainSubstring("internet access"))
 
-		names, paths, tektonPaths := config.SmokeComponents()
-		offline := &LiveStage{Request: config.Request{ComponentNames: names, ComponentPaths: paths, TektonPaths: tektonPaths}}
+		offline := &LiveStage{Request: config.Request{ComponentNames: []string{"custom"}, ComponentPaths: []string{"Dockerfile"}, TektonPaths: []string{"pipeline.yaml"}}}
 		Expect(offline.accessChecks()).Should(HaveLen(4))
 	})
 })
