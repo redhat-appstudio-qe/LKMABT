@@ -282,8 +282,34 @@ var _ = Describe("Authenticate", func() {
 			Expect(failures).Should(HaveKey("unknown-cluster"))
 			Expect(failures["unknown-cluster"]).Should(MatchError(ContainSubstring("no readable kubeconfig")))
 			Expect(failures["unknown-cluster"]).Should(MatchError(ContainSubstring("no server")))
+			Expect(fake.runs).Should(BeEmpty())
+		})
+	})
+
+	When("a default-path entry names a cluster absent from the kflux catalog", func() {
+		It("should not pass the unknown name to kflux login", func() {
+			home := GinkgoT().TempDir()
+			known := defaultEntry("kflux-ocp-p01", home)
+			unknown := defaultEntry("kflux-fedora-01", home)
+			log := &bytes.Buffer{}
+			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
+			fake.onStdout = func(CommandSpec) (string, error) {
+				return `[{"name":"ocp-p01","host":"kflux-ocp-p01.7ayg.p1.openshiftapps.com"}]`, nil
+			}
+			fake.onRun = func(spec CommandSpec) error {
+				Expect(spec.Name).Should(Equal("/usr/local/bin/kflux"))
+				writeFile(known.Kubeconfig)
+				return nil
+			}
+			fake.onOutput = func(CommandSpec) (string, error) { return "mrath\n", nil }
+
+			_, failures := (Ladder{Runner: fake, Home: home, Log: log}).Authenticate(context.Background(), []clusterfile.Entry{known, unknown})
+
+			Expect(failures).Should(HaveKey("kflux-fedora-01"))
+			Expect(failures).NotTo(HaveKey("kflux-ocp-p01"))
 			Expect(fake.runs).Should(HaveLen(1))
-			Expect(fake.runs[0].Name).Should(Equal("/usr/local/bin/kflux"))
+			Expect(fake.runs[0].Args).Should(Equal([]string{"cluster", "login", "-c", "ocp-p01"}))
+			Expect(log.String()).Should(ContainSubstring("kflux-fedora-01: kflux catalog name fedora-01 is not in the catalog"))
 		})
 	})
 
@@ -408,7 +434,9 @@ var _ = Describe("Authenticate", func() {
 			valid := defaultEntry("kflux-ocp-p01", home)
 			unknown := defaultEntry("stone-unknown", home)
 			fake := &fakeRunner{lookPaths: map[string]string{"kflux": "/usr/local/bin/kflux"}}
-			fake.onStdout = func(CommandSpec) (string, error) { return `[]`, nil }
+			fake.onStdout = func(CommandSpec) (string, error) {
+				return `[{"name":"ocp-p01"},{"name":"stone-unknown"}]`, nil
+			}
 			fake.onRun = func(spec CommandSpec) error {
 				if len(spec.Args) > 4 {
 					return errors.New("unknown cluster stone-unknown")

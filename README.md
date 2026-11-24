@@ -296,8 +296,9 @@ through to kflux or `oc login`.
 For OpenShift (`ocp`) entries with default-path kubeconfigs that are missing or
 rejected, LKMABT resolves real host labels through `kflux cluster list` and
 refreshes those kubeconfigs; if `kflux` is missing, LKMABT clones and builds it
-into `~/.local/bin/kflux`. A batch login that hits one unknown catalog is
-retried per cluster so valid clusters still refresh. `oc login` runs only when
+into `~/.local/bin/kflux`. Catalog names absent from the kflux listing are
+excluded from the batch login, and a batch login that still fails is retried per
+cluster so valid clusters still refresh. `oc login` runs only when
 the entry has a server or a readable kubeconfig; a missing kubeconfig with no
 server fails with guidance instead of using the ambient kubeconfig's context.
 An interactive run whose OAuth login page offers a FAS identity provider uses

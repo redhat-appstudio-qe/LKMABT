@@ -171,7 +171,7 @@ func (l Ladder) authenticateLegacy(ctx context.Context, entries []clusterfile.En
 		}
 		break
 	}
-	unauthenticated = l.resolveCatalogs(ctx, unauthenticated, kfluxBinary)
+	unauthenticated, catalog := l.resolveCatalogs(ctx, unauthenticated, kfluxBinary)
 	for _, entry := range unauthenticated {
 		for index := range resolved {
 			if resolved[index].Name == entry.Name {
@@ -212,7 +212,7 @@ func (l Ladder) authenticateLegacy(ctx context.Context, entries []clusterfile.En
 	if len(unauthenticated) == 0 {
 		return resolved, failures
 	}
-	if targets := defaultPathEntries(unauthenticated, l.home()); len(targets) > 0 {
+	if targets := l.kfluxLoginTargets(defaultPathEntries(unauthenticated, l.home()), catalog); len(targets) > 0 {
 		l.runKfluxLogin(ctx, targets, kfluxBinary)
 	}
 	for _, entry := range unauthenticated {
@@ -263,10 +263,11 @@ type kfluxCatalogEntry struct {
 // Only default-path entries can be refreshed by kflux; explicit kubeconfig paths
 // keep their configured target though they still receive a Catalog override. Any
 // lookup failure is logged and leaves entries unchanged. An empty binary skips
-// resolution entirely.
-func (l Ladder) resolveCatalogs(ctx context.Context, entries []clusterfile.Entry, binary string) []clusterfile.Entry {
+// resolution entirely. The returned catalog names are nil when the listing is
+// unavailable, so callers can distinguish unknown names from an unfetched list.
+func (l Ladder) resolveCatalogs(ctx context.Context, entries []clusterfile.Entry, binary string) ([]clusterfile.Entry, map[string]struct{}) {
 	if binary == "" {
-		return entries
+		return entries, nil
 	}
 	home := l.home()
 	needsResolution := false
@@ -277,17 +278,17 @@ func (l Ladder) resolveCatalogs(ctx context.Context, entries []clusterfile.Entry
 		}
 	}
 	if !needsResolution {
-		return entries
+		return entries, nil
 	}
 	output, err := l.Runner.Stdout(ctx, CommandSpec{Name: binary, Args: []string{"cluster", "list", "--output", "json"}})
 	if err != nil {
 		l.logf("kflux cluster list failed while resolving catalog names: %v", err)
-		return entries
+		return entries, nil
 	}
 	var catalog []kfluxCatalogEntry
 	if err := json.Unmarshal([]byte(output), &catalog); err != nil {
 		l.logf("decode kflux cluster list: %v", err)
-		return entries
+		return entries, nil
 	}
 	byName := make(map[string]struct{}, len(catalog))
 	byHost := make(map[string][]string, len(catalog))
@@ -305,7 +306,7 @@ func (l Ladder) resolveCatalogs(ctx context.Context, entries []clusterfile.Entry
 	for _, entry := range entries {
 		resolved = append(resolved, l.resolveCatalogEntry(entry, home, byName, byHost))
 	}
-	return resolved
+	return resolved, byName
 }
 
 // resolveCatalogEntry returns entry with a Catalog override when its CatalogName
@@ -379,6 +380,24 @@ func defaultPathEntries(entries []clusterfile.Entry, home string) []clusterfile.
 		if entry.UsesDefaultKubeconfig(home) {
 			targets = append(targets, entry)
 		}
+	}
+	return targets
+}
+
+// kfluxLoginTargets drops names absent from the kflux listing, because one
+// unknown name aborts a batch login for every target. A nil catalog means the
+// listing was unavailable, so every target is kept.
+func (l Ladder) kfluxLoginTargets(entries []clusterfile.Entry, catalog map[string]struct{}) []clusterfile.Entry {
+	if catalog == nil {
+		return entries
+	}
+	targets := make([]clusterfile.Entry, 0, len(entries))
+	for _, entry := range entries {
+		if _, known := catalog[entry.CatalogName()]; !known {
+			l.logf("cluster %s: kflux catalog name %s is not in the catalog; skipping kflux login", entry.Name, entry.CatalogName())
+			continue
+		}
+		targets = append(targets, entry)
 	}
 	return targets
 }
