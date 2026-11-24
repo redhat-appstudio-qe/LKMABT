@@ -588,8 +588,8 @@ exercised, including any requested architecture it skipped. A cluster whose
 first attempt deferred uses the retry result and carries
 `first attempt deferred: <reason>` under its run-logs heading; the first
 attempt's run directory and `run.log` remain available as additional links.
-When the retry completes or fails normally, its namespace cleanup follows the
-normal prompt; a retry that also defers is cleaned up without one.
+When the retry completes or fails normally, its namespace joins the aggregate
+cleanup prompts; a retry that also defers is cleaned up without one.
 
 ### When the cluster GitHub App is not installed
 
@@ -660,16 +660,17 @@ logins.
   automatically and logged. Namespaces with absent or different ownership
   labels are prompted individually and re-inspected before deletion. Declining
   fails that cluster at `preflight`.
-- After success, LKMABT collects and verifies the run artifacts, then prompts
-  before deleting the current tenant namespace. Declining keeps the namespace
-  and the successful result. After failure, it saves the failure artifacts
-  first, then prompts; if collection is incomplete, it skips the prompt and
-  retains the namespace. Required snapshots retry transient network timeouts and
-  API 408/429/5xx responses twice with backoff before collection is declared
+- After success, LKMABT collects and verifies the run artifacts and records the
+  tenant namespace for cleanup; after the last cluster, it prompts once for each
+  recorded namespace. Declining keeps the namespace and the successful result.
+  After failure, it saves the failure artifacts first, then records the
+  namespace; if collection is incomplete, it skips the prompt and retains the
+  namespace. Required snapshots retry transient network timeouts and API
+  408/429/5xx responses twice with backoff before collection is declared
   incomplete; optional pod logs continue past individual container errors. A
-  run whose prompt cannot read input (for example, non-interactive stdin)
-  retains the namespace and records the reason in the console and `run.log`;
-  it never treats an unreadable prompt as a decline.
+  namespace whose prompt cannot read input (for example, non-interactive stdin)
+  is retained and the reason is recorded in the console and the aggregate
+  `run.log`; it never treats an unreadable prompt as a decline.
 - Deletion waits after approval, in finalization and `cleanup`, are bounded to
   five minutes and re-strip deadlock-prone finalizers that controllers re-add. A
   namespace that still cannot be deleted fails with its name and the namespace

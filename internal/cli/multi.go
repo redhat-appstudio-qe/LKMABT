@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -265,7 +266,15 @@ func RunClusters(ctx context.Context, request config.Request, runner Runner, con
 	if revokeEphemeralGitLab != nil {
 		cleanupErr = errors.Join(cleanupErr, revokeEphemeralGitLab())
 	}
-	return finishAggregateRun(aggregate, request, runs, console, cleanupErr)
+	// Namespace deletion prompts are collected per cluster and answered here,
+	// after the last cluster, so the operator is not interrupted mid-run.
+	var namespaceCleanupErr error
+	if finalizer, ok := runner.(interface {
+		FinalizeNamespaceDeletions(context.Context, io.Writer) error
+	}); ok {
+		namespaceCleanupErr = finalizer.FinalizeNamespaceDeletions(ctx, aggregate.Log)
+	}
+	return finishAggregateRun(aggregate, request, runs, console, cleanupErr, namespaceCleanupErr)
 }
 
 // validateInteractiveGitLabURL rejects the token-page prompt for API endpoints
@@ -384,6 +393,7 @@ func scheduleClusters(ctx context.Context, request config.Request, entries []clu
 		console.Printf("")
 		console.Printf("cluster %s", entry.Name)
 		runs[index].Results = runCluster(ctx, request, entry, aggregate.Directory, runner)
+		printProviderFailures(console, runs[index].Results)
 		if attemptDeferred(runs[index].Results) {
 			runs[index].FirstAttempt = runs[index].Results
 			deferred = append(deferred, index)
@@ -408,6 +418,7 @@ func scheduleClusters(ctx context.Context, request config.Request, entries []clu
 		}
 		retryNames := deferredProviderNames(runs[index].FirstAttempt)
 		results := runClusterProviders(ctx, request, entry, aggregate.Directory, runner, retryNames)
+		printProviderFailures(console, results)
 		if attemptDeferred(results) {
 			results = exhaustedDeferred(results, nil)
 		}
@@ -500,6 +511,17 @@ func exhaustedDeferred(results []ProviderResult, cause error) []ProviderResult {
 	return exhausted
 }
 
+// printProviderFailures names each failed provider's error so a cluster's
+// terminal summary carries the reason instead of only the report row.
+func printProviderFailures(console *Console, results []ProviderResult) {
+	for _, result := range results {
+		if result.Err == nil || result.Deferred {
+			continue
+		}
+		console.Printf("  %s: %v", result.Provider, result.Err)
+	}
+}
+
 // resultSummary renders "<passed> passed, <failed> failed" for one cluster's
 // provider results, counting a first-attempt deferral separately so it never
 // reads as a build failure.
@@ -525,9 +547,9 @@ func resultSummary(results []ProviderResult) string {
 }
 
 // finishAggregateRun writes the run-named Markdown and HTML reports, prints one
-// summary line per row, and joins cluster, credential-cleanup, and report-writing
-// failures. A non-nil cleanupErr adds a run warning to the report.
-func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []clusterRun, console *Console, cleanupErr error) error {
+// summary line per row, and joins cluster, credential-cleanup, namespace-cleanup,
+// and report-writing failures. Non-nil cleanup errors add run warnings to the report.
+func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []clusterRun, console *Console, cleanupErr, namespaceCleanupErr error) error {
 	rows := reportRows(aggregate.Directory, aggregate.runLogName(), runs, providerNames(request.Provider))
 	document := report.Document{
 		RunID:         aggregate.RunID,
@@ -541,6 +563,9 @@ func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []
 	}
 	if cleanupErr != nil {
 		document.Warnings = append(document.Warnings, "credential cleanup failed: "+cleanupErr.Error())
+	}
+	if namespaceCleanupErr != nil {
+		document.Warnings = append(document.Warnings, "tenant namespace cleanup failed: "+namespaceCleanupErr.Error())
 	}
 	if links := report.Links(aggregate.Directory, aggregate.runLogName(), "", ""); len(links) > 0 {
 		document.AggregateLog = links[0]
@@ -563,7 +588,7 @@ func finishAggregateRun(aggregate *aggregateRun, request config.Request, runs []
 	markdownPath, htmlPath := aggregate.reportPaths()
 	console.Printf("report: %s", markdownPath)
 	console.Printf("report: %s", htmlPath)
-	return errors.Join(aggregateError(runs), cleanupErr, writeErr)
+	return errors.Join(aggregateError(runs), cleanupErr, namespaceCleanupErr, writeErr)
 }
 
 // aggregateError joins every cluster and provider failure, preserving clusters-file order.

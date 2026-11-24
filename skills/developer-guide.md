@@ -128,7 +128,7 @@ PipelineRuns.
 
 **`internal/cleanup/`** — Namespace lifecycle management
 - Creates namespaces labeled with `app.konflux-ci.org/managed-by=lkmabt`
-- Prompts before deletion (retains the namespace on user decline, failure-artifact collection errors, or an unavailable prompt during finalization); `cleanup` fails with an explicit error when the prompt is unavailable
+- Prompts before deletion (retains the namespace on user decline, failure-artifact collection errors, or an unavailable prompt during finalization); an aggregate run records each run-owned namespace and asks once after the last cluster, and `cleanup` fails with an explicit error when the prompt is unavailable
 - Strips finalizers from known deadlock-prone resources before namespace deletion and re-strips them while waiting for deletion
 
 **`skills/`** — Deep-dive reference files for agents.
@@ -162,7 +162,7 @@ definitions via import when the same GVR is needed across packages.
 3. **Triggered** — Set each fixture PipelineRun's `build-platforms` parameter to the selected architectures, append trigger comments to Dockerfiles, commit changes. Configuration commits use the `lkmabt configure [skip ci]` subject so PaC creates no throwaway PipelineRun for them
 4. **Builds Verified** — Wait for each component's Buildah TaskRuns to succeed (timeout configurable); capture each component's build-output evidence on the poll that observes its build success, while its PipelineRun and TaskRuns still exist. The PipelineRun's post-build tasks are not a completion gate
 5. **Build Outputs Verified** — Confirm the captured evidence provides one successful output per selected architecture, fetching only components that were not captured
-6. **Completed** — Prompt for namespace cleanup
+6. **Completed** — Record namespace ownership for the aggregate cleanup prompt
 
 On failure, transition to **Failed** phase and collect artifacts. Clusters run
 sequentially in clusters-file order; each completes or fails before the next
