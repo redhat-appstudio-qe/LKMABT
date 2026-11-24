@@ -420,6 +420,48 @@ var _ = Describe("FixtureService", func() {
 		Expect(namespace.GetLabels()).Should(SatisfyAll(HaveKeyWithValue("app.konflux-ci.org/managed-by", "lkmabt"), HaveKeyWithValue("app.konflux.org/run-id", "run-1"), HaveKeyWithValue("konflux-ci.dev/type", "tenant"), HaveKeyWithValue("cost-center", "670")))
 	})
 
+	When("only the namespace is ensured before a preflight probe", func() {
+		It("should create and label the namespace without creating fixture resources", func() {
+			client := fixtureTestClient()
+
+			err := fixtureTestService(client).EnsureNamespace(context.Background(), "tenant", "run-1")
+
+			Expect(err).ShouldNot(HaveOccurred())
+			namespace, err := client.Resource(NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(namespace.GetLabels()).Should(HaveKeyWithValue("app.konflux.org/run-id", "run-1"))
+			_, err = client.Resource(ApplicationGVR).Namespace("tenant").Get(context.Background(), "app", metav1.GetOptions{})
+			Expect(apierrors.IsNotFound(err)).Should(BeTrue())
+			_, err = client.Resource(ComponentGVR).Namespace("tenant").Get(context.Background(), "one", metav1.GetOptions{})
+			Expect(apierrors.IsNotFound(err)).Should(BeTrue())
+		})
+
+		It("should adopt an existing namespace without relabeling it", func() {
+			existing := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": "v1", "kind": "Namespace",
+				"metadata": map[string]any{"name": "tenant", "labels": map[string]any{"app.konflux.org/run-id": "run-earlier"}},
+			}}
+			client := fixtureTestClient(existing)
+
+			Expect(fixtureTestService(client).EnsureNamespace(context.Background(), "tenant", "run-1")).Should(Succeed())
+
+			namespace, err := client.Resource(NamespaceGVR).Get(context.Background(), "tenant", metav1.GetOptions{})
+			Expect(err).ShouldNot(HaveOccurred())
+			Expect(namespace.GetLabels()).Should(HaveKeyWithValue("app.konflux.org/run-id", "run-earlier"))
+		})
+
+		DescribeTable("rejects an incomplete call",
+			func(service FixtureService, namespace, runID, want string) {
+				err := service.EnsureNamespace(context.Background(), namespace, runID)
+
+				Expect(err).Should(MatchError(ContainSubstring(want)))
+			},
+			Entry("no dynamic client", FixtureService{}, "tenant", "run-1", "dynamic client is required"),
+			Entry("no namespace", fixtureTestService(fixtureTestClient()), "", "run-1", "namespace and run ID are required"),
+			Entry("no run ID", fixtureTestService(fixtureTestClient()), "tenant", "", "namespace and run ID are required"),
+		)
+	})
+
 	When("the expected component count is invalid", func() {
 		It("should reject a zero count before creating anything", func() {
 			client := fixtureTestClient()

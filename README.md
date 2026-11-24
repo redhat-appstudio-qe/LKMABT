@@ -24,7 +24,9 @@ A cluster that declares none of the selected platforms, or that declares an
 incomplete or unschedulable platform, fails at preflight, before LKMABT touches
 the fixture. A platform the cluster does not declare is informational: LKMABT
 continues on that cluster with the platforms its live `host-config` supports. A
-broken build fails later and leaves its receipt in `.lkmabt-runs/`.
+component whose build needs a public registry the cluster cannot reach is
+dropped before it is created, with an alert saying why. A broken build fails
+later and leaves its receipt in `.lkmabt-runs/`.
 
 ## Contents
 
@@ -105,9 +107,14 @@ glab api projects/konflux-qe%2Fdr_test_mathwizz_gl --jq '[.permissions.project_a
 through an OpenShift `ProjectRequest`, cluster-scoped `update` on `namespaces`
 to label it for cleanup, and permission to delete it during cleanup. Inside
 the namespace the run needs access to `pipelineruns`, `taskruns`,
-`applications`, and `components`. GitLab runs also need `get`, `create`, and
-`update` on Secrets there, plus `delete` when the run acquires its own GitLab
-token. If you administer an existing namespace, grant the Secret access with:
+`applications`, and `components`. When the selection includes a component that
+downloads from a public registry, the run also needs `create`, `get`, and
+`delete` on `pods` there: LKMABT runs one short-lived probe pod per distinct
+build dependency to test the cluster's internet egress before it creates those
+components. GitLab runs also need `get`,
+`create`, and `update` on Secrets there, plus `delete` when the run acquires its
+own GitLab token. If you administer an existing namespace, grant the Secret and
+pod access with:
 
 ```bash
 oc adm policy add-role-to-user edit <user> -n <tenant-namespace>
@@ -155,6 +162,22 @@ at preflight, before triggering up to three components that cannot build.
   - GitHub App onboarding is a separate preflight check. A cluster that cannot
     install the fixture's GitHub App still fails preflight even when its
     architecture support is sufficient.
+- The cluster can reach the public endpoints its selected components' builds
+  download from. The backends run `apk add` and `go mod download`
+  (`proxy.golang.org`, `dl-cdn.alpinelinux.org`); the frontend runs `npm ci`
+  (`registry.npmjs.org`). Before the fixture creates any component, LKMABT
+  probes each distinct endpoint once from a pod in the tenant namespace on the
+  tenant workload nodes (`konflux-ci.dev/workload=konflux-tenants`), the same
+  nodes that run builds. An unreachable endpoint drops every selected component
+  that needs it, and the run prints an alert naming the components it will not
+  build, the reasons, and the components it will (`not built:` / `reason:` /
+  `testing:`). When no selected component can build, the cluster fails fixture
+  setup with those reasons instead of running an empty fixture. Only the probe
+  script's own failure exit code proves an unreachable endpoint; a probe that
+  cannot report a result (missing pod permission, an unschedulable pod, an
+  image that cannot be pulled, an evicted or OOM-killed pod) fails the stage
+  with the API error instead of guessing. The probe image is the frontend's, so
+  its availability says nothing about a backend endpoint.
 - PaC onboarding is complete for the selected components, with current `.tekton`
   configuration on the fixture branch. Each push PipelineRun must declare a
   `build-platforms` parameter; LKMABT rewrites it and fails when it is absent.
@@ -421,7 +444,7 @@ Run-only flags:
 | `--tenant-namespace` | `mathwizz-test-github` or `mathwizz-test-gitlab` | Single-provider runs select the namespace; `both` fixes it per provider and rejects any other value. |
 | `--application` | `mathwizz` | Application name created or reused in the tenant namespace. |
 | `--branch` | `main` | Fixture branch for configuration and trigger commits. |
-| `--smoke` | off | Build only `mathwizz-history-worker`; a normal run builds all three fixture components. Rejected by `cleanup`. |
+| `--smoke` | off | Build only `mathwizz-history-worker`; a normal run builds all three fixture components, less any component a preflight probe drops (a private cluster drops `mathwizz-frontend`). Rejected by `cleanup`. |
 | `--preflight-timeout` | `10m` | Bounds preflight and fixture setup. |
 | `--trigger-timeout` | `5m` | Bounds only the wait for a triggered PipelineRun to appear. |
 | `--build-timeout` | `60m` | Bounds each of triggering, the build wait, and build-output verification. |
@@ -485,7 +508,9 @@ The fixtures are shared; the configuration and Dockerfile commits are visible
 to other users. Your trigger commit is a postcard to everyone else at the
 fixture; assuming nobody will notice takes a certain *chutzpah*. One selection
 applies to every component the run builds—no per-component architecture
-exceptions, because that way lies *mishigas*.
+exceptions, because that way lies *mishigas*. Preflight may drop a component a
+cluster cannot build, but it never narrows the architecture set for one
+component only.
 
 ---
 ## LKMABT under the hood
