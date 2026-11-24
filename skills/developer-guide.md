@@ -39,18 +39,19 @@ Full branch, verification, and PR rules: `skills/pr-workflow.md`.
 
 ## What the Tool Does
 
-LKMABT validates that the multi-platform-controller builds the selected
-architectures on ROKS Konflux clusters. The default selection is every Linux
-platform: `linux/amd64`, `linux/arm64`, `linux/s390x`, and `linux/ppc64le`.
+LKMABT validates that Konflux clusters build the selected architectures. The
+default selection is every Linux platform: `linux/amd64`, `linux/arm64`,
+`linux/s390x`, and `linux/ppc64le`.
 
 1. Triggers builds against fixed test repositories (GitHub and GitLab)
-2. Waits for successful PipelineRuns
+2. Waits for each component's Buildah TaskRuns to succeed
 3. Verifies pre-publication build outputs for every architecture each cluster runs
 4. Collects runtime evidence and artifacts
 
 The harness never creates, forks, or deletes repositories. It reuses fixed
 fixtures, sets their PipelineRun `build-platforms` parameter to the selection,
-and appends harmless comments to trigger PipelineRuns.
+and appends harmless comments to the fixture Dockerfiles to trigger
+PipelineRuns.
 
 ## Package Organization
 
@@ -99,8 +100,8 @@ and appends harmless comments to trigger PipelineRuns.
 - `EgressProbe` (`egress.go`) runs one short-lived pod in the tenant namespace and reports whether it reached an external URL; component profiles declare their build's public endpoints (`EgressTargets`), so every selected component whose endpoint is unreachable is dropped before `EnsureFixture` creates it, and `LiveStage.limitToInternetFreeComponents` prints the component selection alert. Only the probe script's failure exit code counts as unreachable; eviction, OOM, deadline termination, an unschedulable pod, and an unpullable probe image are unknown-outcome errors, not drops
 - `FixtureService.EnsureNamespace` creates or adopts the tenant namespace without fixture resources, so the egress probes can run before any component exists
 - `AdmissionInspector.QuotaMessage` reads the Kueue `QuotaReserved=False` condition for the Workload owned by a pending PipelineRun
-- GitHub preflight reads the cluster's app slug from `konflux-info/konflux-public-info` and confirms that app is installed for the fixture organization; interactive runs open the installation page and wait until the installation appears
-- Build output verification confirms node evidence (Buildah outputs) match expected architectures
+- GitHub preflight reads the cluster's app slug from `info.json` in the `konflux-info/konflux-public-info` ConfigMap and confirms that the app is installed for the fixture organization; interactive runs open the installation page and wait until the installation appears
+- Build output verification confirms that node evidence (Buildah outputs) matches the expected architectures
 
 **`internal/providers/`** — Git forge abstraction
 - `Provider` interface abstracts GitHub and GitLab operations
@@ -373,12 +374,13 @@ GitLab concurrently inside a cluster.
 
 ### Fixed Fixtures Pattern
 The tool uses **persistent fixtures** rather than creating/deleting test resources on every run:
-- One persistent tenant namespace per provider (GitHub, GitLab); `both`
-  starts both providers concurrently inside the cluster with distinct run IDs
-  and artifact directories; clusters themselves run sequentially
+- One fixed tenant namespace name per provider (GitHub, GitLab), created or
+  reused per run; `both` starts both providers concurrently inside the cluster
+  with distinct run IDs and artifact directories; clusters themselves run
+  sequentially
 - One Application with three Components (`mathwizz-web-server`, `mathwizz-history-worker`, `mathwizz-frontend`); `--smoke` narrows one run to `mathwizz-history-worker` only
 - `cluster.FixtureSpec.ExpectedComponents` is required and must be positive; `EnsureFixture` rejects a count mismatch or a duplicate component name before creating a namespace, Application, or Component, and `workflow.LiveStage.EnsureFixture` passes `config.Request.ExpectedComponents()` (1 for `--smoke`, 3 otherwise)
-- Persistent provider forks (never deleted by the tool)
+- Persistent fixture repositories (never deleted by the tool)
 
 **Rationale**: avoids PaC onboarding delays, reduces flakiness from resource
 creation/deletion races, enables faster iteration during development.
@@ -415,7 +417,7 @@ and the collection report records how many were missed.
 Each run writes into `.lkmabt-runs/latest/`; the next invocation renames it to
 its permanent timestamped directory:
 
-```
+```text
 .lkmabt-runs/
 ├── latest/                                          # Current aggregate run (real directory)
 │   ├── .aggregate.json                              # Run ID and start time used for rotation
@@ -466,9 +468,9 @@ If verification fails, check that:
 3. The fixture PipelineRun `build-platforms` parameter and `build-images` matrix use the selected platforms
 
 ### Provider API Rate Limits
-GitHub and GitLab providers include retry logic with exponential backoff for 5xx
-responses (`internal/providers/retry.go`). API rate limit (429) responses are not
-automatically retried.
+GitHub and GitLab providers retry 5xx responses with a fixed delay
+(`internal/providers/retry.go`: three retries, three minutes apart). API rate
+limit (429) responses are not automatically retried.
 
 ### Phase Transition Validation
 All phase transitions are validated via `model.ValidateTransition()`. Attempting

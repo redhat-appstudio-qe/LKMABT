@@ -15,16 +15,17 @@ cluster in the clusters file it:
    `linux/arm64`, `linux/s390x`, and `linux/ppc64le`.
 
 The harness never copies, creates, forks, renames, or deletes repositories, and
-it does not query registries, archives, pruning, backup services, or unrelated
-resources. No dashboard, no telemetry, no *narishkeit*: the evidence lands in
-`.lkmabt-runs/`.
+it does not inspect image registries, archives, pruning, backup services, or
+unrelated resources; it only probes the public endpoints a selected build
+downloads from. No dashboard, no telemetry, no *narishkeit*: the evidence lands
+in `.lkmabt-runs/`.
 
 It is a smoke test with a clipboard: trigger, wait, verify, file the evidence.
 A cluster that declares none of the selected platforms, or that declares an
 incomplete or unschedulable platform, fails at preflight, before LKMABT touches
 the fixture. A platform the cluster does not declare is informational: LKMABT
 continues on that cluster with the platforms its live `host-config` supports. A
-component whose build needs a public registry the cluster cannot reach is
+component whose build needs a public endpoint the cluster cannot reach is
 dropped before it is created, with an alert saying why. A broken build fails
 later and leaves its receipt in `.lkmabt-runs/`.
 
@@ -47,7 +48,7 @@ later and leaves its receipt in `.lkmabt-runs/`.
 - [Running LKMABT](#running-lkmabt)
   - [Selecting architectures](#selecting-architectures)
   - [LKMABT under the hood](#lkmabt-under-the-hood)
-  - [Admission deferral](#admission-deferral)
+    - [Admission deferral](#admission-deferral)
   - [When the cluster GitHub App is not installed](#when-the-cluster-github-app-is-not-installed)
   - [During the run](#during-the-run)
 - [Cleaning up a namespace](#cleaning-up-a-namespace)
@@ -90,8 +91,9 @@ Installing the cluster's Konflux GitHub App requires an owner of the
 installation. The App must also be published by the cluster and installed for
 the organization; see [Cluster requirements](#cluster-requirements).
 
-Push access and organization ownership are different doors. LKMABT needs both,
-and no amount of re-running will merge them.
+Push access and organization ownership are different doors: trigger commits
+need the first, and the installation flow needs an owner for the second. No
+amount of re-running will merge them.
 
 **GitLab.** Your account needs at least Maintainer (access level 40) on
 [konflux-qe/dr_test_mathwizz_gl](https://gitlab.com/konflux-qe/dr_test_mathwizz_gl);
@@ -108,9 +110,9 @@ through an OpenShift `ProjectRequest`, cluster-scoped `update` on `namespaces`
 to label it for cleanup, and permission to delete it during cleanup. Inside
 the namespace the run needs access to `pipelineruns`, `taskruns`,
 `applications`, and `components`. When the selection includes a component that
-downloads from a public registry, the run also needs `create`, `get`, and
+downloads from a public endpoint, the run also needs `create`, `get`, and
 `delete` on `pods` there: LKMABT runs one short-lived probe pod per distinct
-build dependency to test the cluster's internet egress before it creates those
+endpoint to test the cluster's internet egress before it creates those
 components. GitLab runs also need `get`,
 `create`, and `update` on Secrets there, plus `delete` when the run acquires its
 own GitLab token. If you administer an existing namespace, grant the Secret and
@@ -120,9 +122,10 @@ pod access with:
 oc adm policy add-role-to-user edit <user> -n <tenant-namespace>
 ```
 
-Use the namespace the run will use: `mathwizz-test-gitlab` by default, or the
-value passed to `--tenant-namespace`. That binding is namespace-scoped; it does
-not grant the cluster-scoped create and delete permissions above.
+Use the namespace the run will use: `mathwizz-test-github` or
+`mathwizz-test-gitlab` by default, or the value passed to
+`--tenant-namespace`. That binding is namespace-scoped; it does not grant the
+cluster-scoped create and delete permissions above.
 
 RBAC is a hierarchy, not a suggestion: a namespace-scoped `edit` binding will
 not lend you cluster-scoped powers.
@@ -176,15 +179,16 @@ at preflight, before triggering up to three components that cannot build.
   script's own failure exit code proves an unreachable endpoint; a probe that
   cannot report a result (missing pod permission, an unschedulable pod, an
   image that cannot be pulled, an evicted or OOM-killed pod) fails the stage
-  with the API error instead of guessing. The probe image is the frontend's, so
-  its availability says nothing about a backend endpoint.
+  with the underlying error instead of guessing. The probe runs the frontend's
+  Node base image, so a pull failure says nothing about a backend endpoint.
 - PaC onboarding is complete for the selected components, with current `.tekton`
   configuration on the fixture branch. Each push PipelineRun must declare a
   `build-platforms` parameter; LKMABT rewrites it and fails when it is absent.
   LKMABT waits for PaC readiness and does not merge onboarding changes.
-- GitHub clusters publish the Konflux GitHub App URL in
-  `konflux-info/konflux-public-info` (`integrations.github.application_url`),
-  and that app is installed for `redhat-appstudio-qe`. See
+- GitHub clusters publish the Konflux GitHub App URL in the `info.json` entry
+  `integrations.github.application_url` of the
+  `konflux-info/konflux-public-info` ConfigMap, and that app is installed for
+  `redhat-appstudio-qe`. See
   [When the cluster GitHub App is not installed](#when-the-cluster-github-app-is-not-installed).
 
 ### Network access
@@ -255,9 +259,9 @@ A cluster's entry can also have the following fields:
 
 Two entries cannot share a name or resolve to the same kubeconfig path, and a
 non-ROKS entry cannot set `ibmcloud` fields. A `name` must match
-`[A-Za-z0-9._-]+`. The file must list at least one cluster under `clusters`, and
-unknown fields are rejected. The parser is strict on purpose: a typo in a field
-name is an error, not a silent default.
+`[A-Za-z0-9._-]+` and must not be `.` or `..`. The file must list at least one
+cluster under `clusters`, and unknown fields are rejected. The parser is strict
+on purpose: a typo in a field name is an error, not a silent default.
 
 The kflux catalog name comes from `name`: a leading `kflux-` is removed. When a
 default-path kubeconfig needs refresh and that name is not itself a catalog
@@ -384,7 +388,7 @@ the token to the default endpoint.
 | `GITLAB_BOT_TOKEN` | Personal access token with `api` and `write_repository`. Leave empty for the token-page prompt on `gitlab.com`. LKMABT never revokes it. |
 | `GITLAB_API_URL` | Defaults to `https://gitlab.com/api/v4`. |
 
-**`GITHUB_TOKEN`** In a terminal, LKMABT checks before the first cluster that
+**`GITHUB_TOKEN`.** In a terminal, LKMABT checks before the first cluster that
 the token can list App installations for `redhat-appstudio-qe`, push to the
 fixture, and list repositories for selected-repository App installations. A
 token GitHub rejects is replaced by an existing `gh` login when that login
@@ -396,7 +400,7 @@ lists installation repositories for Apps installed for selected repositories;
 when the token cannot list them, preflight logs a warning and continues, and
 the trigger-stage PaC wait remains the backstop.
 
-**`GITLAB_BOT_TOKEN`** The token is used as-is and is never revoked. PaC
+**`GITLAB_BOT_TOKEN`.** The token is used as-is and is never revoked. PaC
 reuses an existing usable GitLab SCM Secret (labeled
 `appstudio.redhat.com/credentials=scm` and
 `appstudio.redhat.com/scm.host=gitlab.com`, and annotated for the fixture
@@ -444,7 +448,7 @@ Run-only flags:
 | `--tenant-namespace` | `mathwizz-test-github` or `mathwizz-test-gitlab` | Single-provider runs select the namespace; `both` fixes it per provider and rejects any other value. |
 | `--application` | `mathwizz` | Application name created or reused in the tenant namespace. |
 | `--branch` | `main` | Fixture branch for configuration and trigger commits. |
-| `--smoke` | off | Build only `mathwizz-history-worker`; a normal run builds all three fixture components, less any component a preflight probe drops (a private cluster drops `mathwizz-frontend`). Rejected by `cleanup`. |
+| `--smoke` | off | Build only `mathwizz-history-worker`; a normal run builds all three fixture components, less any component the egress probe drops. Rejected by `cleanup`. |
 | `--preflight-timeout` | `10m` | Bounds preflight and fixture setup. |
 | `--trigger-timeout` | `5m` | Bounds only the wait for a triggered PipelineRun to appear. |
 | `--build-timeout` | `60m` | Bounds each of triggering, the build wait, and build-output verification. |
@@ -501,19 +505,18 @@ LKMABT applies the selection to every component:
    incomplete or unschedulable platform fails preflight, and a cluster that
    declares none of the selection fails preflight outright. Build verification
    requires one successful Buildah output per platform the cluster runs. The
-   final result line lists the requested architectures; the per-cluster alert
-   and the row's `tested:` note name the subset that cluster actually builds.
+   console result line lists the architectures the cluster exercised; the
+   per-cluster alert names any requested architecture the cluster skipped.
 
 The fixtures are shared; the configuration and Dockerfile commits are visible
 to other users. Your trigger commit is a postcard to everyone else at the
 fixture; assuming nobody will notice takes a certain *chutzpah*. One selection
 applies to every component the run builds—no per-component architecture
-exceptions, because that way lies *mishigas*. Preflight may drop a component a
-cluster cannot build, but it never narrows the architecture set for one
-component only.
+exceptions, because that way lies *mishigas*. A cluster may skip an
+architecture or the egress probe may drop a component it cannot build, but the
+architecture set is never narrowed for one component only.
 
----
-## LKMABT under the hood
+### LKMABT under the hood
 
 - Clusters run one at a time in clusters-file order—no parallel heroics. Each
   cluster finishes or fails before the next one starts. `both` runs the two
@@ -542,14 +545,15 @@ component only.
   and never overwritten.
 - The console prints a `cluster <name>` heading per cluster,
   `cluster <name>: finished (<n> passed, <n> failed)`, one result line per
-  provider and cluster with the requested architectures and a `tested:` note
-  when preflight narrowed them, and the report paths. A notice names any
-  per-cluster architecture subset. A cluster that fails authentication prints
+  provider and cluster with the architectures it exercised (`architectures:
+  ...`) and a `first attempt deferred:` note after a deferred retry, and the
+  report paths. A notice names any per-cluster architecture subset. A cluster
+  that fails authentication prints
   ` ✗ Authenticate cluster <name> 🔐` and the reason.
 - Reports and evidence are stored by default under `.lkmabt-runs/`; see
   [Run logs and artifact retention](#run-logs-and-artifact-retention).
 
-### Admission deferral
+#### Admission deferral
 
 Kueue or another admission controller can hold a triggered PipelineRun before
 it starts. LKMABT treats that as a scheduler deferral, not a failure, when all
@@ -561,8 +565,8 @@ While the wait continues, the once-per-minute build heartbeat names
 `PipelineRunPending`, the PipelineRun age, and the Kueue quota message from the
 Workload's `QuotaReserved=False` condition when one is available. When the
 threshold passes, the active step ends with a pause marker,
-` ⏸ <action> - deferred`, with the reason appended in parentheses when one is
-available, instead of a success or failure marker.
+` ⏸ <action> - deferred (admission pending)` instead of a success or failure
+marker. Ten minutes is the line between a busy scheduler and a wedged one.
 The deferral is recorded in the run manifest, not as a failure, and the last
 completed phase is kept.
 
@@ -587,11 +591,12 @@ normal prompt; a retry that also defers is cleaned up without one.
 
 ### When the cluster GitHub App is not installed
 
-GitHub preflight reads the App slug from `konflux-info/konflux-public-info` and
-checks that the App is installed for `redhat-appstudio-qe`. This happens
-before the run touches the tenant namespace or commits a trigger. A cluster can
-publish an App and still not have it installed; those are two different facts,
-and only the second one starts builds.
+GitHub preflight reads the App slug from `info.json` in the
+`konflux-info/konflux-public-info` ConfigMap and checks that the App is
+installed for `redhat-appstudio-qe`. This happens before the run touches the
+tenant namespace or commits a trigger. A cluster can publish an App and still
+not have it installed; those are two different facts, and only the second one
+starts builds.
 
 **Interactive run.** LKMABT reports
 `GitHub App <slug> is not installed for organization redhat-appstudio-qe.` and
@@ -685,9 +690,10 @@ selection. This applies to configured tokens and browser logins.
 - Two LKMABT processes cannot share one tenant namespace on the same API server.
   Each run and `cleanup` hold a non-blocking per-user file lock keyed by API
   server and namespace; a contended run fails before creating artifacts and
-  names the current holder. On a single-provider run, use another
-  `--tenant-namespace`; otherwise wait for that run. The lock has the patience
-  of my nephew Doron from Israel: none, but it tells you exactly why.
+  names the current holder. The lock is per user and host, so it cannot
+  arbitrate between machines or different users. On a single-provider run, use
+  another `--tenant-namespace`; otherwise wait for that run. The lock has the
+  patience of my nephew Doron from Israel: none, but it tells you exactly why.
 
 ---
 ## Cleaning up a namespace
