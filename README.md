@@ -140,8 +140,9 @@ Provider credentials are described in
 
 ### Cluster requirements
 
-These are not suggestions. The run checks platforms, access, and the GitHub App
-at preflight, before triggering up to three components that cannot build.
+These are not suggestions. Preflight checks platforms and access, plus the
+GitHub App on GitHub runs, before triggering up to three components that cannot
+build.
 
 - The `multi-platform-controller` deployment is ready in namespace
   `multi-platform-controller`, and its `host-config` ConfigMap carries the

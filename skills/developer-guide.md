@@ -468,9 +468,10 @@ If verification fails, check that:
 3. The fixture PipelineRun `build-platforms` parameter and `build-images` matrix use the selected platforms
 
 ### Provider API Rate Limits
-GitHub and GitLab providers retry 5xx responses with a fixed delay
-(`internal/providers/retry.go`: three retries, three minutes apart). API rate
-limit (429) responses are not automatically retried.
+GitHub and GitLab fixture reads retry 5xx responses with a fixed delay
+(`internal/providers/retry.go`: three retries, three minutes apart). The GitHub
+App installation check does not retry 5xx responses. API rate limit (429)
+responses are not automatically retried.
 
 ### Phase Transition Validation
 All phase transitions are validated via `model.ValidateTransition()`. Attempting
