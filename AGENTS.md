@@ -6,6 +6,40 @@ verifies the selected architectures' pre-publication build outputs (all four of
 `linux/amd64`, `linux/arm64`, `linux/s390x`, and `linux/ppc64le` by default),
 and collects runtime evidence.
 
+## Paused Work — KFLUXINFRA-5265
+
+Status: paused by management on 2026-11-25. The smoke-test fix branch
+`fix/smoke-test-fixes` was merged as PR #30 (`d08bef0` on `main`); this branch
+keeps the paused WIP and this handoff.
+
+Completed before the pause: unknown kflux catalog names are skipped before the
+batch login; the expected `gho_` GitHub App limitation is silent while unexpected
+unverifiable checks warn; namespace deletion prompts are queued until after the
+last cluster, with the tenant lock held until each prompt is answered; egress
+probe pod authorization runs in preflight after stale namespaces are replaced and
+the tenant namespace is created; Qodo review findings were addressed.
+
+Next work:
+
+- Reinstall with `./scripts/install.sh`, then rerun
+  `lkmabt github arm64, s390x --smoke` against the 13-cluster
+  `.lkmabt-clusters.yaml`. The post-fix live run was never performed.
+- Verify the egress probe can create its pod after a `ProjectRequest` grants
+  project admin. If `create pods` is still denied, grant `create`, `get`, and
+  `delete` on pods in the tenant namespace, or use a namespace the requester
+  creates.
+- Remove or map `kflux-fedora-01` and `stone-stg-p01` in the clusters file;
+  neither name exists in the kflux catalog.
+- `internal/report/markdown.go` carries a paused formatting WIP (bold header
+  labels). `internal/report` tests still expect the old labels and must be
+  updated before this WIP is merged.
+- An unrelated env-file WIP left by an accidental session is preserved in the
+  local stash `other-session envfile WIP (not part of LKMABT smoke fixes)`. Do
+  not mix it into this branch.
+
+Ticket: `KFLUXINFRA-5265`. Its epic is restricted; do not link the ticket in PR
+descriptions or comments.
+
 ## Quick Commands
 
 | Action | Command |

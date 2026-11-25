@@ -12,18 +12,18 @@ import (
 // outcomes, architectures, and every artifact link.
 func RenderMarkdown(document Document) string {
 	builder := &strings.Builder{}
-	fmt.Fprintf(builder, "# LKMABT aggregate run %s\n\n", document.RunID)
-	fmt.Fprintf(builder, "- Started: %s\n", document.StartedAtText())
-	fmt.Fprintf(builder, "- Ended: %s\n", document.EndedAtText())
-	fmt.Fprintf(builder, "- Clusters file: `%s`\n", document.ClustersFile)
-	fmt.Fprintf(builder, "- Requested architectures: %s\n", document.ArchitecturesText())
-	fmt.Fprintf(builder, "- Mode: %s\n", document.Mode)
-	fmt.Fprintf(builder, "- Fixtures: %s\n", document.Fixtures)
+	fmt.Fprintf(builder, "# LKMABT aggregate %s\n\n", document.RunID)
+	fmt.Fprintf(builder, "- **Started:** %s\n", document.StartedAtText())
+	fmt.Fprintf(builder, "- **Ended:** %s\n", document.EndedAtText())
+	fmt.Fprintf(builder, "- **Clusters file:** `%s`\n", document.ClustersFile)
+	fmt.Fprintf(builder, "- **Requested architectures:** %s\n", document.ArchitecturesText())
+	fmt.Fprintf(builder, "- **Mode:** %s\n", document.Mode)
+	fmt.Fprintf(builder, "- **Fixtures:** %s\n", document.Fixtures)
 	if document.AggregateLog.Target != "" {
-		fmt.Fprintf(builder, "- Run log: [%s](<%s>)\n", linkLabel(document.AggregateLog.Label), document.AggregateLog.Target)
+		fmt.Fprintf(builder, "- **Run log:** [%s](<%s>)\n", linkLabel(document.AggregateLog.Label), document.AggregateLog.Target)
 	}
 	for _, warning := range document.Warnings {
-		fmt.Fprintf(builder, "- Warning: %s\n", cell(warning))
+		fmt.Fprintf(builder, "- **Warning:** %s\n", cell(warning))
 	}
 	clusters := document.Clusters()
 	builder.WriteString("\n## Run results\n\n")
